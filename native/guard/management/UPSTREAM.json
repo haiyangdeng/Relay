@@ -1,0 +1,8 @@
+{
+  "sourceURL": "https://docs-assets.developer.apple.com/published/7e1ab6d332e9/FilteringNetworkTraffic.zip",
+  "documentationURL": "https://developer.apple.com/documentation/networkextension/filtering-network-traffic",
+  "archiveSHA256": "73bdbda7edfc6ecc74e39cfbf4a44833c40096884f688683252fc6160c1514e9",
+  "archiveBytes": 110798,
+  "downloadDate": "2026-11-06",
+  "adoptedScope": "Actual persistent activation-request/delegate sequence and NEFilterManager load/save calls adapted from SimpleFirewall/ViewController.swift. Relay adds fixed publisher/own-configuration gates, native one-operation confirmation, separate activation and configuration states, fresh readback, and default replacement cancellation. No sample auto-enable, automatic replacement, network-flow logging or unknown-prompt allow behavior is adopted."
+}

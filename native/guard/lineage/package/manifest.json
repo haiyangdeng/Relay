@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "hostBundleID": "local.relay.network.preview",
+  "extensionBundleID": "local.relay.network.preview.guard.lineage",
+  "bundleName": "local.relay.network.preview.guard.lineage.systemextension",
+  "executable": "RelayGuardLineageExtension",
+  "moduleName": "RelayGuardLineageExtension",
+  "machServiceSuffix": "local.relay.network.preview.guard.lineage.ipc",
+  "applicationGroupSuffix": "local.relay.network.preview.guard",
+  "minimumMacOS": "13.0",
+  "shortVersion": "2.0.0",
+  "buildVersion": "3",
+  "contractRevision": "relay-guard-lineage-v3",
+  "catalogRevision": "claude-codex-terminal-cli-roots-v4",
+  "policyRevision": "relay-guard-policy-20261109-v3",
+  "publisherTeamID": null,
+  "resourceSHA256": {
+    "arm64": null,
+    "x86_64": null
+  },
+  "runtimeMonitoringReady": false,
+  "systemInstallationSupported": false,
+  "globalCoverageReady": false
+}

@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "hostBundleID": "local.relay.network.preview",
+  "extensionBundleID": "local.relay.network.preview.guard",
+  "bundleName": "local.relay.network.preview.guard.systemextension",
+  "executable": "RelayGuardExtension",
+  "moduleName": "RelayGuardExtension",
+  "providerClass": "RelayGuardExtension.RelayGuardFilterDataProvider",
+  "machServiceSuffix": "local.relay.network.preview.guard.ipc",
+  "minimumMacOS": "13.0",
+  "shortVersion": "2.0.0",
+  "buildVersion": "3",
+  "publisherTeamID": null,
+  "runtimeProtectionReady": false,
+  "systemInstallationSupported": false
+}

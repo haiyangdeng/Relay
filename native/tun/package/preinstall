@@ -1,0 +1,163 @@
+#!/bin/sh
+set -eu
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export PATH
+
+stage=execution-context
+fail() { echo "Relay network-executor candidate refused [$stage]: expected original absence or protected parent was not verified." >&2; exit 1; }
+[ "$(/usr/bin/id -u)" = 0 ] || fail
+[ "${2:-invalid}" = / ] || fail
+[ "${3:-invalid}" = / ] || fail
+
+# These shared directories must already exist. This package never owns their
+# lifecycle, repairs permissions, or removes them during candidate cleanup.
+stage=shared-parents
+for parent in / /Library '/Library/Application Support' /Library/PrivilegedHelperTools /Library/LaunchDaemons; do
+    [ -d "$parent" ] && [ ! -L "$parent" ] || fail
+    observed=$(/usr/bin/stat -f '%u:%g:%p:%HT' "$parent") || fail
+    case "$parent" in
+        /) expected='@VOLUME_ROOT_METADATA@' ;;
+        /Library) expected='@LIBRARY_METADATA@' ;;
+        '/Library/Application Support') expected='@APPLICATION_SUPPORT_METADATA@' ;;
+        /Library/PrivilegedHelperTools) expected='@PRIVILEGED_HELPERS_METADATA@' ;;
+        /Library/LaunchDaemons) expected='@LAUNCH_DAEMONS_METADATA@' ;;
+        *) fail ;;
+    esac
+    [ "$observed" = "$expected" ] || fail
+done
+stage=original-absence
+for scratch in /Library/PrivilegedHelperTools/.local.relay.network.tun.network-executor-v1-publish-*; do
+    if [ -e "$scratch" ] || [ -L "$scratch" ]; then fail; fi
+done
+
+for target in '/Library/Application Support/Relay' \
+    /Library/PrivilegedHelperTools/local.relay.network.tun \
+    /Library/PrivilegedHelperTools/local.relay.network.tun.uninstall \
+    /Library/PrivilegedHelperTools/local.relay.network.tun.uninstall-intent.json \
+    /Library/PrivilegedHelperTools/local.relay.network.tun.operation-lock \
+    /Library/PrivilegedHelperTools/local.relay.network.tun.uninstall-active \
+    /Library/LaunchDaemons/local.relay.network.tun.plist; do
+    if [ -e "$target" ] || [ -L "$target" ]; then fail; fi
+done
+
+# receipt-gate-begin: require a successful inventory before testing exact absence.
+stage=receipt-query
+receipt_inventory=$(/usr/sbin/pkgutil --pkgs) || fail
+stage=receipt-absence
+while IFS= read -r receipt; do
+    [ "$receipt" != 'local.relay.network.tun.network-executor-v1' ] || fail
+    [ "$receipt" != 'local.relay.network.tun.feasibility' ] || fail
+done <<EOF
+$receipt_inventory
+EOF
+# receipt-gate-end
+stage=service-absence
+if /bin/launchctl print system/local.relay.network.tun >/dev/null 2>&1; then
+    fail
+else
+    status=$?
+    [ "$status" = 113 ] || fail
+fi
+
+# Recovery is deliberately outside the payload. A partial payload write or
+# Installer rollback cannot overwrite the only uninstaller or its full pin plan.
+stage=recovery-resources
+script_directory=$(CDPATH= cd -P "$(/usr/bin/dirname "$0")" && /bin/pwd -P) || fail
+case "$(/usr/bin/stat -f '%u:%p:%HT' "$script_directory")" in
+    0:40700:Directory|0:40750:Directory|0:40755:Directory) ;;
+    *) fail ;;
+esac
+recovery_source="$script_directory/RecoveryUninstaller"
+intent_source="$script_directory/RecoveryIntent.json"
+[ ! -L "$recovery_source" ] && [ ! -L "$intent_source" ] || fail
+[ "$(/usr/bin/stat -f '%u:%p:%l:%HT' "$recovery_source")" = '0:100755:1:Regular File' ] || fail
+[ "$(/usr/bin/stat -f '%u:%p:%l:%HT' "$intent_source")" = '0:100644:1:Regular File' ] || fail
+recovery_sha='@RECOVERY_UNINSTALLER_SHA256@'
+intent_sha='@RECOVERY_INTENT_SHA256@'
+digest() { /usr/bin/shasum -a 256 "$1" | /usr/bin/awk '{print $1}'; }
+[ "$(digest "$recovery_source")" = "$recovery_sha" ] || fail
+[ "$(digest "$intent_source")" = "$intent_sha" ] || fail
+/usr/bin/codesign --verify --strict --all-architectures "$recovery_source" || fail
+
+temporary=''
+temporary_identity=''
+published_recovery_identity=''
+published_recovery=0
+published_intent=0
+ready=0
+cleanup() {
+    result=$?
+    trap - EXIT
+    if [ -n "$temporary" ]; then
+        known_links=0
+        links=$(/usr/bin/stat -f '%l' "$temporary" 2>/dev/null || true)
+        if [ "$links" = 1 ]; then known_links=1; fi
+        if [ "$links" = 2 ] && [ "$(/usr/bin/stat -f '%d:%i:%u:%HT' "${destination:-invalid}" 2>/dev/null || true)" = "$temporary_identity" ]; then known_links=1; fi
+        if [ "$known_links" = 1 ] && [ ! -L "$temporary" ] && [ "$(/usr/bin/stat -f '%d:%i:%u:%HT' "$temporary" 2>/dev/null || true)" = "$temporary_identity" ]; then
+            /bin/rm "$temporary" || result=1
+        else
+            result=1
+        fi
+    fi
+    if [ "$ready" != 1 ] && [ "$published_recovery" = 1 ] && [ "$published_intent" = 0 ]; then
+        pristine=1
+        for other in '/Library/Application Support/Relay' \
+            /Library/PrivilegedHelperTools/local.relay.network.tun \
+            /Library/PrivilegedHelperTools/local.relay.network.tun.uninstall-intent.json \
+    /Library/PrivilegedHelperTools/local.relay.network.tun.operation-lock \
+    /Library/PrivilegedHelperTools/local.relay.network.tun.uninstall-active \
+            /Library/LaunchDaemons/local.relay.network.tun.plist; do
+            if [ -e "$other" ] || [ -L "$other" ]; then pristine=0; fi
+        done
+        recovery_target=/Library/PrivilegedHelperTools/local.relay.network.tun.uninstall
+        if [ "$pristine" = 1 ] && [ ! -L "$recovery_target" ] && \
+            [ "$(/usr/bin/stat -f '%d:%i:%u:%HT' "$recovery_target" 2>/dev/null || true)" = "$published_recovery_identity" ] && \
+            [ "$(/usr/bin/stat -f '%u:%p:%l:%HT' "$recovery_target" 2>/dev/null || true)" = '0:100755:1:Regular File' ] && \
+            [ "$(digest "$recovery_target")" = "$recovery_sha" ]; then
+            /bin/rm "$recovery_target" || result=1
+        else
+            result=1
+        fi
+    fi
+    exit "$result"
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+
+publish() {
+    source=$1
+    permissions=$2
+    expected_sha=$3
+    destination=$4
+    temporary=$(/usr/bin/mktemp /Library/PrivilegedHelperTools/.local.relay.network.tun.network-executor-v1-publish-XXXXXX) || fail
+    temporary_identity=$(/usr/bin/stat -f '%d:%i:%u:%HT' "$temporary") || fail
+    [ ! -L "$temporary" ] && [ "$(/usr/bin/stat -f '%u:%p:%l:%HT' "$temporary")" = '0:100600:1:Regular File' ] || fail
+    /bin/cat "$source" > "$temporary" || fail
+    /usr/sbin/chown 0:0 "$temporary" || fail
+    /bin/chmod "$permissions" "$temporary" || fail
+    [ "$(/usr/bin/stat -f '%d:%i:%u:%HT' "$temporary")" = "$temporary_identity" ] || fail
+    [ "$(digest "$source")" = "$expected_sha" ] && [ "$(digest "$temporary")" = "$expected_sha" ] || fail
+    [ "$(/usr/bin/stat -f '%u:%p:%l:%HT' "$temporary")" = "0:100${permissions}:1:Regular File" ] || fail
+    # link(1) performs exactly link(2). Unlike ln(1), an existing directory is
+    # never interpreted as a destination folder and nothing is overwritten.
+    /bin/link "$temporary" "$destination" || fail
+    case "$destination" in
+        /Library/PrivilegedHelperTools/local.relay.network.tun.uninstall) published_recovery=1; published_recovery_identity=$temporary_identity ;;
+        /Library/PrivilegedHelperTools/local.relay.network.tun.uninstall-intent.json) published_intent=1 ;;
+        *) fail ;;
+    esac
+    [ "$(/usr/bin/stat -f '%d:%i:%u:%HT' "$destination")" = "$temporary_identity" ] || fail
+    [ "$(/usr/bin/stat -f '%u:%p:%l:%HT' "$destination")" = "0:100${permissions}:2:Regular File" ] || fail
+    /bin/rm "$temporary" || fail
+    temporary=''
+    temporary_identity=''
+    [ "$(digest "$destination")" = "$expected_sha" ] || fail
+    [ "$(/usr/bin/stat -f '%u:%p:%l:%HT' "$destination")" = "0:100${permissions}:1:Regular File" ] || fail
+}
+stage=recovery-publish
+publish "$recovery_source" 755 "$recovery_sha" /Library/PrivilegedHelperTools/local.relay.network.tun.uninstall
+publish "$intent_source" 600 "$intent_sha" /Library/PrivilegedHelperTools/local.relay.network.tun.uninstall-intent.json
+stage=recovery-verify
+/Library/PrivilegedHelperTools/local.relay.network.tun.uninstall --verify-recovery '@ORIGINAL_MANIFEST_SHA256@'
+ready=1
+exit 0

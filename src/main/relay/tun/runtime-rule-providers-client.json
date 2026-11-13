@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "capability": "runtime-rule-providers-v1",
+  "clientSHA256": "184b4d64cfe85009082dcfc638b6a3211aae6c7e895cc5352b20636eed2ddf28",
+  "cores": {
+    "arm64": "e9327b2ce0e5c4405ce2640145339be9e315943bdeb63ffee4b3f4fe18bee419",
+    "x64": "1d110d7f958abd22ec011ac466f7451bf22101f8b6338a26a3e9fedcbd62ae26"
+  }
+}

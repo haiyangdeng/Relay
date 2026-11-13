@@ -1,0 +1,43 @@
+# Dependencies and generated outputs
+node_modules/
+/node_modules
+extra/
+resources/files/
+resources/sidecar/
+out/
+dist/
+release*/
+.relay-build/
+*.tsbuildinfo
+__pycache__/
+*.pyc
+.DS_Store
+.idea/
+.vscode/
+# Local state, private evidence and credentials
+.env
+.env.*
+!.env.example
+*.log
+*.log.*
+*.key
+*.p12
+*.pfx
+*.mobileprovision
+*.provisionprofile
+*.pkg
+*.dmg
+*.zip
+*.tar.gz
+/private/
+/audit/
+/evidence/
+/profiles/
+/subscriptions/
+/recovery/
+/credentials/
+# Local assistant/session instructions
+AGENTS.md
+CLAUDE.md
+.codex/
+.claude/

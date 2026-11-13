@@ -1,0 +1,95 @@
+{
+  "schemaVersion": 1,
+  "minimumMacOS": "13.0",
+  "cores": [
+    {
+      "family": "alpha",
+      "version": "alpha-ca8d7c4",
+      "releaseURL": "https://github.com/MetaCubeX/mihomo/releases/tag/Prerelease-Alpha",
+      "releaseId": 169820418,
+      "assets": {
+        "arm64": {
+          "asset": "mihomo-darwin-arm64-alpha-ca8d7c4.gz",
+          "assetId": 684819255,
+          "url": "https://github.com/MetaCubeX/mihomo/releases/download/Prerelease-Alpha/mihomo-darwin-arm64-alpha-ca8d7c4.gz",
+          "archiveBytes": 20793739,
+          "archiveSHA256": "57441d97ae2f93bc457c16f5d3c56c6f197b5627dfb986d8634d6043a690d720",
+          "path": "darwin-arm64/mihomo",
+          "sha256": "0ea7c8e7d6f3ab26537a49e6d98570279152df604f2ff4c083dd8615a358c3b6",
+          "size": 56843474,
+          "cpuType": 16777228
+        },
+        "x64": {
+          "asset": "mihomo-darwin-amd64-compatible-alpha-ca8d7c4.gz",
+          "assetId": 684819342,
+          "url": "https://github.com/MetaCubeX/mihomo/releases/download/Prerelease-Alpha/mihomo-darwin-amd64-compatible-alpha-ca8d7c4.gz",
+          "archiveBytes": 22341583,
+          "archiveSHA256": "7f16eefaf1604a893108bdafa8cc5a37dc330530f3bc55ca780c16baf5f521b9",
+          "path": "darwin-x64/mihomo",
+          "sha256": "2249c77fa07e2dae31c4852714f2e10293d11d99927edd002d57359648c68cc6",
+          "size": 60970960,
+          "cpuType": 16777223
+        }
+      }
+    },
+    {
+      "family": "smart",
+      "version": "alpha-smart-4624551",
+      "releaseURL": "https://github.com/vernesong/mihomo/releases/tag/Prerelease-Alpha",
+      "releaseId": 221108274,
+      "assets": {
+        "arm64": {
+          "asset": "mihomo-darwin-arm64-alpha-smart-4624551.gz",
+          "assetId": 663602148,
+          "url": "https://github.com/vernesong/mihomo/releases/download/Prerelease-Alpha/mihomo-darwin-arm64-alpha-smart-4624551.gz",
+          "archiveBytes": 21153224,
+          "archiveSHA256": "f8dc10168f0117d438bd13bf7cb4f35ea6ba9932d8aa30cf99f455c9ddd416d4",
+          "path": "darwin-arm64/mihomo",
+          "sha256": "138c416dddf53af64a8cd01508c2e93c338e18c6cc04b0e480932bc819eda061",
+          "size": 57972626,
+          "cpuType": 16777228
+        },
+        "x64": {
+          "asset": "mihomo-darwin-amd64-compatible-alpha-smart-4624551.gz",
+          "assetId": 663602163,
+          "url": "https://github.com/vernesong/mihomo/releases/download/Prerelease-Alpha/mihomo-darwin-amd64-compatible-alpha-smart-4624551.gz",
+          "archiveBytes": 22737563,
+          "archiveSHA256": "fffb179eec433de0adc21d7d61b8c899a6f8c3125fcd7bfacb7ee705cdfb36f2",
+          "path": "darwin-x64/mihomo",
+          "sha256": "935572a8117acb3ab95d7c4235d07b475b8fdb19c1904413c0bb05131d007132",
+          "size": 62169184,
+          "cpuType": 16777223
+        }
+      }
+    }
+  ],
+  "models": [
+    {
+      "version": "LightGBM-Model-530723858",
+      "asset": "Model.bin",
+      "assetId": 530723858,
+      "url": "https://github.com/vernesong/mihomo/releases/download/LightGBM-Model/Model.bin",
+      "releaseURL": "https://github.com/vernesong/mihomo/releases/tag/LightGBM-Model",
+      "sha256": "23633022a815fb34e510befe1c176ba50af3ced48f08b172454f4cd6b8327788",
+      "size": 9345218
+    },
+    {
+      "version": "LightGBM-Model-530724342",
+      "asset": "Model-middle.bin",
+      "assetId": 530724342,
+      "url": "https://github.com/vernesong/mihomo/releases/download/LightGBM-Model/Model-middle.bin",
+      "releaseURL": "https://github.com/vernesong/mihomo/releases/tag/LightGBM-Model",
+      "sha256": "6a17dffbb29862135c9e3706eabf60488862f578ef9edf60a5d325529873cfaa",
+      "size": 18357364
+    },
+    {
+      "version": "LightGBM-Model-530723977",
+      "asset": "Model-large.bin",
+      "assetId": 530723977,
+      "url": "https://github.com/vernesong/mihomo/releases/download/LightGBM-Model/Model-large.bin",
+      "releaseURL": "https://github.com/vernesong/mihomo/releases/tag/LightGBM-Model",
+      "sha256": "832920df1290454710dd04aa4c7d4b5324edfd7816a7c9ad2272708b5d5a13a8",
+      "size": 26787747
+    }
+  ]
+}

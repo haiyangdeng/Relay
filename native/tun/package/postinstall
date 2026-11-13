@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export PATH
+[ "$(/usr/bin/id -u)" = 0 ] && [ "${2:-invalid}" = / ] && [ "${3:-invalid}" = / ] || exit 1
+
+# Fixed root-owned binary validates every code pin, both inert core resources,
+# manifest, exact daemon role, and protected path before any job registration.
+# Registration exposes the executor for authenticated explicit requests only.
+# It does not create a TUN or change proxy/DNS/routes by itself.
+/Library/PrivilegedHelperTools/local.relay.network.tun --verify-installation
+/bin/launchctl bootstrap system /Library/LaunchDaemons/local.relay.network.tun.plist
+exit 0

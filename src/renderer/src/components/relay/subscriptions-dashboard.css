@@ -1,0 +1,90 @@
+.relay-subscriptions-dashboard .relay-subscription-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+.relay-subscriptions-dashboard .relay-subscription-toolbar label {
+  margin: 0;
+  gap: 6px;
+  font-weight: 400;
+}
+.relay-subscriptions-dashboard .relay-subscription-name {
+  flex: 0 1 138px;
+}
+.relay-subscriptions-dashboard .relay-subscription-url {
+  flex: 1 1 220px;
+}
+.relay-subscriptions-dashboard .relay-subscription-port {
+  flex-direction: row;
+  align-items: center;
+  white-space: nowrap;
+}
+.relay-subscriptions-dashboard .relay-subscription-port input {
+  width: 80px;
+}
+.relay-subscription-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 12px;
+}
+.relay-subscription-card {
+  position: relative;
+  border: 1px solid hsl(var(--heroui-divider));
+  border-radius: 14px;
+}
+.relay-subscription-card[data-selected='true'] {
+  border-color: hsl(var(--heroui-primary));
+  background-color: hsl(var(--heroui-primary) / 0.1);
+}
+.relay-subscription-card .relay-subscription-activate {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  border: 0;
+  border-radius: inherit;
+  background: transparent;
+  cursor: pointer;
+}
+.relay-subscription-card .relay-subscription-activate:disabled {
+  cursor: default;
+}
+.relay-workspace .relay-subscription-card .relay-subscription-activate:focus-visible {
+  outline-offset: -3px;
+}
+.relay-subscription-card button:not(.relay-subscription-activate) {
+  position: relative;
+  z-index: 2;
+}
+.relay-workspace .relay-subscription-card small {
+  font-size: 12px;
+  letter-spacing: normal;
+  margin-bottom: 0;
+  color: inherit;
+}
+.relay-subscription-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  background: hsl(var(--heroui-content1));
+  border-radius: 10px;
+  font-size: 12px;
+}
+.relay-local-profiles {
+  margin-top: 20px;
+}
+.relay-local-profiles > summary {
+  margin-bottom: 12px;
+}
+.relay-subscription-empty {
+  padding: 48px 16px;
+  text-align: center;
+}
+@media (max-width: 850px) {
+  .relay-subscription-grid {
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  }
+}

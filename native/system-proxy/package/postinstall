@@ -1,0 +1,51 @@
+[ "${2:-invalid}" = / ] && [ "${3:-invalid}" = / ] || fail 'only the running system volume is supported'
+parents
+directory "$root"
+plan="$pending"; plan_mode=600; validate_plan
+pinned "$uninstaller" 755 '@UNINSTALLER_SHA256@'
+regular "$root/.install-uid" 600
+console_uid
+[ "$console" = "$bound_uid" ] && [ "$(/bin/cat "$root/.install-uid")" = "$bound_uid" ] || fail 'console user changed during installation'
+scripts=$(CDPATH= cd -P "$(/usr/bin/dirname "$0")" && /bin/pwd -P) || fail 'package scripts unavailable'
+directory "$scripts"
+ready=0
+cleanup() {
+    result=$?
+    trap - EXIT
+    if [ "$ready" != 1 ]; then
+        # The pinned recovery path removes only this package's known files.
+        # It does not touch proxy settings, routes, DNS, apps or cores.
+        "$uninstaller" || result=1
+    fi
+    exit "$result"
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+publish() {
+    source=$1; destination=$2; permissions=$3; expected=$4; staging=$5
+    absent "$destination"
+    absent "$staging"
+    pinned "$source" "$permissions" "$expected"
+    /bin/cat "$source" > "$staging"
+    [ "$(digest "$staging")" = "$expected" ] || fail 'incomplete staged file'
+    /bin/chmod "$permissions" "$staging"
+    # link(1) never replaces a destination, including an existing directory.
+    /bin/link "$staging" "$destination"
+    /bin/rm "$staging"
+    pinned "$destination" "$permissions" "$expected"
+}
+service_absent
+publish "$scripts/RelaySystemProxyClient" "$client" 755 '@CLIENT_SHA256@' "$root/.install-client"
+publish "$scripts/RelaySystemProxyHelper" "$helper" 755 '@HELPER_SHA256@' "$root/.install-helper"
+publish "$scripts/$service.plist" "$daemon" 644 '@DAEMON_SHA256@' "$root/.install-daemon"
+absent "$manifest"
+/bin/cat "$pending" > "$root/.install-manifest"
+/bin/chmod 644 "$root/.install-manifest"
+/bin/link "$root/.install-manifest" "$manifest"
+/bin/rm "$root/.install-manifest"
+"$helper" --verify-installation
+/bin/launchctl bootstrap system "$daemon"
+# No app, core or network operation is started by installation.
+/bin/rm "$root/.install-uid" "$pending"
+ready=1
+echo 'Relay system proxy administrator component installed for the current console user. Network settings are unchanged.'

@@ -1,0 +1,126 @@
+--- a/component/resource/fetcher.go
++++ b/component/resource/fetcher.go
+@@ -2,6 +2,7 @@
+ 
+ import (
+ 	"context"
++	"crypto/sha256"
+ 	"io"
+ 	"io/fs"
+ 	"os"
+@@ -21,20 +22,23 @@
+ type BundleFile func() (fs.File, error)
+ 
+ type Fetcher[V any] struct {
+-	ctx          context.Context
+-	ctxCancel    context.CancelFunc
+-	resourceType string
+-	name         string
+-	vehicle      P.Vehicle
+-	bundleFile   BundleFile
+-	updatedAt    time.Time
+-	hash         utils.HashType
+-	parser       Parser[V]
+-	interval     time.Duration
+-	onUpdate     func(V)
+-	watcher      *fswatch.Watcher
+-	loadBufMutex sync.Mutex
+-	backoff      slowdown.Backoff
++	ctx           context.Context
++	ctxCancel     context.CancelFunc
++	resourceType  string
++	name          string
++	vehicle       P.Vehicle
++	bundleFile    BundleFile
++	updatedAt     time.Time
++	hash          utils.HashType
++	parser        Parser[V]
++	interval      time.Duration
++	onUpdate      func(V)
++	watcher       *fswatch.Watcher
++	loadBufMutex  sync.Mutex
++	updateMutex   sync.Mutex
++	fileSHA256    [sha256.Size]byte
++	fileSHA256Set bool
++	backoff       slowdown.Backoff
+ }
+ 
+ func (f *Fetcher[V]) Name() string {
+@@ -54,6 +58,10 @@
+ }
+ 
+ func (f *Fetcher[V]) Initial() (V, error) {
++	if f.vehicle.Type() == P.File {
++		f.updateMutex.Lock()
++		defer f.updateMutex.Unlock()
++	}
+ 	if stat, fErr := os.Stat(f.vehicle.Path()); fErr == nil {
+ 		// local file exists, use it first
+ 		buf, err := os.ReadFile(f.vehicle.Path())
+@@ -98,7 +106,7 @@
+ 	}
+ 
+ 	// parse local file error, fallback to remote
+-	contents, _, updateErr := f.Update()
++	contents, _, updateErr := f.update()
+ 
+ 	// start the pull loop even if f.Update() failed
+ 	err := f.startPullLoop(false)
+@@ -114,6 +122,17 @@
+ }
+ 
+ func (f *Fetcher[V]) Update() (V, bool, error) {
++	if f.vehicle.Type() == P.File {
++		f.updateMutex.Lock()
++		defer f.updateMutex.Unlock()
++	}
++	return f.update()
++}
++
++// File reads and strategy publication share one outer lock. Otherwise a
++// watcher holding old bytes can replay them after a newer Update returns.
++// Initial uses this helper while already holding that lock on its fallback.
++func (f *Fetcher[V]) update() (V, bool, error) {
+ 	buf, hash, err := f.vehicle.Read(f.ctx, f.hash)
+ 	if err != nil {
+ 		f.backoff.AddAttempt() // add a failed attempt to backoff
+@@ -123,6 +142,10 @@
+ }
+ 
+ func (f *Fetcher[V]) SideUpdate(buf []byte) (V, bool, error) {
++	if f.vehicle.Type() == P.File {
++		f.updateMutex.Lock()
++		defer f.updateMutex.Unlock()
++	}
+ 	return f.loadBuf(buf, utils.MakeHash(buf), true)
+ }
+ 
+@@ -131,7 +154,16 @@
+ 	defer f.loadBufMutex.Unlock()
+ 
+ 	now := time.Now()
+-	if f.hash.Equal(hash) {
++	same := f.hash.Equal(hash)
++	var fileSHA [sha256.Size]byte
++	fileBytes := f.vehicle.Type() == P.File && buf != nil
++	if fileBytes {
++		// Native binds file contents with SHA256. A legacy MD5 equality is
++		// insufficient to skip parsing different admitted local bytes.
++		fileSHA = sha256.Sum256(buf)
++		same = f.fileSHA256Set && f.fileSHA256 == fileSHA
++	}
++	if same {
+ 		if updateFile {
+ 			_ = os.Chtimes(f.vehicle.Path(), now, now)
+ 		}
+@@ -158,6 +190,10 @@
+ 	}
+ 	f.updatedAt = now
+ 	f.hash = hash
++	if fileBytes {
++		f.fileSHA256 = fileSHA
++		f.fileSHA256Set = true
++	}
+ 
+ 	if f.onUpdate != nil {
+ 		f.onUpdate(contents)

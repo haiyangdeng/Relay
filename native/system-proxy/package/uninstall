@@ -1,0 +1,72 @@
+[ "$#" = 0 ] || fail 'the uninstaller accepts no arguments or paths'
+parents
+directory "$root"
+recovering=0
+if present "$pending"; then plan="$pending"; plan_mode=600; recovering=1; else plan="$manifest"; plan_mode=644; fi
+validate_plan
+[ "$(digest "$0")" = "$(value uninstallerSHA256)" ] || fail 'uninstaller does not match the administrator-owned installation plan'
+if present "$uninstaller"; then pinned "$uninstaller" 755 "$(value uninstallerSHA256)"; fi
+# Unknown files block removal. No recursive delete, arbitrary command, supplied
+# path, TUN namespace or other app's service is accepted.
+for file in "$root"/* "$root"/.[!.]* "$root"/..?*; do
+    if ! present "$file"; then continue; fi
+    case "$file" in
+        "$client"|"$manifest"|"$uninstaller") ;;
+        "$pending"|"$root/.install-uid"|"$root/.install-client"|"$root/.install-helper"|"$root/.install-daemon"|"$root/.install-manifest") [ "$recovering" = 1 ] || fail 'unexpected incomplete-installation content';;
+        *) fail 'unknown installation content; nothing removed';;
+    esac
+done
+for name in client helper daemon; do
+    case "$name" in
+        client) file="$client"; permissions=755; expected='@CLIENT_SHA256@';;
+        helper) file="$helper"; permissions=755; expected='@HELPER_SHA256@';;
+        daemon) file="$daemon"; permissions=644; expected='@DAEMON_SHA256@';;
+    esac
+    if present "$file"; then
+        # A process interrupted between link and unlink may retain the paired
+        # staging hard link. Remove only that exact inode and recheck nlink=1.
+        staging="$root/.install-$name"
+        if [ "$recovering" = 1 ] && present "$staging" && [ ! -L "$file" ] && [ ! -L "$staging" ] && [ "$(/usr/bin/stat -f '%d:%i' "$file")" = "$(/usr/bin/stat -f '%d:%i' "$staging")" ] && [ "$(/usr/bin/stat -f '%u:%Lp:%l' "$file")" = "0:$permissions:2" ] && [ "$(digest "$file")" = "$expected" ]; then /bin/rm "$staging"; fi
+        pinned "$file" "$permissions" "$expected"
+    elif [ "$recovering" != 1 ]; then fail 'complete installation is missing a file'; fi
+done
+if [ "$recovering" != 1 ]; then
+    "$helper" --verify-installation
+else
+    # Interrupted staging files are confined to our reserved root-owned
+    # directory. Published files above must still match the exact package.
+    for name in client helper daemon manifest; do
+        staging="$root/.install-$name"
+        if present "$staging"; then
+            [ -f "$staging" ] && [ ! -L "$staging" ] && [ "$(/usr/bin/stat -f '%u:%l' "$staging")" = '0:1' ] || fail 'unsafe interrupted staging file'
+        fi
+    done
+    if present "$root/.install-uid"; then regular "$root/.install-uid" 600; [ "$(/bin/cat "$root/.install-uid")" = "$bound_uid" ] || fail 'installation user marker mismatch'; fi
+    if present "$manifest"; then
+        if present "$root/.install-manifest" && [ "$(/usr/bin/stat -f '%d:%i' "$manifest")" = "$(/usr/bin/stat -f '%d:%i' "$root/.install-manifest")" ] && [ "$(/usr/bin/stat -f '%u:%Lp:%l' "$manifest")" = '0:644:2' ]; then /bin/rm "$root/.install-manifest"; fi
+        regular "$manifest" 644
+        [ "$(digest "$manifest")" = "$(digest "$pending")" ] || fail 'installation manifests differ'
+    fi
+fi
+if /bin/launchctl print "system/$service" >/dev/null 2>&1; then
+    pinned "$daemon" 644 '@DAEMON_SHA256@'
+    /bin/launchctl bootout "system/$service"
+else result=$?; [ "$result" = 113 ] || fail 'service inventory unavailable'; fi
+service_absent
+if [ "$recovering" != 1 ]; then
+    # Keep a root-protected recovery plan until the final removal, so an
+    # interrupted complete uninstall can resume after its helper is gone.
+    absent "$pending"
+    /usr/bin/install -m 600 "$manifest" "$pending"
+fi
+inventory=$(/usr/sbin/pkgutil --pkgs) || fail 'package receipt query failed; recovery files retained'
+while IFS= read -r installed; do if [ "$installed" = "$receipt" ]; then /usr/sbin/pkgutil --forget "$receipt" >/dev/null; fi; done <<EOF
+$inventory
+EOF
+for file in "$helper" "$daemon" "$client" "$manifest" "$root/.install-client" "$root/.install-helper" "$root/.install-daemon" "$root/.install-manifest" "$root/.install-uid"; do
+    if present "$file"; then /bin/rm "$file"; fi
+done
+if present "$uninstaller"; then /bin/rm "$uninstaller"; fi
+if present "$pending"; then /bin/rm "$pending"; fi
+/bin/rmdir "$root"
+echo 'Only the Relay system proxy administrator component was removed. Current proxy settings, DNS, routes, apps and cores were preserved. Use Relay to restore its previous proxy settings if needed.'

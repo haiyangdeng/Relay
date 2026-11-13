@@ -1,0 +1,105 @@
+{
+  "version": 1,
+  "extension": "local-geodata-v1",
+  "status": "development-existing-kind-local-replace",
+  "upstream": {
+    "repository": "https://github.com/MetaCubeX/mihomo",
+    "commit": "3f27ef39f8c96bbfbc8b0b9bb10f5c9ef60149d8",
+    "archiveSHA256": "ecda5f8c8a8a1d60bc088c2640c85d92c8f002c0686234a26bdf671735afe216",
+    "license": "GPL-3.0",
+    "sourceInventorySHA256": "b6151e273b14ac1b54a1c2443b7e2c27785727bbd08a210b02166210e83650ba"
+  },
+  "SDK": {
+    "version": "go1.26.10",
+    "officialDarwinARM64SHA256": "0b5183492292ada170f9b561a834863808dd02edba599e4ad0e89899330020b3"
+  },
+  "modulePins": {
+    "go.mod": "444c571a66165f4cc86143314e6791d06528513b7b0f546e656155310c172964",
+    "go.sum": "05418c19815978fa837f17749909a66a6834c4087ceb7d13901f29a9ee11dbce"
+  },
+  "explicitControlledEnvironment": "RELAY_LOCAL_GEODATA_V1=1",
+  "buildTag": "relay_local_geodata",
+  "CoreVersion": "relay-geodata-v1-3f27",
+  "endpoint": {
+    "method": "POST",
+    "path": "/relay/geodata/v1",
+    "transport": "actual Unix listener only; normal controller authentication"
+  },
+  "kinds": ["geoip-dat", "geosite-dat", "country-mmdb", "asn-mmdb"],
+  "limits": {
+    "singleBytes": 134217728,
+    "GeoSubsetBytes": 268435456,
+    "NativeTotalRuntimeAssetsBytes": 268435456,
+    "requestJSONBytes": 4096,
+    "selectorUTF8Bytes": 256,
+    "defaultLeaseMS": 30000,
+    "minLeaseMS": 1000,
+    "maxLeaseMS": 120000,
+    "maximumSequence": 9007199254740991
+  },
+  "overlays": {
+    "component/geodata/init.go": {
+      "sha256": "623b5cdba48c94478ec916861985e412345ab1eefb491114b5ff24ea24e0915a",
+      "upstreamSHA256": "5ffbc2cf6240b76f62f740beb6c205772a2d57007473934d9884b6e6089c94e0"
+    },
+    "component/geodata/memconservative/cache.go": {
+      "sha256": "63848238c795a8153a1549d15ea144930c6b04d1327cce5b8906aaedc8441e20",
+      "upstreamSHA256": "ee3904018020548447e7b37cb120964c7598dfcf172466f3145cf97cef666d2a"
+    },
+    "component/geodata/memconservative/decode.go": {
+      "sha256": "edeef4b9bde0295ea85aa959b4aa4d5b59678fd195bdf465b122b0d8ec1640d0",
+      "upstreamSHA256": "abc4eb6b4ca658af728edd14d1f19e9ad6d823173d827f16534c7f05d1b8e874"
+    },
+    "component/geodata/relay_controlled.go": {
+      "sha256": "24c06ca06aa242ba04bb819a533d042afa25a4947161d4ad10df544372038e04",
+      "upstreamSHA256": null
+    },
+    "component/geodata/standard/standard.go": {
+      "sha256": "1e0cabd88292e83e9acdcc29064e7ec1e695da93823dc847d67df9414982ba32",
+      "upstreamSHA256": "89cf5c754c7566bbec24850939deac9f993e4380b8b1b1008b7fc2e57f3da831"
+    },
+    "component/mmdb/mmdb.go": {
+      "sha256": "272daeb9c17e78d1535374b7a0ab8812f662232a4810d3093400518393ad23de",
+      "upstreamSHA256": "dbd44b54b7cf672e80f9c2d229ecd5a4e0441b1a1e2fd74cf6fd07c059f75c63"
+    },
+    "component/mmdb/reader.go": {
+      "sha256": "6ebd52e3cec28c247e8ffcb69df5e6bcb5c4b153a60c6ec6866035d1e3adb564",
+      "upstreamSHA256": "d76c0e64accbfb6c3923f57f00d797ba1d0e8fccaba85f434d95af77ca534676"
+    },
+    "component/mmdb/relay_immutable.go": {
+      "sha256": "4cb702d1833c9cf90e9fb9ead484d40e8b21b0ddfdf5b75add72c5c6b9b918b5",
+      "upstreamSHA256": null
+    },
+    "component/updater/relay_local_geo.go": {
+      "sha256": "a6268e7b34d3c27e69ad4cc282bfccd0b85a466e725eb9fe732742308364c284",
+      "upstreamSHA256": null
+    },
+    "component/updater/update_geo.go": {
+      "sha256": "3615c0fa1a96b89a7e0e8315928c23cb186d0d5c4172398b848d540004610c53",
+      "upstreamSHA256": "aec730980b0fc1a110d194efb4b0fc2c81f81fe0209f03cbe81fb89da54184b7"
+    },
+    "relay_local_geo_route.go": {
+      "sha256": "355013969a52754a489c242bbc13ee25e722b1611d2c894c777400a62509a4f2",
+      "upstreamSHA256": null
+    }
+  },
+  "patch": {
+    "path": "core-extensions/mihomo-geodata-v1/patches/0001-local-geodata-v1.patch",
+    "sha256": "e36ec9ab8e45d2d3cb0ce3ece6f422abd053ece7c0937e406649be17472043e6",
+    "gitApplyCheckExitCode": 0
+  },
+  "stagedRule": "CoreHome/RelayGeoInbox/<blobUUID>/<kind fixed basename>; never removed or moved by Core",
+  "retainedRule": "CoreHome/RelayGeo.retained-<private nonce64hex>; only applied plus independently verified original identity/SHA authorizes ownership registration",
+  "activation": "Core known exact pin plus explicit controlled launch; no discovery by commands to unknown Core",
+  "shippingOrPinsModifiedByBuilder": false,
+  "knownLimits": [
+    "first missing-kind initialization requires a later explicit expected-absence protocol",
+    "ordinaryUID ARM evidence only; no actual setuid/root/TUN or Intel execution",
+    "standard/memconservative fixture matching proven; other matcher/variant combinations need matching evidence",
+    "128MiB MaxMind padding validates I/O/byte/deadline boundary, not worst-case complex database parsing",
+    "Native/Core production pipe coupling and active mutable ledger integration remain separate gates",
+    "RENAME_SWAP is not expected-inode atomic CAS against a hostile sameUID syscall adversary",
+    "no crash/powerloss/concurrency stress acceptance"
+  ],
+  "buildTargets": ["darwin/arm64", "darwin/amd64"]
+}

@@ -1,0 +1,42 @@
+{
+  "version": "7.8.5",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/npm/node-semver.git"
+  },
+  "license": "ISC",
+  "cachedPackage": "node_modules/.pnpm/semver@7.8.5/node_modules/semver",
+  "sourceFilesSHA256": {
+    "internal/debug.js": "8a9f420572260f3cf944463b5090d62a60f0730589dc23a7ec4ca25e2ee41bb3",
+    "internal/constants.js": "38a112baf27ceca0260082ff26ac2fd7a9861cab1af12dd65e720277f68e6ce9",
+    "internal/re.js": "5833262888e2b5d843a69193f83c05e374818dbe55379b497819b5bf58e48cd8",
+    "internal/parse-options.js": "fdf51d0de8d5442c35a997ef58cd530d239ce206f961d14c5121354451b01d01",
+    "internal/identifiers.js": "b4916b09dc7869ae0eb05e71c855c942a3a7365f7e6e89185d59a9e45a2451d7",
+    "classes/semver.js": "813b2c185512d30c9b931c2fed8140889d9d7490ceeeedc370da30337dc8ca57",
+    "functions/parse.js": "29a69e15b6d02fe381d573f861881a89590e9d0f0f0ca740c5f85eaf0234c4ad",
+    "functions/valid.js": "0de7ea736cb7807179d46dfac09c830a9338e02b6a07db12d7040cde2def6025",
+    "functions/compare.js": "d404b5aa48aaddc8a654c5da8fb7d4443404b7948589b21ac4b045d1cee4e34c",
+    "functions/prerelease.js": "baedbf503d5610ad041bfb56071efa48feb331ca278295c399537d35d3ffb593"
+  },
+  "packageJSONSHA256": "7c94cb7f2a53c27b20d76386ec144c062894dbcc909cfabd0f728c37874b1776",
+  "licenseSHA256": "4ec3d4c66cd87f5c8d8ad911b10f99bf27cb00cdfcff82621956e379186b016b",
+  "adaptation": "Only strict valid/compare/prerelease wrappers exported; direct upstream function modules statically bundled by existing esbuild with no algorithm changes, then project Prettier. A generated-file-only ESLint caughtErrors:none setting retains original unused upstream catch bindings; all other lint rules remain enabled. No package-manager operation or policy bypass.",
+  "buildOptions": {
+    "bundle": true,
+    "platform": "node",
+    "format": "esm",
+    "target": "node20",
+    "minifySyntax": false,
+    "entryModules": ["functions/valid.js", "functions/compare.js", "functions/prerelease.js"]
+  },
+  "outputs": {
+    "semver-7.8.5.mjs": "26bdfae84f4f15842669a219d4c95c3aae8cb5d54bd6af3b79da4e70983cbaac",
+    "semver-7.8.5.d.mts": "fed58c5035ed44f3b79d6065e1a6b9100fbff1b0ea11eb82aba4a90e94afa593"
+  },
+  "runtimeTestsExecuted": false,
+  "networkRequests": false,
+  "refinement": {
+    "originalWholeLibrarySHA256": "526caccaa1f75be99ebfcf78c4d397b5795e5ec9fa7612e06c4bfedf2d0f1239",
+    "reason": "Keep only three mature upstream function dependency chains and satisfy unchanged project format/lint checks. No runtime test executed."
+  }
+}

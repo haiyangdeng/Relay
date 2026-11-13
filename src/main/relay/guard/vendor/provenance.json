@@ -1,0 +1,154 @@
+{
+  "purpose": "Cached PKIjs Certificate constructor/signing, no crypto code executed",
+  "entrySHA256": "c396fea1db7c4f95515cba8169d946acfac03354c4bee69dbca62f1e01ea3835",
+  "outputSHA256": "61408aeca0a478edb7a7ad47d901a759bc34dabe49c315d9b202ad77eee2deb5",
+  "compiler": "esbuild 0.28.2 static source bundle",
+  "inputs": [
+    {
+      "path": "node_modules/.pnpm/pvtsutils@1.3.6/node_modules/pvtsutils/build/index.js",
+      "sha256": "8cf4300225298c7811fd72840f84ebd12dda5359f29fffdba09cb67a63a5943f"
+    },
+    {
+      "path": "node_modules/.pnpm/pvutils@1.2.0/node_modules/pvutils/build/utils.js",
+      "sha256": "cf7847e45f8a080208558e66075683e2691e243df3ca3b471f2d39fad7968d1b"
+    },
+    {
+      "path": "node_modules/.pnpm/asn1js@3.1.0/node_modules/asn1js/build/index.js",
+      "sha256": "d773a9227ead2d9269a4595a2bcdaaf54e618c12562aab96b5fc214e58d2532d"
+    },
+    {
+      "path": "node_modules/.pnpm/bytestreamjs@2.0.1/node_modules/bytestreamjs/build/cjs/byte_stream.js",
+      "sha256": "6aabcd4fcf8e386ce719429e64bdc1cf0abdfbc032a2b090054a39bd527e6f38"
+    },
+    {
+      "path": "node_modules/.pnpm/bytestreamjs@2.0.1/node_modules/bytestreamjs/build/cjs/seq_stream.js",
+      "sha256": "e6bb1205eb43e15de0e8c1f2118cb60b87055894948b32bd9abdb39625411e99"
+    },
+    {
+      "path": "node_modules/.pnpm/bytestreamjs@2.0.1/node_modules/bytestreamjs/build/cjs/helpers.js",
+      "sha256": "89a282beb15d8179e9406e93d55a82106c788d27714831f2fbb43c3ef8c92e36"
+    },
+    {
+      "path": "node_modules/.pnpm/bytestreamjs@2.0.1/node_modules/bytestreamjs/build/cjs/bit.js",
+      "sha256": "0bbe861c72ea1f4c7b9b1b35fb2d89b9101e973e2f7d2bcc3f1e2a122286d664"
+    },
+    {
+      "path": "node_modules/.pnpm/bytestreamjs@2.0.1/node_modules/bytestreamjs/build/cjs/bit_stream.js",
+      "sha256": "a3462d2a335c5b6026cbc4a120356fbdfbf90b620986b371d738cde088aabf05"
+    },
+    {
+      "path": "node_modules/.pnpm/bytestreamjs@2.0.1/node_modules/bytestreamjs/build/cjs/seq_bit_stream.js",
+      "sha256": "b97380d381f1c7e0ae8edd8a218fe834b5cde6cad185ff58c6dec0c6c7566079"
+    },
+    {
+      "path": "node_modules/.pnpm/bytestreamjs@2.0.1/node_modules/bytestreamjs/build/cjs/index.js",
+      "sha256": "440eeac3b5d5deee0ea1f057f5e987736de802f6b3d5987684ef2ee50efe98eb"
+    },
+    {
+      "path": "node_modules/.pnpm/@noble+hashes@1.8.0/node_modules/@noble/hashes/esm/cryptoNode.js",
+      "sha256": "26f80c6a85b6ef7bfd83b99d95b2b5ba8764397b9465feff32e81ba4e6416619"
+    },
+    {
+      "path": "node_modules/.pnpm/@noble+hashes@1.8.0/node_modules/@noble/hashes/esm/utils.js",
+      "sha256": "4cf4c1e05affedcb4fd584a43d76ae1a3711e34a36e2251b90c27e33ecc74fad"
+    },
+    {
+      "path": "node_modules/.pnpm/@noble+hashes@1.8.0/node_modules/@noble/hashes/esm/_md.js",
+      "sha256": "cefb1557e7715cb2117c83f82ef3e3175c7e0391c80bd5795b2d4effc45fc582"
+    },
+    {
+      "path": "node_modules/.pnpm/@noble+hashes@1.8.0/node_modules/@noble/hashes/esm/legacy.js",
+      "sha256": "4906186a82438392443e3ac2a59d0acbbec2bee2595d048c8d8c0dd6584d4bdb"
+    },
+    {
+      "path": "node_modules/.pnpm/@noble+hashes@1.8.0/node_modules/@noble/hashes/esm/sha1.js",
+      "sha256": "cd708647a4aad36d820253fc75e3a821efe842652b2c9134903c5aec33a2926a"
+    },
+    {
+      "path": "node_modules/.pnpm/@noble+hashes@1.8.0/node_modules/@noble/hashes/esm/_u64.js",
+      "sha256": "e48c0cfc10810439a4807b46db136ce603a3fa09b62584f513ef2f3ca496af54"
+    },
+    {
+      "path": "node_modules/.pnpm/@noble+hashes@1.8.0/node_modules/@noble/hashes/esm/sha2.js",
+      "sha256": "e729088b82e5450bff54c3a0013582aa42e1fe8f58dd31f5967f6ebe34c52299"
+    },
+    {
+      "path": "node_modules/.pnpm/pkijs@3.4.1/node_modules/pkijs/build/index.es.js",
+      "sha256": "5f5c08540929f01ee75373b9f317753aeb6a7239241658473bb37826e2f85a50"
+    },
+    {
+      "path": "node_modules/.pnpm/asn1js@3.1.0/node_modules/asn1js/build/index.es.js",
+      "sha256": "ee1dbac2b2f8bc0edd15f56932d847f5a8565b20d0b2b22d6c978360279899e4"
+    },
+    {
+      "path": "src/main/relay/guard/vendor/tls-material-entry.mjs.txt",
+      "sha256": "c396fea1db7c4f95515cba8169d946acfac03354c4bee69dbca62f1e01ea3835"
+    }
+  ],
+  "packages": {
+    "pvtsutils": {
+      "version": "1.3.6",
+      "license": "MIT",
+      "packageSHA256": "c919db2c1458eceb304414b4e4da34dabc43cee71141ceb13d1a0d389a9b5a01"
+    },
+    "pvutils": {
+      "version": "1.2.0",
+      "license": "MIT",
+      "packageSHA256": "8d7f27545db8668ab8e1a65f40cac53465646c36e18d1400bba3947f6ca7ed4c"
+    },
+    "asn1js": {
+      "version": "3.1.0",
+      "license": "BSD-3-Clause",
+      "packageSHA256": "94d19966d9769facd95d1f78f856d253effb6c1a3cfcc602bafcc4c395588076"
+    },
+    "bytestreamjs": {
+      "version": "2.0.1",
+      "license": "BSD-3-Clause",
+      "packageSHA256": "6e873d548d5b80d761275a07580892fe56a148fd641386740cdc115b8138c2e3"
+    },
+    "@noble/hashes": {
+      "version": "1.8.0",
+      "license": "MIT",
+      "packageSHA256": "7c4657c5e616c22cefa2691cc30670824a639dc71d97bf83925be2d239dc60e3"
+    },
+    "pkijs": {
+      "version": "3.4.1",
+      "license": "BSD-3-Clause",
+      "packageSHA256": "cd240699791357e4dcf4c3bda870f571fc6d2636e573689a517d79c46a3c2209"
+    }
+  },
+  "executed": false,
+  "installed": false,
+  "formalPackageAndLockChanged": false,
+  "formatting": "project Prettier after static bundle, source code not executed",
+  "sourceEntry": "tls-material-entry.mjs.txt",
+  "rebuild": "Pinned cached inputs, esbuild 0.28.2 --bundle --platform=node --format=esm followed by project Prettier; no package install or module execution",
+  "sandboxRuntime": {
+    "repository": "https://github.com/anthropic-experimental/sandbox-runtime",
+    "commit": "27fce0dbd58925061c57eb8b38707b9a98349dad",
+    "version": "0.0.81",
+    "license": "Apache-2.0",
+    "adopted": "minimal macOS SBPL rules and parent proxy CONNECT parsing; optional delegation/listening rules removed"
+  },
+  "originalUpstreamBundleOutputSHA256": "7f1a0e195343260a607cec8e6db31314c091e0001404cf94c481c6946a6b759b",
+  "rootIntegrationLintAllowance": {
+    "scope": "Generated bundle only, eight emitted-upstream syntax/style rules; no global lint change or algorithm rewrite",
+    "reason": "Retain exact mature PKIjs/ASN1 upstream bodies; esbuild output includes intentional empty handlers, fallthroughs and unused generated bindings"
+  },
+  "localCertificateChainCorrection": {
+    "date": "2026-11-08",
+    "previous": {
+      "entrySHA256": "cb8cbd0d4eb409b65a43ea06978534dfd429ac56b5de2233a85dd5447ee12cda",
+      "outputSHA256": "24d375934e0c9e8a7cef37c20fe14daf041f1ed73c72a76f364e85f01239b083"
+    },
+    "reason": "The CA and leaf previously had the same subject name. The private loopback TLS client rejected that self-issued leaf. Keep the issuer at the session CA and give its signed proxy leaf a distinct subject.",
+    "rebuildVerification": "Rebuilt from the pinned PKIjs 3.4.1 and ASN1 inputs with esbuild 0.28.2, matching the emitted file byte for byte after the retained lint header and Prettier."
+  },
+  "historicalEntrySHA256": "da7e629fd456deab1c4454a4a869430949a79492f7417349e633590a501733d1",
+  "publicSourcePreparation": {
+    "change": "Replace local absolute PKIjs/ASN1js imports in source entry with package imports. Bundled runtime output remains unchanged.",
+    "sourceEntryMatchesHistoricalBuildPaths": false,
+    "runtimeOutputChanged": false,
+    "rebuild": "Resolve exact packages and versions in packages using an isolated dependency directory, esbuild 0.28.2 bundle for Node ESM, retain bundle lint header and format. Package-name imports replace private cache paths only."
+  }
+}

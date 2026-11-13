@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "version": "relay-geodata-v1p1-3f27",
+  "capability": "local-geodata-v1",
+  "minimumMacOS": "13.0",
+  "source": {
+    "repository": "https://github.com/MetaCubeX/mihomo",
+    "commit": "3f27ef39f8c96bbfbc8b0b9bb10f5c9ef60149d8",
+    "patchSHA256": "e36ec9ab8e45d2d3cb0ce3ece6f422abd053ece7c0937e406649be17472043e6",
+    "providerFileSerialization": {
+      "manifestSHA256": "853ef5ffc7c59f05a7f3d7ecb5454c54e0fbd05931c7d16ab2f8fab5d6b5390d",
+      "patchSHA256": "fa6fec94f3a3d40bff3a4545acaa01dd10c86c88147b3a20634b856472d80a8d"
+    }
+  },
+  "assets": {
+    "arm64": {
+      "path": "darwin-arm64/mihomo",
+      "sha256": "e9327b2ce0e5c4405ce2640145339be9e315943bdeb63ffee4b3f4fe18bee419",
+      "size": 65185184,
+      "cpuType": 16777228
+    },
+    "x64": {
+      "path": "darwin-x64/mihomo",
+      "sha256": "1d110d7f958abd22ec011ac466f7451bf22101f8b6338a26a3e9fedcbd62ae26",
+      "size": 70035456,
+      "cpuType": 16777223
+    }
+  },
+  "implementationRevision": 2
+}

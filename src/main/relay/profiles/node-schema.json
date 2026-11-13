@@ -1,0 +1,1239 @@
+{
+  "version": "v1.19.33",
+  "protocols": {
+    "ss": "ShadowSocksOption",
+    "ssr": "ShadowSocksROption",
+    "socks5": "Socks5Option",
+    "http": "HttpOption",
+    "vmess": "VmessOption",
+    "vless": "VlessOption",
+    "snell": "SnellOption",
+    "trojan": "TrojanOption",
+    "hysteria": "HysteriaOption",
+    "hysteria2": "Hysteria2Option",
+    "wireguard": "WireGuardOption",
+    "tuic": "TuicOption",
+    "shadowquic": "ShadowQuicOption",
+    "gost-relay": "GostRelayOption",
+    "direct": "DirectOption",
+    "dns": "DnsOption",
+    "reject": "RejectOption",
+    "rematch": "RematchOption",
+    "ssh": "SshOption",
+    "mieru": "MieruOption",
+    "anytls": "AnyTLSOption",
+    "sudoku": "SudokuOption",
+    "masque": "MasqueOption",
+    "trusttunnel": "TrustTunnelOption",
+    "openvpn": "OpenVPNOption",
+    "tailscale": "TailscaleOption",
+    "zerotier": "ZeroTierOption",
+    "easytier": "EasyTierOption"
+  },
+  "structs": {
+    "AnyTLSOption": {
+      "fields": {
+        "name": "string",
+        "server": "string",
+        "port": "int",
+        "password": "string",
+        "alpn": "[]string",
+        "sni": "string",
+        "ech-opts": "ECHOptions",
+        "shadow-tls-opts": "ShadowTLSOptions",
+        "restls-opts": "RestlsOptions",
+        "jls-opts": "JLSOptions",
+        "client-fingerprint": "string",
+        "skip-cert-verify": "bool",
+        "name-cert-verify": "string",
+        "fingerprint": "string",
+        "certificate": "string",
+        "private-key": "string",
+        "udp": "bool",
+        "client-metadata": "string",
+        "idle-session-check-interval": "int",
+        "idle-session-timeout": "int",
+        "min-idle-session": "int",
+        "disable-reuse": "bool"
+      },
+      "embedded": ["BasicOption"],
+      "source": "adapter/outbound/anytls.go"
+    },
+    "BasicOption": {
+      "fields": {
+        "tfo": "bool",
+        "mptcp": "bool",
+        "interface-name": "string",
+        "routing-mark": "int",
+        "ip-version": "C.DNSPrefer",
+        "dialer-proxy": "string"
+      },
+      "embedded": [],
+      "source": "adapter/outbound/base.go"
+    },
+    "DirectOption": {
+      "fields": {
+        "name": "string"
+      },
+      "embedded": ["BasicOption"],
+      "source": "adapter/outbound/direct.go"
+    },
+    "DnsOption": {
+      "fields": {
+        "name": "string"
+      },
+      "embedded": ["BasicOption"],
+      "source": "adapter/outbound/dns.go"
+    },
+    "EasyTierOption": {
+      "fields": {
+        "name": "string",
+        "network-name": "string",
+        "network-secret": "string",
+        "hostname": "string",
+        "ipv4": "string",
+        "dhcp": "bool",
+        "peers": "[]string",
+        "listeners": "[]string",
+        "no-listener": "*bool",
+        "mapped-listeners": "[]string",
+        "exit-nodes": "[]string",
+        "proxy-networks": "[]string",
+        "instance-name": "string",
+        "state-dir": "string",
+        "udp": "bool",
+        "accept-dns": "*bool",
+        "enable-exit-node": "*bool",
+        "enable-encryption": "*bool",
+        "encryption-algorithm": "string",
+        "private-mode": "*bool",
+        "latency-first": "*bool",
+        "disable-p2p": "*bool",
+        "enable-kcp-proxy": "*bool",
+        "disable-kcp-input": "*bool",
+        "enable-quic-proxy": "*bool",
+        "disable-quic-input": "*bool",
+        "mtu": "int",
+        "tld-dns-zone": "string",
+        "secure-mode": "*bool",
+        "local-private-key": "string",
+        "local-public-key": "string"
+      },
+      "embedded": ["BasicOption"],
+      "source": "adapter/outbound/easytier.go"
+    },
+    "ECHOptions": {
+      "fields": {
+        "enable": "bool",
+        "config": "string",
+        "query-server-name": "string"
+      },
+      "embedded": [],
+      "source": "adapter/outbound/ech.go"
+    },
+    "GostRelayOption": {
+      "fields": {
+        "name": "string",
+        "server": "string",
+        "port": "int",
+        "forward": "bool",
+        "udp": "bool",
+        "tls": "bool",
+        "mux": "bool",
+        "sni": "string",
+        "username": "string",
+        "password": "string",
+        "skip-cert-verify": "bool",
+        "name-cert-verify": "string",
+        "fingerprint": "string",
+        "certificate": "string",
+        "private-key": "string",
+        "client-fingerprint": "string"
+      },
+      "embedded": ["BasicOption"],
+      "source": "adapter/outbound/gost_relay.go"
+    },
+    "HttpOption": {
+      "fields": {
+        "name": "string",
+        "server": "string",
+        "port": "int",
+        "username": "string",
+        "password": "string",
+        "tls": "bool",
+        "sni": "string",
+        "skip-cert-verify": "bool",
+        "name-cert-verify": "string",
+        "fingerprint": "string",
+        "certificate": "string",
+        "private-key": "string",
+        "headers": "map[string]string"
+      },
+      "embedded": ["BasicOption"],
+      "source": "adapter/outbound/http.go"
+    },
+    "HysteriaOption": {
+      "fields": {
+        "name": "string",
+        "server": "string",
+        "port": "int",
+        "ports": "string",
+        "protocol": "string",
+        "obfs-protocol": "string",
+        "up": "string",
+        "up-speed": "int",
+        "down": "string",
+        "down-speed": "int",
+        "auth": "string",
+        "auth-str": "string",
+        "obfs": "string",
+        "sni": "string",
+        "ech-opts": "ECHOptions",
+        "skip-cert-verify": "bool",
+        "name-cert-verify": "string",
+        "fingerprint": "string",
+        "certificate": "string",
+        "private-key": "string",
+        "alpn": "[]string",
+        "recv-window-conn": "int",
+        "recv-window": "int",
+        "disable-mtu-discovery": "bool",
+        "fast-open": "bool",
+        "hop-interval": "int"
+      },
+      "embedded": ["BasicOption"],
+      "source": "adapter/outbound/hysteria.go"
+    },
+    "Hysteria2Option": {
+      "fields": {
+        "name": "string",
+        "server": "string",
+        "port": "int",
+        "ports": "string",
+        "hop-interval": "string",
+        "up": "string",
+        "down": "string",
+        "password": "string",
+        "obfs": "string",
+        "obfs-password": "string",
+        "obfs-min-packet-size": "int",
+        "obfs-max-packet-size": "int",
+        "sni": "string",
+        "ech-opts": "ECHOptions",
+        "skip-cert-verify": "bool",
+        "name-cert-verify": "string",
+        "fingerprint": "string",
+        "certificate": "string",
+        "private-key": "string",
+        "alpn": "[]string",
+        "cwnd": "int",
+        "bbr-profile": "string",
+        "udp-mtu": "int",
+        "handshake-timeout": "int",
+        "realm-opts": "Hysteria2RealmOption",
+        "initial-stream-receive-window": "uint64",
+        "max-stream-receive-window": "uint64",
+        "initial-connection-receive-window": "uint64",
+        "max-connection-receive-window": "uint64"
+      },
+      "embedded": ["BasicOption"],
+      "source": "adapter/outbound/hysteria2.go"
+    },
+    "Hysteria2RealmOption": {
+      "fields": {
+        "enable": "bool",
+        "server-url": "string",
+        "token": "string",
+        "realm-id": "string",
+        "stun-servers": "[]string",
+        "sni": "string",
+        "skip-cert-verify": "bool",
+        "name-cert-verify": "string",
+        "fingerprint": "string",
+        "certificate": "string",
+        "private-key": "string",
+        "alpn": "[]string"
+      },
+      "embedded": [],
+      "source": "adapter/outbound/hysteria2.go"
+    },
+    "JLSOptions": {
+      "fields": {
+        "username": "string",
+        "password": "string"
+      },
+      "embedded": [],
+      "source": "adapter/outbound/jls.go"
+    },
+    "MasqueOption": {
+      "fields": {
+        "name": "string",
+        "server": "string",
+        "port": "int",
+        "private-key": "string",
+        "public-key": "string",
+        "ip": "string",
+        "ipv6": "string",
+        "uri": "string",
+        "sni": "string",
+        "mtu": "int",
+        "udp": "bool",
+        "handshake-timeout": "int",
+        "skip-cert-verify": "bool",
+        "name-cert-verify": "string",
+        "network": "string",
+        "congestion-controller": "string",
+        "cwnd": "int",
+        "bbr-profile": "string",
+        "ip-stack": "IPStackOption",
+        "remote-dns-resolve": "bool",
+        "dns": "[]string"
+      },
+      "embedded": ["BasicOption"],
+      "source": "adapter/outbound/masque.go"
+    },
+    "MieruOption": {
+      "fields": {
+        "name": "string",
+        "server": "string",
+        "port": "int",
+        "port-range": "string",
+        "transport": "string",
+        "udp": "bool",
+        "username": "string",
+        "password": "string",
+        "multiplexing": "string",
+        "handshake-mode": "string",
+        "traffic-pattern": "string"
+      },
+      "embedded": ["BasicOption"],
+      "source": "adapter/outbound/mieru.go"
+    },
+    "OpenVPNOption": {
+      "fields": {
+        "name": "string",
+        "server": "string",
+        "port": "int",
+        "proto": "string",
+        "dev": "string",
+        "cipher": "string",
+        "data-ciphers": "[]string",
+        "data-ciphers-fallback": "string",
+        "auth": "string",
+        "comp-lzo": "string",
+        "ca": "string",
+        "cert": "string",
+        "key": "string",
+        "tls-auth": "string",
+        "key-direction": "string",
+        "tls-crypt": "string",
+        "tls-crypt-v2": "string",
+        "username": "string",
+        "password": "string",
+        "peer-info": "map[string]string",
+        "ping": "int",
+        "ping-restart": "int",
+        "tran-window": "*int",
+        "handshake-timeout": "int",
+        "mtu": "int",
+        "udp": "bool",
+        "ip-stack": "IPStackOption",
+        "remote-dns-resolve": "bool",
+        "dns": "[]string"
+      },
+      "embedded": ["BasicOption"],
+      "source": "adapter/outbound/openvpn.go"
+    },
+    "RealityOptions": {
+      "fields": {
+        "public-key": "string",
+        "short-id": "string",
+        "support-x25519mlkem768": "bool"
+      },
+      "embedded": [],
+      "source": "adapter/outbound/reality.go"
+    },
+    "RejectOption": {
+      "fields": {
+        "name": "string"
+      },
+      "embedded": ["BasicOption"],
+      "source": "adapter/outbound/reject.go"
+    },
+    "RematchOption": {
+      "fields": {
+        "name": "string",
+        "target-rematch-name": "*string",
+        "target-sub-rule": "*string"
+      },
+      "embedded": ["BasicOption"],
+      "source": "adapter/outbound/rematch.go"
+    },
+    "RestlsOptions": {
+      "fields": {
+        "password": "string",
+        "version-hint": "string",
+        "restls-script": "string"
+      },
+      "embedded": [],
+      "source": "adapter/outbound/restls.go"
+    },
+    "ShadowQuicOption": {
+      "fields": {
+        "name": "string",
+        "server": "string",
+        "port": "int",
+        "username": "string",
+        "password": "string",
+        "sni": "string",
+        "alpn": "[]string",
+        "quic-versions": "[]string",
+        "udp-over-stream": "bool",
+        "zero-rtt": "bool",
+        "keep-alive-interval": "int",
+        "congestion-controller": "string",
+        "up": "string",
+        "down": "string",
+        "cwnd": "int",
+        "bbr-profile": "string",
+        "recv-window-conn": "int",
+        "recv-window": "int",
+        "disable-mtu-discovery": "bool",
+        "max-datagram-frame-size": "int",
+        "max-open-streams": "int"
+      },
+      "embedded": ["BasicOption"],
+      "source": "adapter/outbound/shadowquic.go"
+    },
+    "ShadowSocksOption": {
+      "fields": {
+        "name": "string",
+        "server": "string",
+        "port": "int",
+        "password": "string",
+        "cipher": "string",
+        "udp": "bool",
+        "plugin": "string",
+        "plugin-opts": "map[string]any",
+        "udp-over-tcp": "bool",
+        "udp-over-tcp-version": "int",
+        "client-fingerprint": "string"
+      },
+      "embedded": ["BasicOption"],
+      "source": "adapter/outbound/shadowsocks.go"
+    },
+    "simpleObfsOption": {
+      "fields": {
+        "mode": "string",
+        "host": "string"
+      },
+      "embedded": [],
+      "source": "adapter/outbound/shadowsocks.go"
+    },
+    "v2rayObfsOption": {
+      "fields": {
+        "mode": "string",
+        "host": "string",
+        "path": "string",
+        "tls": "bool",
+        "ech-opts": "ECHOptions",
+        "fingerprint": "string",
+        "certificate": "string",
+        "private-key": "string",
+        "headers": "map[string]string",
+        "skip-cert-verify": "bool",
+        "name-cert-verify": "string",
+        "mux": "bool",
+        "v2ray-http-upgrade": "bool",
+        "v2ray-http-upgrade-fast-open": "bool"
+      },
+      "embedded": [],
+      "source": "adapter/outbound/shadowsocks.go"
+    },
+    "gostObfsOption": {
+      "fields": {
+        "mode": "string",
+        "host": "string",
+        "path": "string",
+        "tls": "bool",
+        "ech-opts": "ECHOptions",
+        "fingerprint": "string",
+        "certificate": "string",
+        "private-key": "string",
+        "headers": "map[string]string",
+        "skip-cert-verify": "bool",
+        "name-cert-verify": "string",
+        "mux": "bool"
+      },
+      "embedded": [],
+      "source": "adapter/outbound/shadowsocks.go"
+    },
+    "shadowTLSOption": {
+      "fields": {
+        "password": "string",
+        "host": "string",
+        "fingerprint": "string",
+        "certificate": "string",
+        "private-key": "string",
+        "skip-cert-verify": "bool",
+        "name-cert-verify": "string",
+        "version": "int",
+        "alpn": "[]string"
+      },
+      "embedded": [],
+      "source": "adapter/outbound/shadowsocks.go"
+    },
+    "restlsOption": {
+      "fields": {
+        "password": "string",
+        "host": "string",
+        "version-hint": "string",
+        "restls-script": "string",
+        "fingerprint": "string",
+        "skip-cert-verify": "bool",
+        "name-cert-verify": "string",
+        "force-tls12": "bool"
+      },
+      "embedded": [],
+      "source": "adapter/outbound/shadowsocks.go"
+    },
+    "jlsOption": {
+      "fields": {
+        "host": "string",
+        "username": "string",
+        "password": "string",
+        "alpn": "[]string"
+      },
+      "embedded": [],
+      "source": "adapter/outbound/shadowsocks.go"
+    },
+    "kcpTunOption": {
+      "fields": {
+        "key": "string",
+        "crypt": "string",
+        "mode": "string",
+        "conn": "int",
+        "autoexpire": "int",
+        "scavengettl": "int",
+        "mtu": "int",
+        "ratelimit": "int",
+        "sndwnd": "int",
+        "rcvwnd": "int",
+        "datashard": "int",
+        "parityshard": "int",
+        "dscp": "int",
+        "nocomp": "bool",
+        "acknodelay": "bool",
+        "nodelay": "int",
+        "interval": "int",
+        "resend": "int",
+        "nc": "int",
+        "sockbuf": "int",
+        "smuxver": "int",
+        "smuxbuf": "int",
+        "framesize": "int",
+        "streambuf": "int",
+        "keepalive": "int"
+      },
+      "embedded": [],
+      "source": "adapter/outbound/shadowsocks.go"
+    },
+    "ShadowSocksROption": {
+      "fields": {
+        "name": "string",
+        "server": "string",
+        "port": "int",
+        "password": "string",
+        "cipher": "string",
+        "obfs": "string",
+        "obfs-param": "string",
+        "protocol": "string",
+        "protocol-param": "string",
+        "udp": "bool"
+      },
+      "embedded": ["BasicOption"],
+      "source": "adapter/outbound/shadowsocksr.go"
+    },
+    "ShadowTLSOptions": {
+      "fields": {
+        "password": "string",
+        "version": "int"
+      },
+      "embedded": [],
+      "source": "adapter/outbound/shadowtls.go"
+    },
+    "SingMuxOption": {
+      "fields": {
+        "enabled": "bool",
+        "protocol": "string",
+        "max-connections": "int",
+        "min-streams": "int",
+        "max-streams": "int",
+        "padding": "bool",
+        "statistic": "bool",
+        "only-tcp": "bool",
+        "brutal-opts": "BrutalOption"
+      },
+      "embedded": [],
+      "source": "adapter/outbound/singmux.go"
+    },
+    "BrutalOption": {
+      "fields": {
+        "enabled": "bool",
+        "up": "string",
+        "down": "string"
+      },
+      "embedded": [],
+      "source": "adapter/outbound/singmux.go"
+    },
+    "SnellOption": {
+      "fields": {
+        "name": "string",
+        "server": "string",
+        "port": "int",
+        "psk": "string",
+        "udp": "bool",
+        "version": "int",
+        "reuse": "bool",
+        "obfs-opts": "map[string]any",
+        "client-fingerprint": "string"
+      },
+      "embedded": ["BasicOption"],
+      "source": "adapter/outbound/snell.go"
+    },
+    "Socks5Option": {
+      "fields": {
+        "name": "string",
+        "server": "string",
+        "port": "int",
+        "username": "string",
+        "password": "string",
+        "tls": "bool",
+        "udp": "bool",
+        "skip-cert-verify": "bool",
+        "name-cert-verify": "string",
+        "fingerprint": "string",
+        "certificate": "string",
+        "private-key": "string"
+      },
+      "embedded": ["BasicOption"],
+      "source": "adapter/outbound/socks5.go"
+    },
+    "SshOption": {
+      "fields": {
+        "name": "string",
+        "server": "string",
+        "port": "int",
+        "username": "string",
+        "password": "string",
+        "private-key": "string",
+        "private-key-passphrase": "string",
+        "host-key": "[]string",
+        "host-key-algorithms": "[]string"
+      },
+      "embedded": ["BasicOption"],
+      "source": "adapter/outbound/ssh.go"
+    },
+    "SudokuOption": {
+      "fields": {
+        "name": "string",
+        "server": "string",
+        "port": "int",
+        "key": "string",
+        "aead-method": "string",
+        "padding-min": "*int",
+        "padding-max": "*int",
+        "table-type": "string",
+        "enable-pure-downlink": "*bool",
+        "http-mask": "*bool",
+        "http-mask-mode": "string",
+        "http-mask-tls": "bool",
+        "http-mask-host": "string",
+        "path-root": "string",
+        "multiplex": "string",
+        "http-mask-multiplex": "string",
+        "httpmask": "*SudokuHTTPMaskOptions",
+        "custom-table": "string",
+        "custom-tables": "[]string"
+      },
+      "embedded": ["BasicOption"],
+      "source": "adapter/outbound/sudoku.go"
+    },
+    "SudokuHTTPMaskOptions": {
+      "fields": {
+        "disable": "bool",
+        "mode": "string",
+        "tls": "bool",
+        "host": "string",
+        "path-root": "string",
+        "multiplex": "string"
+      },
+      "embedded": [],
+      "source": "adapter/outbound/sudoku.go"
+    },
+    "TailscaleOption": {
+      "fields": {
+        "name": "string",
+        "hostname": "string",
+        "auth-key": "string",
+        "control-url": "string",
+        "state-dir": "string",
+        "ephemeral": "bool",
+        "udp": "bool",
+        "accept-routes": "*bool",
+        "exit-node": "string",
+        "exit-node-allow-lan-access": "*bool"
+      },
+      "embedded": ["BasicOption"],
+      "source": "adapter/outbound/tailscale.go"
+    },
+    "TLSMirrorOptions": {
+      "fields": {
+        "primary-key": "string",
+        "explicit-nonce-ciphersuites": "[]uint16",
+        "defer-instance-derived-write-time": "TLSMirrorTimeSpec",
+        "transport-layer-padding": "TLSMirrorTransportLayerPadding",
+        "connection-enrolment": "*TLSMirrorConnectionEnrolment",
+        "embedded-traffic-generator": "TLSMirrorTrafficGenerator",
+        "sequence-watermarking-enabled": "bool"
+      },
+      "embedded": [],
+      "source": "adapter/outbound/tlsmirror.go"
+    },
+    "TLSMirrorConnectionEnrolment": {
+      "fields": {
+        "primary-ingress-outbound": "string",
+        "primary-egress-outbound": "string"
+      },
+      "embedded": [],
+      "source": "adapter/outbound/tlsmirror.go"
+    },
+    "TLSMirrorTimeSpec": {
+      "fields": {
+        "base-nanoseconds": "uint64",
+        "uniform-random-multiplier-nanoseconds": "uint64"
+      },
+      "embedded": [],
+      "source": "adapter/outbound/tlsmirror.go"
+    },
+    "TLSMirrorTransportLayerPadding": {
+      "fields": {
+        "enabled": "bool"
+      },
+      "embedded": [],
+      "source": "adapter/outbound/tlsmirror.go"
+    },
+    "TLSMirrorTrafficGenerator": {
+      "fields": {
+        "steps": "[]TLSMirrorTrafficStep"
+      },
+      "embedded": [],
+      "source": "adapter/outbound/tlsmirror.go"
+    },
+    "TLSMirrorTrafficStep": {
+      "fields": {
+        "name": "string",
+        "host": "string",
+        "path": "string",
+        "method": "string",
+        "headers": "[]TLSMirrorTrafficHeader",
+        "next-step": "[]TLSMirrorTrafficTransferCandidate",
+        "connection-ready": "bool",
+        "connection-recall-exit": "bool",
+        "wait-time": "TLSMirrorTimeSpec",
+        "h2-do-not-wait-for-download-finish": "bool"
+      },
+      "embedded": [],
+      "source": "adapter/outbound/tlsmirror.go"
+    },
+    "TLSMirrorTrafficHeader": {
+      "fields": {
+        "name": "string",
+        "value": "string",
+        "values": "[]string"
+      },
+      "embedded": [],
+      "source": "adapter/outbound/tlsmirror.go"
+    },
+    "TLSMirrorTrafficTransferCandidate": {
+      "fields": {
+        "weight": "int32",
+        "goto-location": "int"
+      },
+      "embedded": [],
+      "source": "adapter/outbound/tlsmirror.go"
+    },
+    "TrojanOption": {
+      "fields": {
+        "name": "string",
+        "server": "string",
+        "port": "int",
+        "password": "string",
+        "alpn": "[]string",
+        "sni": "string",
+        "skip-cert-verify": "bool",
+        "name-cert-verify": "string",
+        "fingerprint": "string",
+        "certificate": "string",
+        "private-key": "string",
+        "udp": "bool",
+        "network": "string",
+        "ech-opts": "ECHOptions",
+        "shadow-tls-opts": "ShadowTLSOptions",
+        "restls-opts": "RestlsOptions",
+        "jls-opts": "JLSOptions",
+        "reality-opts": "RealityOptions",
+        "grpc-opts": "GrpcOptions",
+        "ws-opts": "WSOptions",
+        "ss-opts": "TrojanSSOption",
+        "client-fingerprint": "string"
+      },
+      "embedded": ["BasicOption"],
+      "source": "adapter/outbound/trojan.go"
+    },
+    "TrojanSSOption": {
+      "fields": {
+        "enabled": "bool",
+        "method": "string",
+        "password": "string"
+      },
+      "embedded": [],
+      "source": "adapter/outbound/trojan.go"
+    },
+    "TrustTunnelOption": {
+      "fields": {
+        "name": "string",
+        "server": "string",
+        "port": "int",
+        "username": "string",
+        "password": "string",
+        "alpn": "[]string",
+        "sni": "string",
+        "ech-opts": "ECHOptions",
+        "client-fingerprint": "string",
+        "skip-cert-verify": "bool",
+        "name-cert-verify": "string",
+        "fingerprint": "string",
+        "certificate": "string",
+        "private-key": "string",
+        "udp": "bool",
+        "health-check": "bool",
+        "quic": "bool",
+        "congestion-controller": "string",
+        "cwnd": "int",
+        "bbr-profile": "string",
+        "max-connections": "int",
+        "min-streams": "int",
+        "max-streams": "int"
+      },
+      "embedded": ["BasicOption"],
+      "source": "adapter/outbound/trusttunnel.go"
+    },
+    "TuicOption": {
+      "fields": {
+        "name": "string",
+        "server": "string",
+        "port": "int",
+        "token": "string",
+        "uuid": "string",
+        "password": "string",
+        "ip": "string",
+        "heartbeat-interval": "int",
+        "alpn": "[]string",
+        "reduce-rtt": "bool",
+        "request-timeout": "int",
+        "udp-relay-mode": "string",
+        "congestion-controller": "string",
+        "disable-sni": "bool",
+        "max-udp-relay-packet-size": "int",
+        "fast-open": "bool",
+        "max-open-streams": "int",
+        "cwnd": "int",
+        "bbr-profile": "string",
+        "skip-cert-verify": "bool",
+        "name-cert-verify": "string",
+        "fingerprint": "string",
+        "certificate": "string",
+        "private-key": "string",
+        "recv-window-conn": "int",
+        "recv-window": "int",
+        "disable-mtu-discovery": "bool",
+        "max-datagram-frame-size": "int",
+        "sni": "string",
+        "ech-opts": "ECHOptions",
+        "udp-over-stream": "bool",
+        "udp-over-stream-version": "int"
+      },
+      "embedded": ["BasicOption"],
+      "source": "adapter/outbound/tuic.go"
+    },
+    "VlessOption": {
+      "fields": {
+        "name": "string",
+        "server": "string",
+        "port": "int",
+        "uuid": "string",
+        "flow": "string",
+        "tls": "bool",
+        "alpn": "[]string",
+        "udp": "bool",
+        "packet-addr": "bool",
+        "xudp": "bool",
+        "packet-encoding": "string",
+        "encryption": "string",
+        "network": "string",
+        "ech-opts": "ECHOptions",
+        "shadow-tls-opts": "ShadowTLSOptions",
+        "restls-opts": "RestlsOptions",
+        "jls-opts": "JLSOptions",
+        "reality-opts": "RealityOptions",
+        "http-opts": "HTTPOptions",
+        "h2-opts": "HTTP2Options",
+        "grpc-opts": "GrpcOptions",
+        "ws-opts": "WSOptions",
+        "xhttp-opts": "XHTTPOptions",
+        "ws-headers": "map[string]string",
+        "skip-cert-verify": "bool",
+        "name-cert-verify": "string",
+        "fingerprint": "string",
+        "certificate": "string",
+        "private-key": "string",
+        "servername": "string",
+        "client-fingerprint": "string"
+      },
+      "embedded": ["BasicOption"],
+      "source": "adapter/outbound/vless.go"
+    },
+    "XHTTPOptions": {
+      "fields": {
+        "path": "string",
+        "host": "string",
+        "mode": "string",
+        "headers": "map[string]string",
+        "no-grpc-header": "bool",
+        "x-padding-bytes": "string",
+        "x-padding-obfs-mode": "bool",
+        "x-padding-key": "string",
+        "x-padding-header": "string",
+        "x-padding-placement": "string",
+        "x-padding-method": "string",
+        "uplink-http-method": "string",
+        "session-placement": "string",
+        "session-key": "string",
+        "session-table": "string",
+        "session-length": "string",
+        "seq-placement": "string",
+        "seq-key": "string",
+        "uplink-data-placement": "string",
+        "uplink-data-key": "string",
+        "uplink-chunk-size": "string",
+        "sc-max-each-post-bytes": "string",
+        "sc-min-posts-interval-ms": "string",
+        "reuse-settings": "*XHTTPReuseSettings",
+        "download-settings": "*XHTTPDownloadSettings"
+      },
+      "embedded": [],
+      "source": "adapter/outbound/vless.go"
+    },
+    "XHTTPReuseSettings": {
+      "fields": {
+        "max-concurrency": "string",
+        "max-connections": "string",
+        "c-max-reuse-times": "string",
+        "h-max-request-times": "string",
+        "h-max-reusable-secs": "string",
+        "h-keep-alive-period": "int"
+      },
+      "embedded": [],
+      "source": "adapter/outbound/vless.go"
+    },
+    "XHTTPDownloadSettings": {
+      "fields": {
+        "path": "*string",
+        "host": "*string",
+        "headers": "*map[string]string",
+        "reuse-settings": "*XHTTPReuseSettings",
+        "server": "*string",
+        "port": "*int",
+        "tls": "*bool",
+        "alpn": "*[]string",
+        "ech-opts": "*ECHOptions",
+        "shadow-tls-opts": "*ShadowTLSOptions",
+        "restls-opts": "*RestlsOptions",
+        "jls-opts": "*JLSOptions",
+        "reality-opts": "*RealityOptions",
+        "skip-cert-verify": "*bool",
+        "name-cert-verify": "*string",
+        "fingerprint": "*string",
+        "certificate": "*string",
+        "private-key": "*string",
+        "servername": "*string",
+        "client-fingerprint": "*string"
+      },
+      "embedded": [],
+      "source": "adapter/outbound/vless.go"
+    },
+    "VmessOption": {
+      "fields": {
+        "name": "string",
+        "server": "string",
+        "port": "int",
+        "uuid": "string",
+        "alterId": "int",
+        "cipher": "string",
+        "udp": "bool",
+        "network": "string",
+        "tls": "bool",
+        "alpn": "[]string",
+        "skip-cert-verify": "bool",
+        "name-cert-verify": "string",
+        "fingerprint": "string",
+        "certificate": "string",
+        "private-key": "string",
+        "servername": "string",
+        "ech-opts": "ECHOptions",
+        "shadow-tls-opts": "ShadowTLSOptions",
+        "restls-opts": "RestlsOptions",
+        "jls-opts": "JLSOptions",
+        "reality-opts": "RealityOptions",
+        "tlsmirror-opts": "TLSMirrorOptions",
+        "mekya-opts": "MekyaOptions",
+        "mkcp-opts": "MKCPOptions",
+        "http-opts": "HTTPOptions",
+        "h2-opts": "HTTP2Options",
+        "grpc-opts": "GrpcOptions",
+        "ws-opts": "WSOptions",
+        "packet-addr": "bool",
+        "xudp": "bool",
+        "packet-encoding": "string",
+        "global-padding": "bool",
+        "authenticated-length": "bool",
+        "client-fingerprint": "string"
+      },
+      "embedded": ["BasicOption"],
+      "source": "adapter/outbound/vmess.go"
+    },
+    "MKCPOptions": {
+      "fields": {
+        "mtu": "uint32",
+        "tti": "uint32",
+        "uplink-capacity": "uint32",
+        "downlink-capacity": "uint32",
+        "congestion": "bool",
+        "write-buffer": "uint32",
+        "read-buffer": "uint32",
+        "seed": "string",
+        "header": "string"
+      },
+      "embedded": [],
+      "source": "adapter/outbound/vmess.go"
+    },
+    "MekyaOptions": {
+      "fields": {
+        "url": "string",
+        "h2-pool-size": "int",
+        "max-write-delay": "int",
+        "max-request-size": "int",
+        "polling-interval-initial": "int",
+        "max-write-size": "int",
+        "max-write-duration-ms": "int",
+        "max-simultaneous-write-connection": "int",
+        "packet-writing-buffer": "int",
+        "kcp": "MKCPOptions"
+      },
+      "embedded": [],
+      "source": "adapter/outbound/vmess.go"
+    },
+    "HTTPOptions": {
+      "fields": {
+        "method": "string",
+        "path": "[]string",
+        "headers": "map[string][]string"
+      },
+      "embedded": [],
+      "source": "adapter/outbound/vmess.go"
+    },
+    "HTTP2Options": {
+      "fields": {
+        "host": "[]string",
+        "path": "string"
+      },
+      "embedded": [],
+      "source": "adapter/outbound/vmess.go"
+    },
+    "GrpcOptions": {
+      "fields": {
+        "grpc-service-name": "string",
+        "grpc-user-agent": "string",
+        "ping-interval": "int",
+        "max-connections": "int",
+        "min-streams": "int",
+        "max-streams": "int"
+      },
+      "embedded": [],
+      "source": "adapter/outbound/vmess.go"
+    },
+    "WSOptions": {
+      "fields": {
+        "path": "string",
+        "headers": "map[string]string",
+        "max-early-data": "int",
+        "early-data-header-name": "string",
+        "v2ray-http-upgrade": "bool",
+        "v2ray-http-upgrade-fast-open": "bool"
+      },
+      "embedded": [],
+      "source": "adapter/outbound/vmess.go"
+    },
+    "WireGuardOption": {
+      "fields": {
+        "name": "string",
+        "ip": "string",
+        "ipv6": "string",
+        "private-key": "string",
+        "workers": "int",
+        "mtu": "int",
+        "udp": "bool",
+        "persistent-keepalive": "int",
+        "ip-stack": "IPStackOption",
+        "amnezia-wg-option": "*AmneziaWGOption",
+        "peers": "[]WireGuardPeerOption",
+        "remote-dns-resolve": "bool",
+        "dns": "[]string",
+        "refresh-server-ip-interval": "int"
+      },
+      "embedded": ["BasicOption", "WireGuardPeerOption"],
+      "source": "adapter/outbound/wireguard.go"
+    },
+    "WireGuardPeerOption": {
+      "fields": {
+        "server": "string",
+        "port": "int",
+        "public-key": "string",
+        "pre-shared-key": "string",
+        "reserved": "[]uint8",
+        "allowed-ips": "[]string"
+      },
+      "embedded": [],
+      "source": "adapter/outbound/wireguard.go"
+    },
+    "AmneziaWGOption": {
+      "fields": {
+        "version": "int",
+        "jc": "int",
+        "jmin": "int",
+        "jmax": "int",
+        "s1": "int",
+        "s2": "int",
+        "s3": "int",
+        "s4": "int",
+        "h1": "string",
+        "h2": "string",
+        "h3": "string",
+        "h4": "string",
+        "i1": "string",
+        "i2": "string",
+        "i3": "string",
+        "i4": "string",
+        "i5": "string",
+        "j1": "string",
+        "j2": "string",
+        "j3": "string",
+        "itime": "int64",
+        "header-protection-key": "string",
+        "content-padding-addition": "string",
+        "rekey-after-time": "string",
+        "rekey-timeout": "string",
+        "reject-after-time": "string",
+        "keepalive-timeout": "string",
+        "max-handshake-attempts": "string",
+        "random-trailers": "bool",
+        "disable-cookies": "bool"
+      },
+      "embedded": [],
+      "source": "adapter/outbound/wireguard.go"
+    },
+    "IPStackOption": {
+      "fields": {
+        "mode": "string",
+        "congestion-controller": "string"
+      },
+      "embedded": [],
+      "source": "adapter/outbound/wireguard.go"
+    },
+    "ZeroTierOption": {
+      "fields": {
+        "name": "string",
+        "network": "string",
+        "state-dir": "string",
+        "identity-secret": "string",
+        "planet": "string",
+        "mtu": "int",
+        "ip-stack": "IPStackOption",
+        "physical-mtu": "int",
+        "udp": "bool",
+        "remote-dns-resolve": "bool",
+        "dns": "[]string",
+        "low-bandwidth": "bool",
+        "encrypted-hello": "bool",
+        "primary-port": "int",
+        "secondary-port": "int",
+        "tcp-fallback-mode": "string",
+        "tcp-fallback-relay": "string",
+        "orbit": "[]ZeroTierOrbitOption",
+        "remote-trace-target": "string",
+        "remote-trace-level": "uint64"
+      },
+      "embedded": ["BasicOption"],
+      "source": "adapter/outbound/zerotier.go"
+    },
+    "ZeroTierOrbitOption": {
+      "fields": {
+        "world": "string",
+        "seed": "string"
+      },
+      "embedded": [],
+      "source": "adapter/outbound/zerotier.go"
+    }
+  },
+  "sources": {
+    "adapter/outbound/anytls.go": "99786614e4b6046d4a9906d6f4e4aa00a4e369df",
+    "adapter/outbound/base.go": "d6942ba030f09fa3ed16dda20200cd3dc1acc89c",
+    "adapter/outbound/direct.go": "1e2b2ef70c8e9c70903fa9eb11ddfa58303e4844",
+    "adapter/outbound/dns.go": "2a2d07ebe40b680684b35ead0cd19166f2fb15be",
+    "adapter/outbound/easytier.go": "b42fc239d91e16109e0703a19e2d9bbfd55b248a",
+    "adapter/outbound/ech.go": "151a8498a54eba38c01fcf5762f77ccd14a49dc8",
+    "adapter/outbound/gost_relay.go": "b6b6674d7017b5ea9e14efef8308a4c5dd333831",
+    "adapter/outbound/http.go": "0f684488066603d9953cbdcceae0a2eace450e8f",
+    "adapter/outbound/hysteria.go": "26032953c5697086448e31a1cbc3da3cbb973477",
+    "adapter/outbound/hysteria2.go": "4731611fd4db170c4bf4cf8dab0c08235edb38eb",
+    "adapter/outbound/jls.go": "1c4ec624aa6939a9d3213f30250b340c7ea588f4",
+    "adapter/outbound/masque.go": "64b3a5edd8171b3e87a841ada72f7c66fbe7dd2d",
+    "adapter/outbound/mieru.go": "9f4e82d6f0b555019b2915560cc9b9f103b8b4cb",
+    "adapter/outbound/openvpn.go": "3c7b1e6314c5cc4ac470ce7ea7a297e809ede926",
+    "adapter/outbound/reality.go": "70c7bc7a1016d8d1718ee09be9f729c78c4dbdef",
+    "adapter/outbound/reject.go": "79dd05865b059cd5011a8363457fe9d94fefec60",
+    "adapter/outbound/rematch.go": "247b6c50e548a530e4e1d4425ab87b6761bd0bed",
+    "adapter/outbound/restls.go": "2c4a0671f102b1f07ba5ab6fd601fba27c679b15",
+    "adapter/outbound/shadowquic.go": "8fefe367c8e96d959df43b05ebf57cb012309f1c",
+    "adapter/outbound/shadowsocks.go": "8c562a8d9ade6942e2d69d770eb8cb5add3b0945",
+    "adapter/outbound/shadowsocksr.go": "fd386a8a668bd0d58ed6f3c9003811e0331769d9",
+    "adapter/outbound/shadowtls.go": "07f98e91132066af3d030fc0ac604fef7a2f689f",
+    "adapter/outbound/singmux.go": "57a64c2e319e4a7c9489466ee562965287977c1e",
+    "adapter/outbound/snell.go": "30ef8f96ebbfed39fd8e3d845bd39f29698abcac",
+    "adapter/outbound/socks5.go": "7f3f111fe56cea3a467e5f1c7012053b6c040a30",
+    "adapter/outbound/ssh.go": "601dfc84f85a9427d06310367b55ec8d5bb27cfb",
+    "adapter/outbound/sudoku.go": "2b8a92be06911de89d552b77d85ffe85c9414318",
+    "adapter/outbound/tailscale.go": "2d487da5f6193d5ffbb4ade0af49714a78f47b69",
+    "adapter/outbound/tlsmirror.go": "0731246bd5a20f87a9f6fc8c81f505d913a32947",
+    "adapter/outbound/trojan.go": "d581e80a6f20b089c1ea9e686a4ad6f6edc8e394",
+    "adapter/outbound/trusttunnel.go": "81f784dab8345cef3d362ef14bdda4d3e4d66c7b",
+    "adapter/outbound/tuic.go": "ed54d99f255603f4869f34d1f6769cc1ab8facb9",
+    "adapter/outbound/util.go": "41bc30565cfde909a0c2d8ceead25b8cbe8107c5",
+    "adapter/outbound/vless.go": "1e5b168ffe84af64c35de9e492de76a3d9ced1e2",
+    "adapter/outbound/vmess.go": "04a53af1d80b3c7c4e243d79cbe7ac3b0aaf2a9a",
+    "adapter/outbound/wireguard.go": "54a671e8a1dca7c458ded0070de0d538ab21e2c4",
+    "adapter/outbound/zerotier.go": "deca249b9b9de3683185b843e6a603ca93970f69",
+    "adapter/parser.go": "68bccdbf283cdf54fcf54a8016cabbf89d736c6c"
+  }
+}

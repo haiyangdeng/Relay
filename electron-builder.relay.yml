@@ -1,0 +1,67 @@
+appId: local.relay.network.preview
+productName: Relay
+copyright: Relay contributors; Clash Party and third-party notices retained
+buildVersion: '2'
+directories:
+  output: release
+  buildResources: build
+files:
+  - out/**
+  - package.json
+  - LICENSE
+  - NOTICE.md
+  - docs/THIRD_PARTY_NOTICES.md
+  - docs/ASSETS.md
+  - docs/licenses/**
+  - src/main/relay/**/*LICENSE*
+  - src/main/relay/**/vendor/*provenance*
+  - native/**/LICENSE*
+  - native/**/NOTICE*
+  - native/**/UPSTREAM*
+  - resources/relay-tray-template.png
+  - resources/relay-tray-blue.png
+  - resources/relay-tray-green.png
+  - resources/relay-tray-red.png
+  - resources/relay-tray-blue-dark.png
+  - resources/relay-tray-green-dark.png
+  - resources/relay-tray-red-dark.png
+  - '!**/*.map'
+extraResources:
+  - from: extra/relay/
+    to: relay/
+mac:
+  target: dir
+  icon: build/relay.icns
+  identity: '-'
+  hardenedRuntime: true
+  # These release bytes are pinned by manifest.json, including their original
+  # linker signature (ARM) / unsigned resource state (Intel).
+  signIgnore:
+    # RelayBrowser.app is signed as one URL-handler bundle in native staging.
+    # The standalone browser resource is no longer shipped.
+    - /Contents/Resources/relay/RelayBrowser\.app($|/)
+    # The ordinary-UID observer already has its verified universal runtime signature.
+    - /Contents/Resources/relay/RelayNetworkObserver$
+    - /Contents/Resources/relay/core/darwin-arm64/mihomo$
+    - /Contents/Resources/relay/core/darwin-x64/mihomo$
+    # Thin Core already carries its paired development signature and exact pin.
+    - /Contents/Resources/relay/core-geodata-v1/darwin-arm64/mihomo$
+    - /Contents/Resources/relay/core-geodata-v1/darwin-x64/mihomo$
+    # Publisher-approved Node resources retain their original signatures/bytes.
+    # The afterSign CLI verifier rejects any manifest/architecture/hash mismatch.
+    - /Contents/Resources/relay/guard-cli/arm64/node$
+    - /Contents/Resources/relay/guard-cli/x64/node$
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  minimumSystemVersion: '13.0'
+  notarize: false
+  category: public.app-category.developer-tools
+npmRebuild: false
+publish: []
+afterSign: scripts/relay/verify-bundled-core-pins.cjs
+fileAssociations:
+  - ext: cpx
+    name: CPX Plugin Descriptor
+    description: Relay public plugin descriptor
+    mimeType: application/x-clash-party-plugin
+    role: Viewer

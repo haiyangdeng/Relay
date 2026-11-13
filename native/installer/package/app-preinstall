@@ -1,0 +1,70 @@
+#!/bin/sh
+set -eu
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export PATH
+fail() { echo "Relay App installation refused: $*" >&2; exit 1; }
+[ "$(/usr/bin/id -u)" = 0 ] || fail 'administrator authorization required'
+[ "${2:-invalid}" = / ] && [ "${3:-invalid}" = / ] || fail 'only the running system volume is supported'
+# The payload must never replace a running or unrecognized existing App. There
+# is deliberately no version-based overwrite, process stop, or relocation.
+for directory in / /Applications; do
+    [ -d "$directory" ] && [ ! -L "$directory" ] || fail 'unsafe Applications directory'
+    [ "$(/usr/bin/stat -f '%u' "$directory")" = 0 ] || fail 'Applications directory must be administrator-owned'
+    permissions=$(/usr/bin/stat -f '%Lp' "$directory")
+    # /Applications may be group-writable by administrators on standard macOS.
+    [ "$((0$permissions & 06002))" = 0 ] || fail 'Applications directory is unsafe'
+    if [ "$((0$permissions & 020))" != 0 ]; then
+        case "$(/usr/bin/stat -f '%g' "$directory")" in 0|80) ;; *) fail 'Applications directory has an untrusted writable group';; esac
+    fi
+done
+for target in /Applications/Relay.app \
+    '/Library/Application Support/Relay/SystemProxy' \
+    '/Library/Application Support/Relay/Tun' \
+    '/Library/Application Support/Relay/TunManaged' \
+    '/Library/Application Support/Relay/Uninstall' \
+    /Library/PrivilegedHelperTools/local.relay.network.system-proxy \
+    /Library/PrivilegedHelperTools/local.relay.network.tun \
+    /Library/PrivilegedHelperTools/local.relay.network.tun.uninstall \
+    /Library/PrivilegedHelperTools/local.relay.network.tun.uninstall-intent.json \
+    /Library/PrivilegedHelperTools/local.relay.network.tun.operation-lock \
+    /Library/PrivilegedHelperTools/local.relay.network.tun.uninstall-active \
+    /Library/PrivilegedHelperTools/.local.relay.network.tun.network-executor-v1-publish-* \
+    /Library/LaunchDaemons/local.relay.network.system-proxy.plist \
+    /Library/LaunchDaemons/local.relay.network.uninstall.plist \
+    /Library/LaunchDaemons/local.relay.network.tun.plist; do
+    if [ -e "$target" ] || [ -L "$target" ]; then
+        fail "已有 Relay 安装项：${target}。请先退出 Relay 并运行 Relay 卸载工具。"
+    fi
+done
+
+inventory=$(/usr/sbin/pkgutil --pkgs) || fail 'package inventory unavailable'
+while IFS= read -r installed; do
+    case "$installed" in
+        local.relay.network.app|local.relay.network.system-proxy.v1|local.relay.network.tun.network-executor-v1|local.relay.network.tun.feasibility|local.relay.network.tun.core-managed-v1|local.relay.network.tun.core-managed-v2)
+            fail "已有 Relay 安装记录：${installed}。请先运行 Relay 卸载工具。"
+            ;;
+    esac
+done <<EOF
+$inventory
+EOF
+
+for service in local.relay.network.system-proxy local.relay.network.tun local.relay.network.uninstall; do
+    if /bin/launchctl print "system/$service" >/dev/null 2>&1; then
+        fail "已有 Relay 服务：${service}。请先运行 Relay 卸载工具。"
+    else
+        result=$?
+        [ "$result" = 113 ] || fail 'service inventory unavailable'
+    fi
+done
+
+# A ZIP copy can keep running from outside /Applications or after the bundle was moved.
+processes=$(/bin/ps -A -o comm=) || fail 'process inventory unavailable'
+while IFS= read -r process; do
+    case "$process" in
+        */Contents/MacOS/Relay|*/Relay.app/Contents/*)
+            fail 'Relay 仍在运行。请通过 Relay 菜单退出应用，再重新安装。'
+            ;;
+    esac
+done <<EOF
+$processes
+EOF

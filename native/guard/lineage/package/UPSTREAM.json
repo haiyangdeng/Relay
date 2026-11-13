@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "adoptedScope": "ES SYSX Info/entitlement layout only; no Santa ES policy/monitor/bootstrap/earlyboot code",
+  "primaryAPI": {
+    "path": "/Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/share/man/man7/EndpointSecurity.7",
+    "sha256": "dadc08bd25b66617c2d03c9d4b4630ae324c09c2ffdd148980ad0b465cc02d4b",
+    "lines": [15, 34],
+    "scope": "NSEndpointSecurityMachServiceName and explicit absence of EarlyBoot"
+  },
+  "sources": [
+    {
+      "repo": "https://github.com/northpolesec/santa",
+      "tag": "2026.9",
+      "commit": "d59f6b134323a940686c1b3135c5990ea93efd3d",
+      "path": "Source/santad/Info.plist",
+      "url": "https://raw.githubusercontent.com/northpolesec/santa/d59f6b134323a940686c1b3135c5990ea93efd3d/Source/santad/Info.plist",
+      "sha256": "c150d1c972e9ddc863d71a0c92583196a350bf397a6c0a47abdcaad7190698c8"
+    },
+    {
+      "repo": "https://github.com/northpolesec/santa",
+      "tag": "2026.9",
+      "commit": "d59f6b134323a940686c1b3135c5990ea93efd3d",
+      "path": "Source/santad/com.northpolesec.santa.daemon.systemextension-adhoc.entitlements",
+      "url": "https://raw.githubusercontent.com/northpolesec/santa/d59f6b134323a940686c1b3135c5990ea93efd3d/Source/santad/com.northpolesec.santa.daemon.systemextension-adhoc.entitlements",
+      "sha256": "594990dd76c66c086d5028b1eb822b29f69bccdcd16fa4a9c95ccf5d5eaabe0a"
+    },
+    {
+      "repo": "https://github.com/northpolesec/santa",
+      "tag": "2026.9",
+      "commit": "d59f6b134323a940686c1b3135c5990ea93efd3d",
+      "path": "LICENSE",
+      "url": "https://raw.githubusercontent.com/northpolesec/santa/d59f6b134323a940686c1b3135c5990ea93efd3d/LICENSE",
+      "sha256": "8c6db340475136df3c1201d458fa5755698eace76e510471ecc9d857d6083dac"
+    }
+  ],
+  "adaptation": [
+    "Relay fixed bundle/executable/version/AppGroup/Mach service and default-off metadata",
+    "Do not adopt Santa NSEndpointSecurityEarlyBoot; no global execution/mount barrier",
+    "Reuse current Relay explicit source/compiler closure; raw development output only; no signing or deployment"
+  ],
+  "license": "LICENSE.Santa.txt",
+  "executionAuthorizationReference": {
+    "repo": "https://github.com/northpolesec/santa",
+    "commit": "885aaff85ae97695f836d3b0e95b368b53abb485",
+    "path": "Source/santad/EventProviders/SNTEndpointSecurityAuthorizer.mm",
+    "scope": "Actual future target.audit_token use before ALLOW and cache:false responses. Relay adds its own authenticated NE handoff; Santa authorization databases or global execution rules are not imported.",
+    "limits": "AUTH deadline failure can implicitly ALLOW. Static source and handoff receipts do not prove inherited-flow or ES-unavailable protection."
+  }
+}

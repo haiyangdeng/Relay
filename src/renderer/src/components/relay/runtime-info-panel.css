@@ -1,0 +1,304 @@
+.relay-runtime-page {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+.relay-workspace .relay-runtime-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.relay-runtime-spacer {
+  flex: 1;
+}
+.relay-workspace .relay-runtime-toolbar input:not([type='checkbox']) {
+  flex: 1 1 180px;
+  width: auto;
+}
+.relay-workspace .relay-runtime-toolbar select {
+  width: auto;
+  max-width: 220px;
+}
+.relay-workspace .relay-runtime-page button {
+  border: 1px solid hsl(var(--heroui-divider));
+  border-radius: 8px;
+  padding: 7px 10px;
+  font-size: 12px;
+  background: hsl(var(--heroui-content2));
+  color: hsl(var(--heroui-foreground));
+  white-space: nowrap;
+}
+.relay-workspace .relay-runtime-page button[aria-pressed='true'] {
+  background: hsl(var(--heroui-primary));
+  color: hsl(var(--heroui-primary-foreground));
+}
+.relay-workspace .relay-runtime-page button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.relay-workspace .relay-runtime-page .relay-runtime-danger {
+  color: hsl(var(--heroui-danger));
+}
+.relay-runtime-status {
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: 7px;
+  background: hsl(var(--heroui-content2));
+}
+.relay-runtime-profile {
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.relay-runtime-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+.relay-runtime-stats > div,
+.relay-network-interfaces,
+.relay-probe-card {
+  padding: 14px;
+  border: 1px solid hsl(var(--heroui-divider));
+  border-radius: 12px;
+  background: hsl(var(--heroui-content1));
+}
+.relay-runtime-stats > div {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.relay-runtime-stats span {
+  color: hsl(var(--heroui-default-500));
+  font-size: 12px;
+}
+.relay-runtime-stats strong {
+  font-size: 18px;
+}
+.relay-workspace .relay-runtime-page small {
+  margin: 0;
+  font-size: 11px;
+  letter-spacing: 0;
+  color: hsl(var(--heroui-default-500));
+}
+.relay-runtime-empty {
+  padding: 40px 16px;
+  text-align: center;
+  color: hsl(var(--heroui-default-500));
+  font-size: 13px;
+}
+.relay-runtime-empty a {
+  display: block;
+  margin-top: 10px;
+  color: hsl(var(--heroui-primary));
+}
+.relay-runtime-advanced {
+  border-top: 1px solid hsl(var(--heroui-divider));
+  padding-top: 10px;
+  font-size: 12px;
+}
+.relay-runtime-advanced > summary {
+  cursor: pointer;
+  color: hsl(var(--heroui-default-500));
+  margin-bottom: 8px;
+}
+.relay-runtime-columns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.relay-workspace .relay-runtime-columns label {
+  flex-direction: row;
+  align-items: center;
+  margin: 0;
+}
+.relay-runtime-connections {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.relay-connection-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid hsl(var(--heroui-divider));
+  border-radius: 12px;
+  padding: 12px;
+  background: hsl(var(--heroui-content1));
+}
+.relay-connection-main {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  flex: 1;
+}
+.relay-workspace .relay-runtime-page .relay-connection-open {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  white-space: normal;
+}
+.relay-workspace .relay-runtime-page .relay-connection-open:hover > strong {
+  color: hsl(var(--heroui-primary));
+}
+.relay-workspace .relay-runtime-page .relay-connection-icon {
+  flex-shrink: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: hsl(var(--heroui-primary));
+}
+.relay-workspace .relay-runtime-page .relay-icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 5px;
+}
+.relay-connection-main > strong {
+  font-size: 14px;
+}
+.relay-connection-main > span {
+  color: hsl(var(--heroui-default-500));
+}
+.relay-connection-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.relay-connection-tags > span {
+  padding: 2px 6px;
+  border: 1px solid hsl(var(--heroui-divider));
+  border-radius: 5px;
+  font-size: 11px;
+}
+.relay-connection-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  align-self: flex-start;
+}
+.relay-connection-actions time {
+  font-size: 11px;
+  color: hsl(var(--heroui-default-500));
+  white-space: nowrap;
+  padding-top: 6px;
+}
+.relay-probes {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.relay-probe-scope {
+  color: hsl(var(--heroui-default-500));
+  font-size: 11px;
+  margin-top: 8px;
+}
+.relay-probe-ip-value {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+.relay-probe-result > :nth-child(even) {
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+.relay-probe-measurement > span:first-child {
+  width: 75px;
+  flex-shrink: 0;
+}
+.relay-probe-measurement > span:last-child {
+  width: 76px;
+  flex-shrink: 0;
+  text-align: right;
+  font-size: 12px;
+}
+.relay-delay-track {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
+}
+.relay-delay-track > span {
+  height: 6px;
+  border-radius: 6px;
+}
+.relay-delay-average {
+  color: hsl(var(--heroui-primary));
+  font-size: 12px;
+}
+.relay-log-list {
+  margin-top: 12px;
+  max-height: calc(100vh - 230px);
+  overflow: auto;
+}
+.relay-log-list .text-default {
+  color: hsl(var(--heroui-default-500));
+}
+.relay-workspace .relay-log-line {
+  margin: 0 0 8px;
+  padding: 12px;
+  border: 1px solid hsl(var(--heroui-divider));
+  border-radius: 12px;
+  background: hsl(var(--heroui-content1));
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font:
+    12px/1.6 ui-monospace,
+    monospace;
+}
+.relay-network-interface {
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+  padding: 10px 0;
+  border-top: 1px solid hsl(var(--heroui-divider));
+  font-size: 13px;
+}
+.relay-network-interface > div {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 5px;
+  overflow-wrap: anywhere;
+}
+.relay-network-interface small {
+  margin-left: 8px !important;
+}
+.relay-probe-result {
+  padding: 12px 0;
+  display: grid;
+  grid-template-columns: 100px 1fr;
+  gap: 10px;
+  font-size: 13px;
+}
+.relay-probe-result strong {
+  color: hsl(var(--heroui-primary));
+  overflow-wrap: anywhere;
+}
+.relay-probe-measurement {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 0;
+  border-top: 1px solid hsl(var(--heroui-divider));
+  font-size: 13px;
+}
+@media (max-width: 750px) {
+  .relay-connection-card {
+    align-items: flex-start;
+    gap: 8px;
+  }
+  .relay-connection-actions {
+    flex-direction: column-reverse;
+  }
+}

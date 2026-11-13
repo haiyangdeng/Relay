@@ -1,0 +1,111 @@
+.relay-workspace .relay-network-settings {
+  margin: 0;
+}
+.relay-network-settings .relay-network-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 8px 14px;
+}
+.relay-workspace .relay-network-settings h2 {
+  margin: 0;
+  font-size: 16px;
+}
+.relay-workspace .relay-network-settings p {
+  margin: 6px 0;
+}
+.relay-workspace .relay-network-settings label {
+  margin: 0;
+  font-weight: 400;
+}
+.relay-workspace .relay-network-settings input:not([type='checkbox']),
+.relay-workspace .relay-network-settings select {
+  width: min(100%, 360px);
+  padding: 6px 10px;
+  font-size: 13px;
+}
+.relay-workspace .relay-network-settings input[type='number'] {
+  max-width: 110px;
+}
+.relay-network-settings .relay-setting-row {
+  display: flex;
+  min-height: 42px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  border-bottom: 1px solid hsl(var(--heroui-divider));
+  padding: 9px 0;
+}
+.relay-network-settings .relay-setting-row:last-child {
+  border-bottom: 0;
+}
+.relay-network-settings .relay-setting-row > span {
+  flex-shrink: 0;
+}
+.relay-network-settings .relay-network-services {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 18px;
+  padding: 8px 0;
+}
+.relay-workspace .relay-network-settings .relay-network-services label {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 7px;
+}
+.relay-network-settings .relay-network-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 8px;
+}
+.relay-network-settings > details {
+  margin: 14px 8px;
+}
+.relay-network-settings summary {
+  cursor: pointer;
+  font-size: 13px;
+  padding: 8px 0;
+}
+.relay-network-settings .relay-list-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.relay-workspace .relay-network-settings .relay-list-row input {
+  max-width: none;
+  width: 100%;
+  flex: 1;
+  min-width: 0;
+}
+.relay-network-settings .relay-network-state {
+  font-size: 12px;
+  color: hsl(var(--heroui-default-600));
+}
+.relay-network-settings .relay-network-notice {
+  margin: 12px 8px;
+  font-size: 13px;
+}
+.relay-network-settings .relay-current-endpoint {
+  font-variant-numeric: tabular-nums;
+}
+.relay-workspace .relay-network-settings .relay-network-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 0;
+}
+.relay-workspace .relay-network-settings .relay-network-field textarea {
+  margin: 0;
+}
+@media (max-width: 700px) {
+  .relay-network-settings .relay-setting-row {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .relay-network-settings .relay-network-toolbar {
+    flex-wrap: wrap;
+  }
+}

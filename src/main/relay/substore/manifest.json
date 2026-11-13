@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "backend": {
+    "version": "2.44.2",
+    "releaseURL": "https://github.com/sub-store-org/Sub-Store/releases/tag/2.44.2",
+    "url": "https://github.com/sub-store-org/Sub-Store/releases/download/2.44.2/sub-store.bundle.js",
+    "sha256": "8edbf4b5b47fc68a711790049625df7beac5bd1c8853f52e4d39d8f42dee494a",
+    "size": 3347057
+  },
+  "frontend": {
+    "version": "2.34.1",
+    "releaseURL": "https://github.com/sub-store-org/Sub-Store-Front-End/releases/tag/2.34.1",
+    "url": "https://github.com/sub-store-org/Sub-Store-Front-End/releases/download/2.34.1/dist.zip",
+    "sha256": "b8116df45fe061987c9bce09d15adc8f8e311134e9105be040b94db43ebc433d",
+    "size": 2437313
+  }
+}

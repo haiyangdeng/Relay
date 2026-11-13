@@ -1,0 +1,47 @@
+[ "${2:-invalid}" = / ] && [ "${3:-invalid}" = / ] || fail 'only the running system volume is supported'
+if present "$root" || present "$helper" || present "$daemon"; then
+    fail 'existing Relay component; uninstall it before installing a fresh component'
+fi
+parents create
+console_uid
+absent "$root"
+absent "$helper"
+absent "$daemon"
+service_absent
+inventory=$(/usr/sbin/pkgutil --pkgs) || fail 'package inventory unavailable'
+while IFS= read -r installed; do [ "$installed" != "$receipt" ] || fail 'existing package receipt; uninstall the existing component first'; done <<EOF
+$inventory
+EOF
+scripts=$(CDPATH= cd -P "$(/usr/bin/dirname "$0")" && /bin/pwd -P) || fail 'package scripts unavailable'
+directory "$scripts"
+pinned "$scripts/uninstall" 755 '@UNINSTALLER_SHA256@'
+pinned "$scripts/installation.template.json" 644 '@TEMPLATE_SHA256@'
+if ! present "$relay"; then /bin/mkdir -m 755 "$relay"; fi
+directory "$relay"
+# Atomic reservation also rejects a concurrent installation. The shared Relay
+# parent is never claimed or removed; TunManaged may already live beside us.
+/bin/mkdir -m 755 "$root"
+ready=0
+cleanup() {
+    result=$?
+    trap - EXIT
+    if [ "$ready" != 1 ]; then
+        for file in "$root/.install-uid" "$pending" "$uninstaller"; do
+            if present "$file"; then
+                [ ! -L "$file" ] && [ "$(/usr/bin/stat -f '%u:%l' "$file")" = '0:1' ] || exit 1
+                /bin/rm "$file" || result=1
+            fi
+        done
+        /bin/rmdir "$root" || result=1
+    fi
+    exit "$result"
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+printf '%s\n' "$console" > "$root/.install-uid"
+/usr/bin/sed "s/\"clientUID\":0/\"clientUID\":$console/" "$scripts/installation.template.json" > "$pending"
+/bin/chmod 600 "$root/.install-uid" "$pending"
+/usr/bin/install -m 755 "$scripts/uninstall" "$uninstaller"
+plan="$pending"; plan_mode=600; validate_plan
+[ "$bound_uid" = "$console" ] && [ "$(value uninstallerSHA256)" = "$(digest "$uninstaller")" ] || fail 'installation reservation mismatch'
+ready=1

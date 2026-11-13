@@ -1,0 +1,33 @@
+// Certificate construction adapted from the PKIjs 3.4.1 Certificate example.
+// Keys are created only when explicitly called. No CA private key is exported.
+import { webcrypto, randomBytes } from 'node:crypto'
+import { Certificate, CryptoEngine, AttributeTypeAndValue, BasicConstraints, Extension, ExtKeyUsage, GeneralName, GeneralNames } from 'pkijs'
+import { Integer, Utf8String, BitString, OctetString } from 'asn1js'
+const algorithm = { name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1,0,1]), hash: 'SHA-256' }
+const pem = (name, bytes) => '-----BEGIN '+name+'-----\n'+Buffer.from(bytes).toString('base64').match(/.{1,64}/g).join('\n')+'\n-----END '+name+'-----\n'
+export async function mintScopedTLS() {
+  const engine = new CryptoEngine({name: 'RelayScopedCLI', crypto: webcrypto})
+  const caKeys = await webcrypto.subtle.generateKey(algorithm, false, ['sign','verify'])
+  const leafKeys = await webcrypto.subtle.generateKey(algorithm, true, ['sign','verify'])
+  const label = 'Relay session '+randomBytes(16).toString('hex')
+  const name = (value) => new AttributeTypeAndValue({type:'2.5.4.3',value:new Utf8String({value})})
+  const make = (ca) => {
+    const c = new Certificate();c.version=2
+    const serial=randomBytes(16);serial[0]&=0x7f;serial[0]|=1
+    c.serialNumber=new Integer({valueHex:serial.buffer.slice(serial.byteOffset,serial.byteOffset+serial.length)})
+    c.issuer.typesAndValues.push(name(label + ' CA'))
+    c.subject.typesAndValues.push(name(label + (ca ? ' CA' : ' proxy')))
+    c.notBefore.value=new Date(Date.now()-60_000);c.notAfter.value=new Date(Date.now()+8*60*60*1000)
+    c.extensions=[new Extension({extnID:'2.5.29.19',critical:true,extnValue:new BasicConstraints({cA:ca,...(ca?{pathLenConstraint:0}:{})}).toSchema().toBER(false)}),
+      new Extension({extnID:'2.5.29.15',critical:true,extnValue:new BitString({valueHex:new Uint8Array([ca?0x06:0xa0]).buffer}).toBER(false)})]
+    return c
+  }
+  const ca=make(true), leaf=make(false)
+  leaf.extensions.push(new Extension({extnID:'2.5.29.37',extnValue:new ExtKeyUsage({keyPurposes:['1.3.6.1.5.5.7.3.1']}).toSchema().toBER(false)}),
+    new Extension({extnID:'2.5.29.17',extnValue:new GeneralNames({names:[new GeneralName({type:7,value:new OctetString({valueHex:new Uint8Array([127,0,0,1]).buffer})})]}).toSchema().toBER(false)}))
+  await ca.subjectPublicKeyInfo.importKey(caKeys.publicKey,engine);await ca.sign(caKeys.privateKey,'SHA-256',engine)
+  await leaf.subjectPublicKeyInfo.importKey(leafKeys.publicKey,engine);await leaf.sign(caKeys.privateKey,'SHA-256',engine)
+  const secret=await webcrypto.subtle.exportKey('pkcs8',leafKeys.privateKey)
+  const key=Buffer.from(pem('PRIVATE KEY',secret));new Uint8Array(secret).fill(0)
+  return { key, cert:pem('CERTIFICATE',leaf.toSchema().toBER(false)), ca:pem('CERTIFICATE',ca.toSchema().toBER(false)) }
+}

@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "name": "mihomo-provider-file-v1",
+  "source": {
+    "repository": "https://github.com/MetaCubeX/mihomo",
+    "commit": "3f27ef39f8c96bbfbc8b0b9bb10f5c9ef60149d8",
+    "license": "GPL-3.0"
+  },
+  "requires": {
+    "extension": "../mihomo-geodata-v1",
+    "manifestSHA256": "37a2d8bffa9de94997f14c29654d60746d4724b6f03b34369a2eb8566f5da398"
+  },
+  "overlays": {
+    "component/resource/fetcher.go": {
+      "path": "overlay/component/resource/fetcher.go",
+      "originalSHA256": "647fdd5906c41202974577ff96a00ebc6bda441ae3e9d7717037cedff4eee903",
+      "sha256": "c78f39fd16a65903f4f37322612c0c078fb65766b6b1847e7395e457ac57a197"
+    }
+  },
+  "patch": {
+    "path": "patches/0001-serialize-local-file-updates.patch",
+    "sha256": "fa6fec94f3a3d40bff3a4545acaa01dd10c86c88147b3a20634b856472d80a8d"
+  },
+  "tests": {
+    "tests/relay_update_order_test.go": "1078f2eb684de66e178338a09660d3649e28eecf35838a6fa633681b1f25ae29"
+  },
+  "scope": {
+    "vehicle": "File only",
+    "publicCoreAPIChanged": false,
+    "globalLegacyHashTypeChanged": false,
+    "geoAPIVersionChanged": false,
+    "newCoreVersionAndPinsWritten": false,
+    "existingGeoOverlayModified": false
+  },
+  "coreVersion": "relay-geodata-v1p1-3f27"
+}

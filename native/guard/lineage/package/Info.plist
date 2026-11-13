@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleIdentifier</key><string>local.relay.network.preview.guard.lineage</string>
+  <key>CFBundleName</key><string>RelayGuardLineageExtension</string>
+  <key>CFBundleExecutable</key><string>RelayGuardLineageExtension</string>
+  <key>CFBundlePackageType</key><string>SYSX</string>
+  <key>CFBundleShortVersionString</key><string>2.0.0</string>
+  <key>CFBundleVersion</key><string>3</string>
+  <key>LSMinimumSystemVersion</key><string>13.0</string>
+  <key>NSSystemExtensionUsageDescription</key><string>Relay 可观察已确认 Claude 进程的派生关系。此离线开发组件尚不可启用，也不提供未知 CLI 的完整保护。</string>
+  <key>NSEndpointSecurityMachServiceName</key><string>__RELAY_PUBLISHER_TEAM_ID__.local.relay.network.preview.guard.lineage.ipc</string>
+</dict></plist>

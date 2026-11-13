@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "contract": "relay-ordinary-core-owner-v1",
+  "enabled": false,
+  "publisherTeamID": null,
+  "applicationID": "local.relay.network.preview",
+  "helperID": "local.relay.network.preview.core-owner",
+  "helperName": "RelayCoreOwner",
+  "assets": { "arm64": null, "x64": null }
+}

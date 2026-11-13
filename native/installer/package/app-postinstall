@@ -1,0 +1,154 @@
+#!/bin/sh
+set -eu
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export PATH
+umask 077
+fail() { echo "Relay uninstall monitor installation refused: $*" >&2; exit 1; }
+present() { [ -e "$1" ] || [ -L "$1" ]; }
+absent() { if present "$1"; then fail "already present: $1"; fi; }
+digest() { /usr/bin/shasum -a 256 "$1" | /usr/bin/awk '{print $1}'; }
+directory() {
+    [ -d "$1" ] && [ ! -L "$1" ] || fail "unsafe directory: $1"
+    [ "$(/usr/bin/stat -f '%u' "$1")" = 0 ] || fail "directory is not administrator-owned: $1"
+    permissions=$(/usr/bin/stat -f '%Lp' "$1") || fail 'directory metadata'
+    [ "$((0$permissions & 06022))" = 0 ] || fail "writable directory: $1"
+}
+pinned() {
+    [ -f "$1" ] && [ ! -L "$1" ] || fail "unsafe file: $1"
+    [ "$(/usr/bin/stat -f '%u:%Lp:%l' "$1")" = "0:$2:1" ] || fail "file ownership, mode or links: $1"
+    [ "$(digest "$1")" = "$3" ] || fail "file differs from this package: $1"
+}
+[ "$(/usr/bin/id -u)" = 0 ] || fail 'administrator authorization required'
+[ "${2:-invalid}" = / ] && [ "${3:-invalid}" = / ] || fail 'only the running system volume is supported'
+scripts=$(CDPATH= cd -P "$(/usr/bin/dirname "$0")" && /bin/pwd -P)
+directory "$scripts"
+root='/Library/Application Support/Relay/Uninstall'
+service=local.relay.network.uninstall
+daemon="/Library/LaunchDaemons/$service.plist"
+# Use the same console account as the proxy helper. An unattended root install
+# must fail instead of silently omitting the automatic uninstall monitor.
+client_uid=$(/usr/bin/stat -f '%u' /dev/console) || fail 'console user unavailable'
+case "$client_uid" in ''|*[!0-9]*) fail 'invalid console user';; esac
+[ "$client_uid" -ge 501 ] && [ "$client_uid" -lt 4294967295 ] || fail 'an ordinary logged-in console user is required'
+client_user=$(/usr/bin/id -nu "$client_uid") || fail 'console account unavailable'
+case "$client_user" in ''|root|*/*) fail 'invalid console account';; esac
+[ "$(/usr/bin/id -u "$client_user")" = "$client_uid" ] || fail 'console account changed'
+client_home=$(/usr/bin/dscl -plist /Search -read "/Users/$client_user" NFSHomeDirectory | /usr/bin/plutil -extract 'dsAttrTypeStandard:NFSHomeDirectory.0' raw -o - -) || fail 'console home unavailable'
+case "$client_home" in /|''|/var/root|/private/var/root) fail 'invalid console home';; /*) ;; *) fail 'console home must be absolute';; esac
+[ -d "$client_home" ] && [ ! -L "$client_home" ] || fail 'unsafe console home'
+[ "$(/usr/bin/stat -f '%u' "$client_home")" = "$client_uid" ] || fail 'console home ownership mismatch'
+for parent in / /Library '/Library/Application Support' /Library/LaunchDaemons; do directory "$parent"; done
+absent "$root"
+absent "$daemon"
+if /bin/launchctl print "system/$service" >/dev/null 2>&1; then fail 'uninstall monitor is already registered'; else
+    [ "$?" = 113 ] || fail 'uninstall monitor inventory unavailable'
+fi
+pinned "$scripts/RelayUninstallSupervisor" 755 '@SUPERVISOR_SHA256@'
+pinned "$scripts/RelayNative" 755 '@NATIVE_SHA256@'
+pinned "$scripts/$service.plist" 644 '@UNINSTALL_DAEMON_SHA256@'
+/usr/bin/codesign --verify --strict --all-architectures "$scripts/RelayUninstallSupervisor"
+/usr/bin/codesign --verify --strict --all-architectures "$scripts/RelayNative"
+# Reserve and publish the helper only after the App payload was written. Both
+# scripts keep the standalone package's fixed-path and signature checks.
+ready=0
+daemon_published=0
+root_reserved=0
+helper_ready=0
+retire_staging_link() {
+    destination=$1; staging=$2; permissions=$3; expected=$4
+    if present "$destination" && present "$staging"; then
+        for file in "$destination" "$staging"; do
+            [ -f "$file" ] && [ ! -L "$file" ] &&
+                [ "$(/usr/bin/stat -f '%u:%Lp:%l' "$file")" = "0:$permissions:2" ] &&
+                [ "$(digest "$file")" = "$expected" ] || return 1
+        done
+        [ "$(/usr/bin/stat -f '%d:%i' "$destination")" = "$(/usr/bin/stat -f '%d:%i' "$staging")" ] || return 1
+        /bin/rm "$staging" || return 1
+    fi
+}
+cleanup() {
+    result=$?
+    trap - EXIT
+    if [ "$ready" != 1 ]; then
+        if [ "$root_reserved" = 1 ]; then
+            for recovery in "$root/intent.json" "$root/finalization.json"; do
+                if present "$recovery"; then
+                    [ -f "$recovery" ] && [ ! -L "$recovery" ] &&
+                        [ "$(/usr/bin/stat -f '%u:%Lp:%l' "$recovery")" = '0:644:1' ] || exit 1
+                    # The App can be trashed while Installer waits for ready.
+                    # Its accepted removal is now owned by the durable monitor;
+                    # installation rollback must not remove that recovery path.
+                    echo 'Relay automatic removal has begun; recovery components retained for its completion.' >&2
+                    exit "$result"
+                fi
+            done
+        fi
+        if [ "$daemon_published" = 1 ]; then
+            /bin/launchctl bootout "system/$service" >/dev/null 2>&1 || true
+            if /bin/launchctl print "system/$service" >/dev/null 2>&1; then
+                echo 'Relay uninstall monitor could not be stopped; recovery files retained.' >&2
+                exit 1
+            else
+                [ "$?" = 113 ] || exit 1
+            fi
+        fi
+        if [ "$root_reserved" = 1 ]; then
+            # A failed unlink after no-replace publication leaves exactly these
+            # two links to one inode. Retire only a fully pinned matching pair.
+            retire_staging_link "$root/RelayUninstallSupervisor" "$root/.install-supervisor" 755 '@SUPERVISOR_SHA256@' || exit 1
+            retire_staging_link "$root/RelayNative" "$root/.install-native" 755 '@NATIVE_SHA256@' || exit 1
+            retire_staging_link "$daemon" "$root/.install-daemon" 644 '@UNINSTALL_DAEMON_SHA256@' || exit 1
+            for file in "$root/RelayUninstallSupervisor" "$root/RelayNative" "$root/installation.json" "$root/ready.json" "$root/finalization.json" "$root/.install-supervisor" "$root/.install-native" "$root/.install-daemon" "$daemon"; do
+                if present "$file"; then
+                    [ ! -L "$file" ] && [ "$(/usr/bin/stat -f '%u:%l' "$file")" = '0:1' ] || exit 1
+                    /bin/rm "$file" || result=1
+                fi
+            done
+            /bin/rmdir "$root" || result=1
+        fi
+        # The verified helper uninstaller only removes this new installation;
+        # no App/core has started and no proxy setting was changed here.
+        if [ "$helper_ready" = 1 ]; then "$scripts/uninstall" || result=1; fi
+    fi
+    exit "$result"
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+"$scripts/proxy-preinstall" "$@"
+"$scripts/proxy-postinstall" "$@"
+helper_ready=1
+directory '/Library/Application Support/Relay'
+[ "$(/usr/bin/stat -f '%u' /dev/console)" = "$client_uid" ] || fail 'console user changed during installation'
+[ "$(/usr/bin/plutil -extract clientUID raw -o - '/Library/Application Support/Relay/SystemProxy/installation.json')" = "$client_uid" ] || fail 'proxy helper and uninstall monitor users differ'
+# Atomic reservation and no-replace publication prevent a competing installer
+# or unexpected existing file from changing which executable runs as root.
+/bin/mkdir -m 755 "$root"
+root_reserved=1
+publish() {
+    source=$1; destination=$2; permissions=$3; expected=$4; staging=$5
+    absent "$destination"
+    absent "$staging"
+    pinned "$source" "$permissions" "$expected"
+    /bin/cat "$source" > "$staging"
+    /bin/chmod "$permissions" "$staging"
+    pinned "$staging" "$permissions" "$expected"
+    /bin/link "$staging" "$destination"
+    /bin/rm "$staging"
+    pinned "$destination" "$permissions" "$expected"
+}
+publish "$scripts/RelayUninstallSupervisor" "$root/RelayUninstallSupervisor" 755 '@SUPERVISOR_SHA256@' "$root/.install-supervisor"
+publish "$scripts/RelayNative" "$root/RelayNative" 755 '@NATIVE_SHA256@' "$root/.install-native"
+publish "$scripts/$service.plist" "$daemon" 644 '@UNINSTALL_DAEMON_SHA256@' "$root/.install-daemon"
+daemon_published=1
+# Registration verifies the fixed App identity and captures its inode/bookmark.
+"$root/RelayUninstallSupervisor" --register --uid "$client_uid" --home "$client_home"
+/bin/launchctl bootstrap system "$daemon"
+/bin/launchctl print "system/$service" >/dev/null
+attempt=0
+until "$root/RelayUninstallSupervisor" --verify-ready; do
+    attempt=$((attempt + 1))
+    [ "$attempt" -lt 10 ] || fail 'uninstall monitor did not acquire the installed App'
+    /bin/sleep 1
+done
+ready=1
+echo 'Relay installed with automatic Trash uninstall monitoring. Network settings are unchanged.'

@@ -1,0 +1,34 @@
+{
+  "sources": [
+    {
+      "repository": "https://github.com/electron/electron",
+      "version": "v43.8.0",
+      "path": "docs/tutorial/native-code-and-electron-swift-macos.md",
+      "sha256": "a3f4a270c9ca718946dde006976c8184ed5dc7c8095853a6ef1b60433fe76554",
+      "adopted": "Swift NSObject / ObjC++ bridge; raw Node-API 4 replaces addon-api dependency"
+    },
+    {
+      "source": "Apple FilteringNetworkTraffic",
+      "archiveSHA256": "73bdbda7edfc6ecc74e39cfbf4a44833c40096884f688683252fc6160c1514e9",
+      "adopted": "activation/load-save-readback and extension main\u2192NEMachServiceName NSXPC listener",
+      "changes": "no automatic enable/replacement/fail-open; signed peers, local proof pre-enable then fail-closed unbound startup and post-enable bind"
+    },
+    {
+      "source": "Existing native/tun/RelayTunHelperTrust.swift and RelayTunOwnedChild.swift",
+      "adopted": "exact strict duplicate-key JSON scanner and bounded Darwin24 kernel listener observer",
+      "changes": "build-time source extraction only; privileged TUN executor is not linked"
+    }
+  ],
+  "scope": "Main native host, its signed extension session and owned stable Core only",
+  "currentRelease": "publisher nil; install/runtime/complete scope/scoped CLI false",
+  "limitations": [
+    "No live App/Core/system-manager/Provider executed",
+    "Known other signed processes including uncontrolled Node CLI are not blanket-blocked",
+    "Unknown global drop policy remains unapproved; current Provider refuses start",
+    "Only native code can issue proof; renderer cannot supply resource paths, identity, endpoint readiness or consent token"
+  ],
+  "licenses": [
+    "../management/LICENSE.Apple.txt",
+    "Electron MIT license retained by project upstream notices"
+  ]
+}

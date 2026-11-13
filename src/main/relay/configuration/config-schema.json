@@ -1,0 +1,1223 @@
+{
+  "version": "v1.19.33",
+  "families": {
+    "raw": {
+      "RawClashForAndroid": {
+        "fields": {
+          "append-system-dns": "bool",
+          "ui-subtitle-pattern": "string"
+        },
+        "embedded": [],
+        "source": "config/config.go"
+      },
+      "RawConfig": {
+        "fields": {
+          "port": "int",
+          "socks-port": "int",
+          "redir-port": "int",
+          "tproxy-port": "int",
+          "mixed-port": "int",
+          "ss-config": "string",
+          "vmess-config": "string",
+          "inbound-tfo": "bool",
+          "inbound-mptcp": "bool",
+          "authentication": "[]string",
+          "skip-auth-prefixes": "[]netip.Prefix",
+          "lan-allowed-ips": "[]netip.Prefix",
+          "lan-disallowed-ips": "[]netip.Prefix",
+          "allow-lan": "bool",
+          "bind-address": "string",
+          "mode": "T.TunnelMode",
+          "unified-delay": "bool",
+          "log-level": "log.LogLevel",
+          "ipv6": "bool",
+          "external-controller": "string",
+          "external-controller-routing-mark": "int",
+          "external-controller-pipe": "string",
+          "external-controller-unix": "string",
+          "external-controller-tls": "string",
+          "external-controller-cors": "RawCors",
+          "external-ui": "string",
+          "external-ui-url": "string",
+          "external-ui-name": "string",
+          "external-doh-server": "string",
+          "secret": "string",
+          "interface-name": "string",
+          "routing-mark": "int",
+          "tunnels": "[]LC.Tunnel",
+          "geo-auto-update": "bool",
+          "geo-update-interval": "int",
+          "geodata-mode": "bool",
+          "geodata-loader": "string",
+          "geosite-matcher": "string",
+          "tcp-concurrent": "bool",
+          "find-process-mode": "process.FindProcessMode",
+          "global-client-fingerprint": "string",
+          "global-ua": "string",
+          "etag-support": "bool",
+          "keep-alive-idle": "int",
+          "keep-alive-interval": "int",
+          "disable-keep-alive": "bool",
+          "proxy-providers": "map[string]map[string]any",
+          "rule-providers": "map[string]map[string]any",
+          "proxies": "[]map[string]any",
+          "proxy-groups": "[]map[string]any",
+          "rules": "[]string",
+          "sub-rules": "map[string][]string",
+          "listeners": "[]map[string]any",
+          "hosts": "map[string]any",
+          "dns": "RawDNS",
+          "ntp": "RawNTP",
+          "tun": "RawTun",
+          "tuic-server": "RawTuicServer",
+          "iptables": "RawIPTables",
+          "experimental": "RawExperimental",
+          "profile": "RawProfile",
+          "geox-url": "RawGeoXUrl",
+          "sniffer": "RawSniffer",
+          "tls": "RawTLS",
+          "clash-for-android": "RawClashForAndroid"
+        },
+        "embedded": [],
+        "source": "config/config.go"
+      },
+      "RawCors": {
+        "fields": {
+          "allow-origins": "[]string",
+          "allow-private-network": "bool"
+        },
+        "embedded": [],
+        "source": "config/config.go"
+      },
+      "RawDNS": {
+        "fields": {
+          "enable": "bool",
+          "prefer-h3": "bool",
+          "ipv6": "bool",
+          "ipv6-timeout": "uint",
+          "use-hosts": "bool",
+          "use-system-hosts": "bool",
+          "respect-rules": "bool",
+          "nameserver": "[]string",
+          "fallback": "[]string",
+          "fallback-filter": "RawFallbackFilter",
+          "fallback-lazy-query": "bool",
+          "listen": "string",
+          "listen-routing-mark": "int",
+          "enhanced-mode": "C.DNSMode",
+          "fake-ip-range": "string",
+          "fake-ip-range6": "string",
+          "fake-ip-filter": "[]string",
+          "fake-ip-filter-mode": "C.FilterMode",
+          "fake-ip-ttl": "int",
+          "default-nameserver": "[]string",
+          "cache-algorithm": "string",
+          "cache-max-size": "int",
+          "nameserver-policy": "*orderedmap.OrderedMap[string, any]",
+          "proxy-server-nameserver": "[]string",
+          "proxy-server-nameserver-policy": "*orderedmap.OrderedMap[string, any]",
+          "direct-nameserver": "[]string",
+          "direct-nameserver-follow-policy": "bool"
+        },
+        "embedded": [],
+        "source": "config/config.go"
+      },
+      "RawExperimental": {
+        "fields": {
+          "fingerprints": "[]string",
+          "quic-go-disable-gso": "bool",
+          "quic-go-disable-ecn": "bool",
+          "dialer-ip4p-convert": "bool"
+        },
+        "embedded": [],
+        "source": "config/config.go"
+      },
+      "RawFallbackFilter": {
+        "fields": {
+          "geoip": "bool",
+          "geoip-code": "string",
+          "ipcidr": "[]string",
+          "domain": "[]string",
+          "geosite": "[]string"
+        },
+        "embedded": [],
+        "source": "config/config.go"
+      },
+      "RawGeoXUrl": {
+        "fields": {
+          "geoip": "string",
+          "mmdb": "string",
+          "asn": "string",
+          "geosite": "string"
+        },
+        "embedded": [],
+        "source": "config/config.go"
+      },
+      "RawIPTables": {
+        "fields": {
+          "enable": "bool",
+          "inbound-interface": "string",
+          "bypass": "[]string",
+          "dns-redirect": "bool"
+        },
+        "embedded": [],
+        "source": "config/config.go"
+      },
+      "RawNTP": {
+        "fields": {
+          "enable": "bool",
+          "server": "string",
+          "port": "int",
+          "interval": "int",
+          "dialer-proxy": "string",
+          "write-to-system": "bool"
+        },
+        "embedded": [],
+        "source": "config/config.go"
+      },
+      "RawProfile": {
+        "fields": {
+          "store-selected": "bool",
+          "store-fake-ip": "bool"
+        },
+        "embedded": [],
+        "source": "config/config.go"
+      },
+      "RawSniffer": {
+        "fields": {
+          "enable": "bool",
+          "override-destination": "bool",
+          "sniffing": "[]string",
+          "force-domain": "[]string",
+          "skip-src-address": "[]string",
+          "skip-dst-address": "[]string",
+          "skip-domain": "[]string",
+          "port-whitelist": "[]string",
+          "force-dns-mapping": "bool",
+          "parse-pure-ip": "bool",
+          "sniff": "map[string]RawSniffingConfig"
+        },
+        "embedded": [],
+        "source": "config/config.go"
+      },
+      "RawSniffingConfig": {
+        "fields": {
+          "ports": "[]string",
+          "override-destination": "*bool"
+        },
+        "embedded": [],
+        "source": "config/config.go"
+      },
+      "RawTLS": {
+        "fields": {
+          "certificate": "string",
+          "private-key": "string",
+          "client-auth-type": "string",
+          "client-auth-cert": "string",
+          "ech-key": "string",
+          "custom-certifactes": "[]string"
+        },
+        "embedded": [],
+        "source": "config/config.go"
+      },
+      "RawTuicServer": {
+        "fields": {
+          "enable": "bool",
+          "listen": "string",
+          "token": "[]string",
+          "users": "map[string]string",
+          "certificate": "string",
+          "private-key": "string",
+          "congestion-controller": "string",
+          "max-idle-time": "int",
+          "authentication-timeout": "int",
+          "alpn": "[]string",
+          "max-udp-relay-packet-size": "int",
+          "cwnd": "int"
+        },
+        "embedded": [],
+        "source": "config/config.go"
+      },
+      "RawTun": {
+        "fields": {
+          "enable": "bool",
+          "device": "string",
+          "stack": "C.TUNStack",
+          "dns-mode": "string",
+          "dns-hijack": "[]string",
+          "auto-route": "bool",
+          "auto-detect-interface": "bool",
+          "mtu": "uint32",
+          "gso": "bool",
+          "gso-max-size": "uint32",
+          "inet6-address": "[]netip.Prefix",
+          "iproute2-table-index": "int",
+          "iproute2-rule-index": "int",
+          "auto-redirect": "bool",
+          "auto-redirect-input-mark": "uint32",
+          "auto-redirect-output-mark": "uint32",
+          "auto-redirect-iproute2-fallback-rule-index": "int",
+          "loopback-address": "[]netip.Addr",
+          "strict-route": "bool",
+          "route-address": "[]netip.Prefix",
+          "route-address-set": "[]string",
+          "route-exclude-address": "[]netip.Prefix",
+          "route-exclude-address-set": "[]string",
+          "include-interface": "[]string",
+          "exclude-interface": "[]string",
+          "include-uid": "[]uint32",
+          "include-uid-range": "[]string",
+          "exclude-uid": "[]uint32",
+          "exclude-uid-range": "[]string",
+          "exclude-src-port": "[]uint16",
+          "exclude-src-port-range": "[]string",
+          "exclude-dst-port": "[]uint16",
+          "exclude-dst-port-range": "[]string",
+          "include-android-user": "[]int",
+          "include-package": "[]string",
+          "exclude-package": "[]string",
+          "include-mac-address": "[]string",
+          "exclude-mac-address": "[]string",
+          "endpoint-independent-nat": "bool",
+          "udp-timeout": "int64",
+          "icmp-timeout": "int64",
+          "disable-icmp-forwarding": "bool",
+          "congestion-controller": "string",
+          "file-descriptor": "int",
+          "inet4-route-address": "[]netip.Prefix",
+          "inet6-route-address": "[]netip.Prefix",
+          "inet4-route-exclude-address": "[]netip.Prefix",
+          "inet6-route-exclude-address": "[]netip.Prefix",
+          "recvmsgx": "bool",
+          "sendmsgx": "bool",
+          "processors-per-channel": "int"
+        },
+        "embedded": [],
+        "source": "config/config.go"
+      },
+      "tunnel": {
+        "fields": {
+          "network": "[]string",
+          "address": "string",
+          "target": "string",
+          "proxy": "string"
+        },
+        "embedded": [],
+        "source": "listener/config/tunnel.go"
+      }
+    },
+    "inbound": {
+      "AnyTLSOption": {
+        "fields": {
+          "users": "map[string]string",
+          "certificate": "string",
+          "private-key": "string",
+          "client-auth-type": "string",
+          "client-auth-cert": "string",
+          "ech-key": "string",
+          "shadow-tls": "ShadowTLS",
+          "res-tls": "ResTLS",
+          "jls-config": "JLSConfig",
+          "allow-insecure": "bool",
+          "padding-scheme": "string"
+        },
+        "embedded": ["BaseOption"],
+        "source": "listener/inbound/anytls.go"
+      },
+      "AuthUser": {
+        "fields": {
+          "username": "string",
+          "password": "string"
+        },
+        "embedded": [],
+        "source": "listener/inbound/auth.go"
+      },
+      "BaseOption": {
+        "fields": {
+          "name": "string",
+          "listen": "string",
+          "port": "string",
+          "rule": "string",
+          "proxy": "string",
+          "routing-mark": "int"
+        },
+        "embedded": [],
+        "source": "listener/inbound/base.go"
+      },
+      "BrutalOptions": {
+        "fields": {
+          "enabled": "bool",
+          "up": "string",
+          "down": "string"
+        },
+        "embedded": [],
+        "source": "listener/inbound/mux.go"
+      },
+      "HTTPOption": {
+        "fields": {
+          "users": "[]AuthUser",
+          "certificate": "string",
+          "private-key": "string",
+          "client-auth-type": "string",
+          "client-auth-cert": "string",
+          "ech-key": "string",
+          "reality-config": "RealityConfig"
+        },
+        "embedded": ["BaseOption"],
+        "source": "listener/inbound/http.go"
+      },
+      "Hysteria2Option": {
+        "fields": {
+          "users": "map[string]string",
+          "obfs": "string",
+          "obfs-password": "string",
+          "obfs-min-packet-size": "int",
+          "obfs-max-packet-size": "int",
+          "certificate": "string",
+          "private-key": "string",
+          "client-auth-type": "string",
+          "client-auth-cert": "string",
+          "ech-key": "string",
+          "max-idle-time": "int",
+          "alpn": "[]string",
+          "up": "string",
+          "down": "string",
+          "ignore-client-bandwidth": "bool",
+          "masquerade": "string",
+          "cwnd": "int",
+          "bbr-profile": "string",
+          "udp-mtu": "int",
+          "mux-option": "MuxOption",
+          "realm-opts": "Hysteria2RealmOption",
+          "initial-stream-receive-window": "uint64",
+          "max-stream-receive-window": "uint64",
+          "initial-connection-receive-window": "uint64",
+          "max-connection-receive-window": "uint64"
+        },
+        "embedded": ["BaseOption"],
+        "source": "listener/inbound/hysteria2.go"
+      },
+      "Hysteria2RealmOption": {
+        "fields": {
+          "enable": "bool",
+          "server-url": "string",
+          "token": "string",
+          "realm-id": "string",
+          "stun-servers": "[]string",
+          "sni": "string",
+          "skip-cert-verify": "bool",
+          "name-cert-verify": "string",
+          "fingerprint": "string",
+          "certificate": "string",
+          "private-key": "string",
+          "alpn": "[]string",
+          "proxy": "string"
+        },
+        "embedded": [],
+        "source": "listener/inbound/hysteria2.go"
+      },
+      "JLSConfig": {
+        "fields": {
+          "enable": "bool",
+          "users": "[]JLSUser",
+          "sni": "string",
+          "dest": "string",
+          "alpn": "[]string",
+          "proxy": "string",
+          "rate-limit": "uint64"
+        },
+        "embedded": [],
+        "source": "listener/inbound/jls.go"
+      },
+      "JLSUser": {
+        "fields": {
+          "username": "string",
+          "password": "string"
+        },
+        "embedded": [],
+        "source": "listener/inbound/jls.go"
+      },
+      "KcpTun": {
+        "fields": {
+          "enable": "bool",
+          "key": "string",
+          "crypt": "string",
+          "mode": "string",
+          "conn": "int",
+          "autoexpire": "int",
+          "scavengettl": "int",
+          "mtu": "int",
+          "ratelimit": "int",
+          "sndwnd": "int",
+          "rcvwnd": "int",
+          "datashard": "int",
+          "parityshard": "int",
+          "dscp": "int",
+          "nocomp": "bool",
+          "acknodelay": "bool",
+          "nodelay": "int",
+          "interval": "int",
+          "resend": "int",
+          "nc": "int",
+          "sockbuf": "int",
+          "smuxver": "int",
+          "smuxbuf": "int",
+          "framesize": "int",
+          "streambuf": "int",
+          "keepalive": "int"
+        },
+        "embedded": [],
+        "source": "listener/inbound/kcptun.go"
+      },
+      "MKCPConfig": {
+        "fields": {
+          "enable": "bool",
+          "mtu": "uint32",
+          "tti": "uint32",
+          "uplink-capacity": "uint32",
+          "downlink-capacity": "uint32",
+          "congestion": "bool",
+          "write-buffer": "uint32",
+          "read-buffer": "uint32",
+          "seed": "string",
+          "header": "string"
+        },
+        "embedded": [],
+        "source": "listener/inbound/mkcp.go"
+      },
+      "MekyaConfig": {
+        "fields": {
+          "enable": "bool",
+          "url": "string",
+          "h2-pool-size": "int",
+          "max-write-delay": "int",
+          "max-request-size": "int",
+          "polling-interval-initial": "int",
+          "max-write-size": "int",
+          "max-write-duration-ms": "int",
+          "max-simultaneous-write-connection": "int",
+          "packet-writing-buffer": "int",
+          "kcp": "MKCPConfig"
+        },
+        "embedded": [],
+        "source": "listener/inbound/mekya.go"
+      },
+      "MieruOption": {
+        "fields": {
+          "transport": "string",
+          "users": "map[string]string",
+          "traffic-pattern": "string",
+          "user-hint-is-mandatory": "bool"
+        },
+        "embedded": ["BaseOption"],
+        "source": "listener/inbound/mieru.go"
+      },
+      "MixedOption": {
+        "fields": {
+          "users": "[]AuthUser",
+          "udp": "bool",
+          "certificate": "string",
+          "private-key": "string",
+          "client-auth-type": "string",
+          "client-auth-cert": "string",
+          "ech-key": "string",
+          "reality-config": "RealityConfig"
+        },
+        "embedded": ["BaseOption"],
+        "source": "listener/inbound/mixed.go"
+      },
+      "MuxOption": {
+        "fields": {
+          "padding": "bool",
+          "brutal": "BrutalOptions"
+        },
+        "embedded": [],
+        "source": "listener/inbound/mux.go"
+      },
+      "RealityConfig": {
+        "fields": {
+          "dest": "string",
+          "private-key": "string",
+          "short-id": "[]string",
+          "server-names": "[]string",
+          "max-time-difference": "int",
+          "proxy": "string",
+          "limit-fallback-upload": "RealityLimitFallback",
+          "limit-fallback-download": "RealityLimitFallback"
+        },
+        "embedded": [],
+        "source": "listener/inbound/reality.go"
+      },
+      "RealityLimitFallback": {
+        "fields": {
+          "after-bytes": "uint64",
+          "bytes-per-sec": "uint64",
+          "burst-bytes-per-sec": "uint64"
+        },
+        "embedded": [],
+        "source": "listener/inbound/reality.go"
+      },
+      "RedirOption": {
+        "fields": {},
+        "embedded": ["BaseOption"],
+        "source": "listener/inbound/redir.go"
+      },
+      "ResTLS": {
+        "fields": {
+          "enable": "bool",
+          "dest": "string",
+          "password": "string",
+          "restls-script": "string",
+          "min-record-len": "int",
+          "rate-limit": "uint64",
+          "proxy": "string"
+        },
+        "embedded": [],
+        "source": "listener/inbound/restls.go"
+      },
+      "ShadowQuicJLSUpstream": {
+        "fields": {
+          "addr": "string",
+          "sni": "string",
+          "proxy": "string",
+          "rate-limit": "uint64"
+        },
+        "embedded": [],
+        "source": "listener/inbound/shadowquic.go"
+      },
+      "ShadowQuicOption": {
+        "fields": {
+          "users": "[]ShadowQuicUser",
+          "jls-upstream": "ShadowQuicJLSUpstream",
+          "alpn": "[]string",
+          "quic-versions": "[]string",
+          "zero-rtt": "bool",
+          "congestion-controller": "string",
+          "up": "string",
+          "down": "string",
+          "ignore-client-bandwidth": "bool",
+          "max-idle-time": "int",
+          "max-datagram-frame-size": "int",
+          "recv-window-conn": "int",
+          "recv-window": "int",
+          "disable-mtu-discovery": "bool",
+          "cwnd": "int",
+          "bbr-profile": "string",
+          "mux-option": "MuxOption"
+        },
+        "embedded": ["BaseOption"],
+        "source": "listener/inbound/shadowquic.go"
+      },
+      "ShadowQuicUser": {
+        "fields": {
+          "username": "string",
+          "password": "string"
+        },
+        "embedded": [],
+        "source": "listener/inbound/shadowquic.go"
+      },
+      "ShadowSocksOption": {
+        "fields": {
+          "password": "string",
+          "cipher": "string",
+          "udp": "bool",
+          "mux-option": "MuxOption",
+          "shadow-tls": "ShadowTLS",
+          "res-tls": "ResTLS",
+          "jls-config": "JLSConfig",
+          "kcp-tun": "KcpTun",
+          "simple-obfs": "SimpleObfs"
+        },
+        "embedded": ["BaseOption"],
+        "source": "listener/inbound/shadowsocks.go"
+      },
+      "ShadowTLS": {
+        "fields": {
+          "enable": "bool",
+          "version": "int",
+          "password": "string",
+          "users": "[]ShadowTLSUser",
+          "handshake": "ShadowTLSHandshakeOptions",
+          "handshake-for-server-name": "map[string]ShadowTLSHandshakeOptions",
+          "strict-mode": "bool",
+          "wildcard-sni": "string"
+        },
+        "embedded": [],
+        "source": "listener/inbound/shadowtls.go"
+      },
+      "ShadowTLSHandshakeOptions": {
+        "fields": {
+          "dest": "string",
+          "proxy": "string"
+        },
+        "embedded": [],
+        "source": "listener/inbound/shadowtls.go"
+      },
+      "ShadowTLSUser": {
+        "fields": {
+          "name": "string",
+          "password": "string"
+        },
+        "embedded": [],
+        "source": "listener/inbound/shadowtls.go"
+      },
+      "SimpleObfs": {
+        "fields": {
+          "enable": "bool",
+          "mode": "string"
+        },
+        "embedded": [],
+        "source": "listener/inbound/shadowsocks.go"
+      },
+      "SnellObfsOption": {
+        "fields": {
+          "Mode": "string",
+          "Host": "string"
+        },
+        "embedded": [],
+        "source": "listener/inbound/snell.go"
+      },
+      "SnellOption": {
+        "fields": {
+          "psk": "string",
+          "version": "int",
+          "udp": "bool",
+          "obfs-opts": "SnellObfsOption",
+          "shadow-tls": "ShadowTLS",
+          "res-tls": "ResTLS",
+          "jls-config": "JLSConfig"
+        },
+        "embedded": ["BaseOption"],
+        "source": "listener/inbound/snell.go"
+      },
+      "SocksOption": {
+        "fields": {
+          "users": "[]AuthUser",
+          "udp": "bool",
+          "certificate": "string",
+          "private-key": "string",
+          "client-auth-type": "string",
+          "client-auth-cert": "string",
+          "ech-key": "string",
+          "reality-config": "RealityConfig"
+        },
+        "embedded": ["BaseOption"],
+        "source": "listener/inbound/socks.go"
+      },
+      "SudokuHTTPMaskOptions": {
+        "fields": {
+          "disable": "bool",
+          "mode": "string",
+          "path-root": "string"
+        },
+        "embedded": [],
+        "source": "listener/inbound/sudoku.go"
+      },
+      "SudokuOption": {
+        "fields": {
+          "key": "string",
+          "aead-method": "string",
+          "padding-min": "*int",
+          "padding-max": "*int",
+          "table-type": "string",
+          "handshake-timeout": "*int",
+          "enable-pure-downlink": "*bool",
+          "custom-table": "string",
+          "custom-tables": "[]string",
+          "disable-http-mask": "bool",
+          "http-mask-mode": "string",
+          "path-root": "string",
+          "fallback": "string",
+          "httpmask": "*SudokuHTTPMaskOptions",
+          "mux-option": "MuxOption"
+        },
+        "embedded": ["BaseOption"],
+        "source": "listener/inbound/sudoku.go"
+      },
+      "TLSMirrorConfig": {
+        "fields": {
+          "primary-key": "string",
+          "dest": "string",
+          "proxy": "string",
+          "explicit-nonce-ciphersuites": "[]uint16",
+          "defer-instance-derived-write-time": "TLSMirrorTimeSpec",
+          "transport-layer-padding": "TLSMirrorTransportLayerPadding",
+          "connection-enrolment": "*TLSMirrorConnectionEnrolment",
+          "sequence-watermarking-enabled": "bool"
+        },
+        "embedded": [],
+        "source": "listener/inbound/tlsmirror.go"
+      },
+      "TLSMirrorConnectionEnrolment": {
+        "fields": {
+          "primary-ingress-outbound": "string",
+          "primary-egress-outbound": "string"
+        },
+        "embedded": [],
+        "source": "listener/inbound/tlsmirror.go"
+      },
+      "TLSMirrorTimeSpec": {
+        "fields": {
+          "base-nanoseconds": "uint64",
+          "uniform-random-multiplier-nanoseconds": "uint64"
+        },
+        "embedded": [],
+        "source": "listener/inbound/tlsmirror.go"
+      },
+      "TLSMirrorTransportLayerPadding": {
+        "fields": {
+          "enabled": "bool"
+        },
+        "embedded": [],
+        "source": "listener/inbound/tlsmirror.go"
+      },
+      "TProxyOption": {
+        "fields": {
+          "udp": "bool"
+        },
+        "embedded": ["BaseOption"],
+        "source": "listener/inbound/tproxy.go"
+      },
+      "TrojanOption": {
+        "fields": {
+          "users": "[]TrojanUser",
+          "ws-path": "string",
+          "grpc-service-name": "string",
+          "certificate": "string",
+          "private-key": "string",
+          "client-auth-type": "string",
+          "client-auth-cert": "string",
+          "ech-key": "string",
+          "allow-insecure": "bool",
+          "shadow-tls": "ShadowTLS",
+          "res-tls": "ResTLS",
+          "jls-config": "JLSConfig",
+          "reality-config": "RealityConfig",
+          "mux-option": "MuxOption",
+          "ss-option": "TrojanSSOption"
+        },
+        "embedded": ["BaseOption"],
+        "source": "listener/inbound/trojan.go"
+      },
+      "TrojanSSOption": {
+        "fields": {
+          "enabled": "bool",
+          "method": "string",
+          "password": "string"
+        },
+        "embedded": [],
+        "source": "listener/inbound/trojan.go"
+      },
+      "TrojanUser": {
+        "fields": {
+          "username": "string",
+          "password": "string"
+        },
+        "embedded": [],
+        "source": "listener/inbound/trojan.go"
+      },
+      "TrustTunnelOption": {
+        "fields": {
+          "users": "[]AuthUser",
+          "certificate": "string",
+          "private-key": "string",
+          "client-auth-type": "string",
+          "client-auth-cert": "string",
+          "ech-key": "string",
+          "network": "[]string",
+          "congestion-controller": "string",
+          "cwnd": "int",
+          "bbr-profile": "string"
+        },
+        "embedded": ["BaseOption"],
+        "source": "listener/inbound/trusttunnel.go"
+      },
+      "TuicOption": {
+        "fields": {
+          "token": "[]string",
+          "users": "map[string]string",
+          "certificate": "string",
+          "private-key": "string",
+          "client-auth-type": "string",
+          "client-auth-cert": "string",
+          "ech-key": "string",
+          "congestion-controller": "string",
+          "max-idle-time": "int",
+          "authentication-timeout": "int",
+          "alpn": "[]string",
+          "max-udp-relay-packet-size": "int",
+          "cwnd": "int",
+          "bbr-profile": "string",
+          "mux-option": "MuxOption"
+        },
+        "embedded": ["BaseOption"],
+        "source": "listener/inbound/tuic.go"
+      },
+      "TunOption": {
+        "fields": {
+          "device": "string",
+          "stack": "C.TUNStack",
+          "dns-mode": "string",
+          "dns-hijack": "[]string",
+          "auto-route": "bool",
+          "auto-detect-interface": "bool",
+          "mtu": "uint32",
+          "gso": "bool",
+          "gso-max-size": "uint32",
+          "inet4-address": "[]netip.Prefix",
+          "inet6-address": "[]netip.Prefix",
+          "iproute2-table-index": "int",
+          "iproute2-rule-index": "int",
+          "auto-redirect": "bool",
+          "auto-redirect-input-mark": "uint32",
+          "auto-redirect-output-mark": "uint32",
+          "auto-redirect-iproute2-fallback-rule-index": "int",
+          "loopback-address": "[]netip.Addr",
+          "strict-route": "bool",
+          "route-address": "[]netip.Prefix",
+          "route-address-set": "[]string",
+          "route-exclude-address": "[]netip.Prefix",
+          "route-exclude-address-set": "[]string",
+          "include-interface": "[]string",
+          "exclude-interface": "[]string",
+          "include-uid": "[]uint32",
+          "include-uid-range": "[]string",
+          "exclude-uid": "[]uint32",
+          "exclude-uid-range": "[]string",
+          "exclude-src-port": "[]uint16",
+          "exclude-src-port-range": "[]string",
+          "exclude-dst-port": "[]uint16",
+          "exclude-dst-port-range": "[]string",
+          "include-android-user": "[]int",
+          "include-package": "[]string",
+          "exclude-package": "[]string",
+          "include-mac-address": "[]string",
+          "exclude-mac-address": "[]string",
+          "endpoint-independent-nat": "bool",
+          "udp-timeout": "int64",
+          "icmp-timeout": "int64",
+          "disable-icmp-forwarding": "bool",
+          "congestion-controller": "string",
+          "file-descriptor": "int",
+          "inet4-route-address": "[]netip.Prefix",
+          "inet6-route-address": "[]netip.Prefix",
+          "inet4-route-exclude-address": "[]netip.Prefix",
+          "inet6-route-exclude-address": "[]netip.Prefix",
+          "recvmsgx": "bool",
+          "sendmsgx": "bool",
+          "processors-per-channel": "int"
+        },
+        "embedded": ["BaseOption"],
+        "source": "listener/inbound/tun.go"
+      },
+      "TunnelOption": {
+        "fields": {
+          "network": "[]string",
+          "target": "string"
+        },
+        "embedded": ["BaseOption"],
+        "source": "listener/inbound/tunnel.go"
+      },
+      "VlessOption": {
+        "fields": {
+          "users": "[]VlessUser",
+          "decryption": "string",
+          "ws-path": "string",
+          "xhttp-config": "XHTTPConfig",
+          "grpc-service-name": "string",
+          "certificate": "string",
+          "private-key": "string",
+          "client-auth-type": "string",
+          "client-auth-cert": "string",
+          "ech-key": "string",
+          "allow-insecure": "bool",
+          "shadow-tls": "ShadowTLS",
+          "res-tls": "ResTLS",
+          "jls-config": "JLSConfig",
+          "reality-config": "RealityConfig",
+          "mux-option": "MuxOption"
+        },
+        "embedded": ["BaseOption"],
+        "source": "listener/inbound/vless.go"
+      },
+      "VlessUser": {
+        "fields": {
+          "username": "string",
+          "uuid": "string",
+          "flow": "string"
+        },
+        "embedded": [],
+        "source": "listener/inbound/vless.go"
+      },
+      "VmessOption": {
+        "fields": {
+          "users": "[]VmessUser",
+          "ws-path": "string",
+          "grpc-service-name": "string",
+          "certificate": "string",
+          "private-key": "string",
+          "client-auth-type": "string",
+          "client-auth-cert": "string",
+          "ech-key": "string",
+          "shadow-tls": "ShadowTLS",
+          "res-tls": "ResTLS",
+          "jls-config": "JLSConfig",
+          "reality-config": "RealityConfig",
+          "tlsmirror-config": "TLSMirrorConfig",
+          "mekya-config": "MekyaConfig",
+          "mkcp-config": "MKCPConfig",
+          "mux-option": "MuxOption"
+        },
+        "embedded": ["BaseOption"],
+        "source": "listener/inbound/vmess.go"
+      },
+      "VmessUser": {
+        "fields": {
+          "username": "string",
+          "uuid": "string",
+          "alterId": "int"
+        },
+        "embedded": [],
+        "source": "listener/inbound/vmess.go"
+      },
+      "XHTTPConfig": {
+        "fields": {
+          "path": "string",
+          "host": "string",
+          "mode": "string",
+          "x-padding-bytes": "string",
+          "x-padding-obfs-mode": "bool",
+          "x-padding-key": "string",
+          "x-padding-header": "string",
+          "x-padding-placement": "string",
+          "x-padding-method": "string",
+          "uplink-http-method": "string",
+          "session-placement": "string",
+          "session-key": "string",
+          "seq-placement": "string",
+          "seq-key": "string",
+          "uplink-data-placement": "string",
+          "uplink-data-key": "string",
+          "uplink-chunk-size": "string",
+          "no-sse-header": "bool",
+          "sc-stream-up-server-secs": "string",
+          "sc-max-buffered-posts": "string",
+          "sc-max-each-post-bytes": "string"
+        },
+        "embedded": [],
+        "source": "listener/inbound/vless.go"
+      }
+    },
+    "provider": {
+      "healthCheckSchema": {
+        "fields": {
+          "enable": "bool",
+          "url": "string",
+          "interval": "int",
+          "timeout": "int",
+          "lazy": "bool",
+          "expected-status": "string"
+        },
+        "embedded": [],
+        "source": "adapter/provider/parser.go"
+      },
+      "overrideProxyNameSchema": {
+        "fields": {
+          "pattern": "*regexp2.Regexp",
+          "target": "string"
+        },
+        "embedded": [],
+        "source": "adapter/provider/override.go"
+      },
+      "overrideSchema": {
+        "fields": {
+          "tfo": "*bool",
+          "mptcp": "*bool",
+          "udp": "*bool",
+          "udp-over-tcp": "*bool",
+          "up": "*string",
+          "down": "*string",
+          "dialer-proxy": "*string",
+          "skip-cert-verify": "*bool",
+          "name-cert-verify": "*string",
+          "interface-name": "*string",
+          "routing-mark": "*int",
+          "ip-version": "*string",
+          "additional-prefix": "*string",
+          "additional-suffix": "*string",
+          "proxy-name": "[]overrideProxyNameSchema",
+          "override-expr": "[]OverrideExpr"
+        },
+        "embedded": [],
+        "source": "adapter/provider/override.go"
+      },
+      "proxyProviderSchema": {
+        "fields": {
+          "type": "string",
+          "path": "string",
+          "url": "string",
+          "proxy": "string",
+          "interval": "int",
+          "filter": "string",
+          "exclude-filter": "string",
+          "exclude-type": "string",
+          "dialer-proxy": "string",
+          "size-limit": "int64",
+          "payload": "[]map[string]any",
+          "age-secret-key": "string",
+          "health-check": "healthCheckSchema",
+          "override": "overrideSchema",
+          "header": "map[string][]string"
+        },
+        "embedded": [],
+        "source": "adapter/provider/parser.go"
+      },
+      "ruleProviderSchema": {
+        "fields": {
+          "type": "string",
+          "behavior": "string",
+          "path": "string",
+          "url": "string",
+          "proxy": "string",
+          "format": "string",
+          "interval": "int",
+          "size-limit": "int64",
+          "payload": "[]string",
+          "header": "map[string][]string",
+          "path-in-bundle": "string"
+        },
+        "embedded": [],
+        "source": "rules/provider/parse.go"
+      }
+    },
+    "group": {
+      "FallbackOption": {
+        "fields": {},
+        "embedded": [],
+        "source": "adapter/outboundgroup/fallback.go"
+      },
+      "GroupCommonOption": {
+        "fields": {
+          "name": "string",
+          "type": "string",
+          "proxies": "[]string",
+          "use": "[]string",
+          "url": "string",
+          "interval": "int",
+          "timeout": "int",
+          "max-failed-times": "int",
+          "empty-fallback": "string",
+          "lazy": "bool",
+          "disable-udp": "bool",
+          "filter": "string",
+          "exclude-filter": "string",
+          "exclude-type": "string",
+          "expected-status": "string",
+          "include-all": "bool",
+          "include-all-proxies": "bool",
+          "include-all-providers": "bool",
+          "hidden": "bool",
+          "icon": "string"
+        },
+        "embedded": [],
+        "source": "adapter/outboundgroup/parser.go"
+      },
+      "LoadBalanceOption": {
+        "fields": {
+          "strategy": "string",
+          "hash-key": "string"
+        },
+        "embedded": [],
+        "source": "adapter/outboundgroup/loadbalance.go"
+      },
+      "SelectorOption": {
+        "fields": {
+          "default-selected": "string"
+        },
+        "embedded": [],
+        "source": "adapter/outboundgroup/selector.go"
+      },
+      "URLTestOption": {
+        "fields": {
+          "tolerance": "uint16"
+        },
+        "embedded": [],
+        "source": "adapter/outboundgroup/urltest.go"
+      }
+    }
+  },
+  "listeners": {
+    "socks": "SocksOption",
+    "http": "HTTPOption",
+    "tproxy": "TProxyOption",
+    "redir": "RedirOption",
+    "mixed": "MixedOption",
+    "tunnel": "TunnelOption",
+    "tun": "TunOption",
+    "shadowsocks": "ShadowSocksOption",
+    "snell": "SnellOption",
+    "vmess": "VmessOption",
+    "vless": "VlessOption",
+    "trojan": "TrojanOption",
+    "hysteria2": "Hysteria2Option",
+    "hysteria2-realm": "Hysteria2RealmOption",
+    "tuic": "TuicOption",
+    "shadowquic": "ShadowQuicOption",
+    "anytls": "AnyTLSOption",
+    "mieru": "MieruOption",
+    "sudoku": "SudokuOption",
+    "trusttunnel": "TrustTunnelOption"
+  },
+  "groups": {
+    "url-test": "URLTestOption",
+    "select": "SelectorOption",
+    "fallback": "FallbackOption",
+    "load-balance": "LoadBalanceOption"
+  },
+  "sources": {
+    "config/config.go": "cc8c1016703c21f502cfb4151f5f0131bbb3be81",
+    "listener/config/tunnel.go": "2a31fe6939fa56d2568548b8b40a052ef7552fc6",
+    "listener/inbound/anytls.go": "bcb9958a2599153490544135423ba485f8addf12",
+    "listener/inbound/auth.go": "85e7249455d22266f825a46506d6f9db3daff858",
+    "listener/inbound/base.go": "aa1cfea11b99a831895470423e752dc300d75212",
+    "listener/inbound/http.go": "76397a8b8ee219114443a1dd18bbfd3b3f0afbbc",
+    "listener/inbound/hysteria2.go": "dcf315e1c83571988b7d1e6ff20e61a35383edbc",
+    "listener/inbound/hysteria2_realm.go": "5539b65f10b9630ca325cf49bbdd5829a1d92bd2",
+    "listener/inbound/jls.go": "fc0cc4892476ba2c7198465d3882700bb332cf78",
+    "listener/inbound/kcptun.go": "36c292980a6dd28f4cab67a9c8f71a33f9fa8406",
+    "listener/inbound/mekya.go": "bef1f816f9f9c852962917061031b18740b3f929",
+    "listener/inbound/mieru.go": "7e9be228820114fa2ece4d91cadb08a3627376f2",
+    "listener/inbound/mixed.go": "45087749d0d8db26837743773f29e588b7f0a0e5",
+    "listener/inbound/mkcp.go": "89c21de63f544ce28bba2b7eab35f6c14b70f6cc",
+    "listener/inbound/mux.go": "c4068e10bae7216e6e8a1e4517bee94c4c0791e6",
+    "listener/inbound/reality.go": "7932b0602984f1f19a9462ec3c14464296be8e2e",
+    "listener/inbound/redir.go": "2981ddfc01c136867c4e1df96a118b092604c5c3",
+    "listener/inbound/restls.go": "2ca4d1a475da13a7ef7fe436e3f035b7613e3f1f",
+    "listener/inbound/shadowquic.go": "f4ee0a31159212f4ce3b7fb8b69b89f59ef0afa0",
+    "listener/inbound/shadowsocks.go": "4657a54c4ca32ae3057ed682a11fe35ccb11ab94",
+    "listener/inbound/shadowtls.go": "d71adbf0e456b2f685bbbce5f9dde0c5a2848abf",
+    "listener/inbound/snell.go": "93c52d3cac486751da77bd0186b1d4e7e2e34c45",
+    "listener/inbound/socks.go": "be2f93108235ff6c9fe17a9e7a5ff6736758056d",
+    "listener/inbound/sudoku.go": "c886bb7ff55ecd107c722a9f8f79dd82290c10f0",
+    "listener/inbound/tlsmirror.go": "9407132a3067def330a6997101a7b8c765fbec19",
+    "listener/inbound/tproxy.go": "66a50f7558b31478be7b527604452c7eecc57e5b",
+    "listener/inbound/trojan.go": "526b7c742ddad93d936b6a0297181620c7558ffa",
+    "listener/inbound/trusttunnel.go": "d90ad619949de3ade13a2dc6bf5305e776f02ba0",
+    "listener/inbound/tuic.go": "db2363c2282fdc8c444b7d933663f2f8493f460c",
+    "listener/inbound/tun.go": "a0f411b09467dfb5ad36ac1ec0774fb4d541f795",
+    "listener/inbound/tunnel.go": "1dfff0ea41b63835a7f09114dd23832d6cd84177",
+    "listener/inbound/vless.go": "503caf5e9f9c8b07cfe29b29d9a2cff36e92837f",
+    "listener/inbound/vmess.go": "d9768b8eb02c5b5b3a2562527ec95d5cdf560c62",
+    "adapter/provider/parser.go": "5d0179356a97506bb1fe253de94d425491847e9e",
+    "adapter/provider/override.go": "f4353c4b68bcd8b62b312ba048f49ab88a2510c7",
+    "rules/provider/parse.go": "3ddfab8d4614beb80e1ffb144d74c6bc11dba910",
+    "adapter/outboundgroup/fallback.go": "98aaf20a9d98522da3086e39064128ff5c89440e",
+    "adapter/outboundgroup/groupbase.go": "eed45e0d610ed46b23edfadb25022b440eeb4f38",
+    "adapter/outboundgroup/loadbalance.go": "e6439042fb2e5b9526145c3379421dee4694a9c8",
+    "adapter/outboundgroup/parser.go": "e97f8da04b9f321e0a637837beabc1b3749d3b63",
+    "adapter/outboundgroup/selector.go": "2fea75032ab6b2ea0959d7515eb3501105b0a7fb",
+    "adapter/outboundgroup/urltest.go": "64e4def0dea6076b1f364a596bc1ca41e41fc404",
+    "adapter/outboundgroup/util.go": "22d6b1890bdb17213f7a7a1b5e193223959ff5fc",
+    "listener/parse.go": "a446c9712541873f1757268dc7932da6e4981811"
+  }
+}

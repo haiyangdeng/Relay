@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "contractRevision": "relay-guard-terminal-v1",
+  "applicationID": "local.relay.network.preview",
+  "buildVersion": "3",
+  "minimumMacOS": "13.0",
+  "launcherName": "RelayTerminalCLI",
+  "launcherID": "local.relay.network.preview.guard.terminal-cli",
+  "publisherTeamID": null,
+  "runtimeReady": false,
+  "launcherPin": null
+}

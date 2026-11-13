@@ -1,0 +1,10 @@
+out
+dist
+.claude
+pnpm-lock.yaml
+LICENSE.md
+tsconfig.json
+tsconfig.*.json
+.codex-review
+.relay-build
+release*/
