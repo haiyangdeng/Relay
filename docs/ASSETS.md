@@ -21,6 +21,10 @@ Affected application assets:
 
 Legacy `resources/icon*`, `resources/subStoreIcon.png` and embedded fallback icons originate from the inherited Clash Party source tree. They are retained where the existing source imports require them. Their presence is not a claim of ownership of the upstream name or marks. Relay's public product presentation must use Relay branding and retain the upstream attribution in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
+## Support payment image
+
+`site/assets/support-alipay.png` is the maintainer-supplied Alipay payment image, explicitly provided for public display in the README and introduction website. Both pages reference the same unmodified file. Its payment code and embedded avatar are not application artwork and are not covered by the project's source-code license.
+
 ## Test assets
 
 The two `.mmdb` files under `scripts/relay/fixtures/assets/` are official artificial test data from a fixed MaxMind DB commit. The source links and hashes are in that directory's `manifest.json`; the MIT license option and copyright notice are retained at [licenses/MaxMind-DB-MIT.txt](licenses/MaxMind-DB-MIT.txt). They contain no imported personal proxy or subscription configuration.

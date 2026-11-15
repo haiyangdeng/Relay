@@ -2,7 +2,7 @@
   <img src="site/assets/app-icon.png" width="96" alt="Relay 应用图标" />
   <h1>Relay</h1>
   <p><strong>macOS 上的代理管理与 AI 客户端网络工作区。</strong></p>
-  <p><a href="https://haiyangdeng.github.io/Relay/">产品介绍</a> · <a href="https://github.com/haiyangdeng/Relay/releases/tag/v1.0.0">下载 V1.0.0</a> · <a href="docs/BUILD.md">源码构建</a> · <a href="https://github.com/haiyangdeng/Relay/issues">问题反馈</a></p>
+  <p><a href="https://haiyangdeng.github.io/Relay/">产品介绍</a> · <a href="https://github.com/haiyangdeng/Relay/releases/tag/v1.0.0">下载 V1.0.0</a> · <a href="docs/BUILD.md">源码构建</a> · <a href="https://github.com/haiyangdeng/Relay/issues">问题反馈</a> · <a href="#支持-relay">支持 Relay</a></p>
 </div>
 
 Relay 基于 Clash Party 与 Mihomo，将配置、订阅、代理组、分流规则、连接和日志集中在一个 macOS 应用中，并提供 Claude / Codex 专用代理与 Claude Code 配置工作流。
@@ -65,6 +65,14 @@ pnpm run build:relay
 | `docs/`            | 使用、构建、许可来源及真实截图          |
 
 公开源码不附带个人订阅、节点密码、运行日志或依赖目录。提交问题前请脱敏，参考 [SECURITY](SECURITY.md)。
+
+## 支持 Relay
+
+如果 Relay 对你有帮助，欢迎随心赞助，支持后续维护与更新。谢谢你的认可！
+
+使用支付宝扫一扫，或点击原图保存后识别。
+
+<a href="site/assets/support-alipay.png"><img src="site/assets/support-alipay.png" width="320" alt="支持 Relay：支付宝赞助收款码" /></a>
 
 ## 来源与许可
 
