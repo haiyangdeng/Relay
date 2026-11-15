@@ -202,6 +202,8 @@ final class RelayRemovalMonitor {
                 RelayRemoval.native, "--automatic-uninstall-user"], timeout: 180)
             guard let report = try JSONSerialization.jsonObject(with: output) as? [String: Any], report["version"] as? Int == 1,
                   report["status"] as? String == "cleaned" else { throw RelayRemoval.fail("User integration restoration is not complete") }
+        }, removeRegistrations: {
+            try RelayUninstallRegistration.run(installation)
         }, removeComponents: {
             try RelayRemovalComponents.loginItem(installation)
             try RelayRemovalComponents.managed(installation, heldLease: managedLease)

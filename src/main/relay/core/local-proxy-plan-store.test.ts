@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { chmod, lstat, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   defaultLocalProxyPlan,
   localProxyPlan,
@@ -10,6 +10,7 @@ import {
   localProxyPlanSaveRequest
 } from '../../../shared/relay/local-proxy-plan'
 import { LocalProxyPlanStore } from './local-proxy-plan-store'
+import { createProfileStartup } from './profile-startup'
 import { localProxyConfiguration } from './local-proxy-runtime'
 
 const homes: string[] = []
@@ -85,7 +86,12 @@ describe.runIf(process.getuid !== undefined)('Local proxy startup private persis
     const saved = await store.save({ document: dedicatedPlan, expectedRevision: '' })
     expect(store.path).toBe(join(context.stateRoot, 'Configuration/local-proxy-plan.json'))
     const bytes = await readFile(store.path)
-    expect(saved.revision).toBe(createHash('sha256').update(bytes).digest('hex'))
+    expect(saved.revision).toBe(
+      createHash('sha256')
+        .update(JSON.stringify(dedicatedPlan, null, 2) + '\n')
+        .digest('hex')
+    )
+    expect(JSON.parse(bytes.toString()).document).toEqual(dedicatedPlan)
     expect((await lstat(store.path)).mode & 0o7777).toBe(0o600)
     expect(await new LocalProxyPlanStore(context).read()).toEqual(saved)
     const source = JSON.stringify({
@@ -208,4 +214,209 @@ describe.runIf(process.getuid !== undefined)('Local proxy startup private persis
       ).rejects.toThrow()
     }
   )
+})
+
+describe.runIf(process.getuid !== undefined)('Private dedicated node snapshot', () => {
+  const sourceProfileId = '00000000-0000-0000-0000-000000000001'
+  const node = {
+    name: 'fixed-node',
+    type: 'http',
+    server: '127.0.0.1',
+    port: 1234,
+    password: 'fixture-private'
+  }
+  it('upgrades a legacy plan, survives a new store and never exposes node credentials or changes public revision', async () => {
+    const { store, context } = await fixture()
+    await store.save({ document: dedicatedPlan, expectedRevision: '' })
+    await writeFile(store.path, JSON.stringify(dedicatedPlan, null, 2) + '\n', { mode: 0o600 })
+    const before = await store.read()
+    const pin = await store.resolvePinnedNode(dedicatedPlan.dedicated, sourceProfileId, () => node)
+    expect(await store.read()).toEqual(before)
+    expect(JSON.stringify(await store.read())).not.toContain('fixture-private')
+    expect(pin.revision).not.toBe(before.revision)
+    const next = new LocalProxyPlanStore(context),
+      capture = vi.fn(() => ({ ...node, server: '192.0.2.99' }))
+    expect(await next.resolvePinnedNode(dedicatedPlan.dedicated, sourceProfileId, capture)).toEqual(
+      pin
+    )
+    expect(capture).not.toHaveBeenCalled()
+    expect((await lstat(store.path)).mode & 0o7777).toBe(0o600)
+  })
+  it('keeps legacy cold startup current when preparation saves the first private pin', async () => {
+    const { store } = await fixture()
+    await store.save({ document: dedicatedPlan, expectedRevision: '' })
+    await writeFile(store.path, JSON.stringify(dedicatedPlan, null, 2) + '\n', { mode: 0o600 })
+    const selection = { id: sourceProfileId, sha256: 'a'.repeat(64) }
+    const start = vi.fn(async () => ({ status: 'started' as const }))
+    const startup = createProfileStartup({
+      readSelection: async () => selection,
+      readPlan: () => store.read(),
+      state: () => ({
+        owned: false,
+        pending: false,
+        uncertain: false,
+        hasRecord: false,
+        traffic: 'inactive',
+        phase: 'idle'
+      }),
+      context: () => () => {},
+      prepare: async () => {
+        await store.resolvePinnedNode(dedicatedPlan.dedicated, sourceProfileId, () => node)
+        return { evidenceId: 'proof', canStart: true }
+      },
+      start,
+      invalidate: () => {
+        throw new Error('unexpected stale startup')
+      }
+    })
+    expect(await startup.run()).toBe('started')
+    expect(start).toHaveBeenCalledOnce()
+  })
+  it('preserves same-route snapshots across port saves and clears them only on route change or disable', async () => {
+    const { store } = await fixture()
+    let record = await store.save({ document: dedicatedPlan, expectedRevision: '' })
+    await store.resolvePinnedNode(dedicatedPlan.dedicated, sourceProfileId, () => node)
+    const changed = { ...dedicatedPlan, dedicated: { ...dedicatedPlan.dedicated, httpPort: 18194 } }
+    record = await store.save({ document: changed, expectedRevision: record.revision })
+    expect(
+      (
+        await store.resolvePinnedNode(changed.dedicated, sourceProfileId, () => {
+          throw new Error('must not recapture')
+        })
+      ).node
+    ).toEqual(node)
+    const newRoute = { ...changed, dedicated: { ...changed.dedicated, route: 'new-node' } }
+    record = await store.save({ document: newRoute, expectedRevision: record.revision })
+    expect(JSON.parse(await readFile(store.path, 'utf8')).pinnedNode).toBeUndefined()
+    await store.resolvePinnedNode(newRoute.dedicated, sourceProfileId, () => ({
+      ...node,
+      name: 'new-node'
+    }))
+    await store.save({ document: defaultLocalProxyPlan(), expectedRevision: record.revision })
+    expect(JSON.parse(await readFile(store.path, 'utf8')).pinnedNode).toBeUndefined()
+  })
+  it('does not read a previous source for ordinary settings or an already pinned node', async () => {
+    const { store } = await fixture()
+    const capture = vi.fn(async () => {
+      throw new Error('previous source unavailable')
+    })
+    await Promise.all([store.read(), store.preservePinnedNode(capture)])
+    await expect(lstat(store.path)).rejects.toMatchObject({ code: 'ENOENT' })
+    const ordinaryRead = store.preservePinnedNode(capture)
+    expect(store.isBusy()).toBe(false)
+    await ordinaryRead
+    await store.save({ document: dedicatedPlan, expectedRevision: '' })
+    await store.resolvePinnedNode(dedicatedPlan.dedicated, sourceProfileId, () => node)
+    const bytes = await readFile(store.path)
+    const pinnedRead = store.preservePinnedNode(capture)
+    expect(store.isBusy()).toBe(false)
+    await pinnedRead
+    expect(capture).not.toHaveBeenCalled()
+    expect(await readFile(store.path)).toEqual(bytes)
+  })
+  it('allows an explicit new plan before a first choice but refuses a legacy route without its source', async () => {
+    const { store } = await fixture()
+    await store.save({ document: dedicatedPlan, expectedRevision: '' })
+    const fresh = await readFile(store.path)
+    await store.preservePinnedNode(async () => undefined)
+    expect(await readFile(store.path)).toEqual(fresh)
+    const legacy = JSON.stringify(dedicatedPlan, null, 2) + '\n'
+    await writeFile(store.path, legacy, { mode: 0o600 })
+    await expect(store.preservePinnedNode(async () => undefined)).rejects.toThrow('所属配置缺失')
+    expect(await readFile(store.path, 'utf8')).toBe(legacy)
+  })
+  it('pins the old source atomically before selection changes while preserving public plan revision', async () => {
+    const { store, context } = await fixture()
+    await store.save({ document: dedicatedPlan, expectedRevision: '' })
+    await writeFile(store.path, JSON.stringify(dedicatedPlan, null, 2) + '\n', { mode: 0o600 })
+    const before = await store.read()
+    const recheck = vi.fn(async () => {})
+    await store.preservePinnedNode(
+      async () => ({ sourceProfileId, node }),
+      () => {},
+      recheck
+    )
+    expect(recheck).toHaveBeenCalledOnce()
+    expect(await store.read()).toEqual(before)
+    expect(JSON.parse(await readFile(store.path, 'utf8')).version).toBe(2)
+    const restored = new LocalProxyPlanStore(context)
+    expect(
+      (await restored.resolvePinnedNode(dedicatedPlan.dedicated, sourceProfileId, () => undefined))
+        .node
+    ).toEqual(node)
+  })
+  it('refuses a changed previous selection before pin commit and leaves the legacy file intact', async () => {
+    const { store } = await fixture()
+    await store.save({ document: dedicatedPlan, expectedRevision: '' })
+    const legacy = JSON.stringify(dedicatedPlan, null, 2) + '\n'
+    await writeFile(store.path, legacy, { mode: 0o600 })
+    await expect(
+      store.preservePinnedNode(
+        async () => ({ sourceProfileId, node }),
+        () => {},
+        async () => {
+          throw new Error('selection changed')
+        }
+      )
+    ).rejects.toThrow('selection changed')
+    expect(await readFile(store.path, 'utf8')).toBe(legacy)
+  })
+  it('refuses stale private-file CAS even when the public plan did not change', async () => {
+    const { store, context } = await fixture()
+    await store.save({ document: dedicatedPlan, expectedRevision: '' })
+    let changed = false
+    await expect(
+      store.resolvePinnedNode(
+        dedicatedPlan.dedicated,
+        sourceProfileId,
+        () => node,
+        async () => {
+          if (changed) return
+          changed = true
+          await new LocalProxyPlanStore(context).resolvePinnedNode(
+            dedicatedPlan.dedicated,
+            sourceProfileId,
+            () => ({ ...node, port: 1235 })
+          )
+        }
+      )
+    ).rejects.toThrow()
+    expect(
+      (await store.resolvePinnedNode(dedicatedPlan.dedicated, sourceProfileId, () => node)).node
+        .port
+    ).toBe(1235)
+  })
+  it('rejects invalid or tampered pins and never silently captures a replacement', async () => {
+    const { store } = await fixture()
+    await store.save({ document: dedicatedPlan, expectedRevision: '' })
+    for (const candidate of [
+      undefined,
+      { ...node, name: 'other' },
+      { ...node, type: 'direct' },
+      { ...node, 'dialer-proxy': 'DIRECT' },
+      { ...node, 'private-key': '/private/unbound' }
+    ])
+      await expect(
+        store.resolvePinnedNode(dedicatedPlan.dedicated, sourceProfileId, () => candidate)
+      ).rejects.toThrow()
+    await store.resolvePinnedNode(dedicatedPlan.dedicated, sourceProfileId, () => node)
+    const original = JSON.parse(await readFile(store.path, 'utf8'))
+    const capture = vi.fn(() => node)
+    for (const patch of [
+      { sha256: '0'.repeat(64) },
+      { sourceProfileId: 'invalid' },
+      { node: { ...node, port: 443 } }
+    ]) {
+      await writeFile(
+        store.path,
+        JSON.stringify({ ...original, pinnedNode: { ...original.pinnedNode, ...patch } }),
+        { mode: 0o600 }
+      )
+      await expect(
+        store.resolvePinnedNode(dedicatedPlan.dedicated, sourceProfileId, capture)
+      ).rejects.toThrow()
+      await expect(store.read()).rejects.toThrow()
+    }
+    expect(capture).not.toHaveBeenCalled()
+  })
 })

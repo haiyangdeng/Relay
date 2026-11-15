@@ -10,6 +10,17 @@ struct AssistantError: LocalizedError {
     init(_ message: String) { self.message = message }
 }
 
+struct RelayOwnedDiagnosticPorts: Decodable {
+    let systemHTTPPort: Int?
+    let systemSOCKSPort: Int?
+    let codeHTTPPort: Int?
+    let dedicatedSOCKSPort: Int?
+    func validate() throws {
+        for port in [systemHTTPPort, systemSOCKSPort, codeHTTPPort, dedicatedSOCKSPort].compactMap({ $0 }) {
+            guard (1024...65535).contains(port) else { throw AssistantError("Relay 检测端口无效。") }
+        }
+    }
+}
 struct AssistantSettings: Codable, Equatable {
     var httpPort = 7890
     var socksPort: Int { 17890 }
@@ -314,7 +325,8 @@ final class NetworkConfiguration {
             browserExecutable: browserExecutable ?? bundle.executableURL?.path)
     }
 
-    func diagnose(_ settings: AssistantSettings, environment: DiagnosticEnvironment? = nil) -> HealthSnapshot {
+    func diagnose(_ settings: AssistantSettings, environment: DiagnosticEnvironment? = nil,
+                  owned: RelayOwnedDiagnosticPorts? = nil) -> HealthSnapshot {
         let environment = environment ?? liveDiagnosticEnvironment()
         var result = HealthSnapshot()
         result.checkedAt = environment.now()
@@ -329,15 +341,28 @@ final class NetworkConfiguration {
         var mode: String?
         var yamlRules: [String] = []
         var policy: [String: Any] = [:]
-        result.httpReady = environment.portReady(settings.httpPort)
-        result.socksReady = environment.portReady(settings.socksPort)
+        // Owned ports are checked against the actual child PID in Main, never by
+        // connecting to an arbitrary listener belonging to another application.
+        result.httpReady = owned == nil && environment.portReady(settings.httpPort)
+        result.socksReady = owned == nil && environment.portReady(settings.socksPort)
         let proxy = environment.systemProxies()
+        let systemPort = owned == nil ? settings.httpPort : owned?.systemHTTPPort
         result.systemProxy = (proxy["HTTPEnable"] as? NSNumber)?.boolValue == true &&
             (proxy["HTTPSEnable"] as? NSNumber)?.boolValue == true &&
             proxy["HTTPProxy"] as? String == "127.0.0.1" && proxy["HTTPSProxy"] as? String == "127.0.0.1" &&
-            (proxy["HTTPPort"] as? NSNumber)?.intValue == settings.httpPort && (proxy["HTTPSPort"] as? NSNumber)?.intValue == settings.httpPort
+            systemPort != nil && (proxy["HTTPPort"] as? NSNumber)?.intValue == systemPort && (proxy["HTTPSPort"] as? NSNumber)?.intValue == systemPort
+        if let owned {
+            let socksEnabled = (proxy["SOCKSEnable"] as? NSNumber)?.boolValue == true
+            result.systemProxy = result.systemProxy &&
+                (proxy["ProxyAutoConfigEnable"] as? NSNumber)?.boolValue != true &&
+                (proxy["ProxyAutoDiscoveryEnable"] as? NSNumber)?.boolValue != true &&
+                (!socksEnabled || (owned.systemSOCKSPort != nil &&
+                    proxy["SOCKSProxy"] as? String == "127.0.0.1" &&
+                    (proxy["SOCKSPort"] as? NSNumber)?.intValue == owned.systemSOCKSPort))
+        }
         if let json = try? environment.readJSON(claudeSettings), let env = json["env"] as? [String: Any] {
-            let expected = "http://127.0.0.1:\(settings.httpPort)"
+            let codePort = owned == nil ? settings.httpPort : owned?.codeHTTPPort
+            let expected = "http://127.0.0.1:\(codePort ?? 0)"
             result.browserIntegrated = environment.browserExecutable != nil && env["BROWSER"] as? String == environment.browserExecutable
             let bypassKeys = ["NO_PROXY", "no_proxy"]
             let bypasses = bypassKeys.map { env[$0] as? String ?? "" }
@@ -345,9 +370,10 @@ final class NetworkConfiguration {
             let cleanTokens = Set((clean ?? "").split(separator: ",").map { $0.lowercased() })
             let originalTokens = bypasses.joined(separator: ",").split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }.filter { !$0.isEmpty }
             let safeBypasses = clean != nil && bypassKeys.allSatisfy { env[$0] == nil || env[$0] is String } && originalTokens.allSatisfy { cleanTokens.contains($0) }
-            result.cliConfigured = safeBypasses && ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"].allSatisfy { env[$0] as? String == expected }
+            result.cliConfigured = codePort != nil && safeBypasses && ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"].allSatisfy { env[$0] as? String == expected }
         }
         result.edgePolicyCount = environment.edgePolicies().filter { $0.valid }.count
+        if owned != nil { return result }
         if let current = try? environment.readYAML(clashRoot.appendingPathComponent("work/config.yaml")) {
             result.clashLocated = true
             mode = current["mode"] as? String

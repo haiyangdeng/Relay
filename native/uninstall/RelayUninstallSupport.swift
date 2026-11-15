@@ -79,14 +79,16 @@ enum RelayRemoval {
         let dir = open(root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
         if dir >= 0 { _ = fsync(dir); close(dir) }
     }
-    static func run(_ command: String, _ arguments: [String], timeout: TimeInterval = 60) throws -> (Int32, Data) {
+    static func run(_ command: String, _ arguments: [String], timeout: TimeInterval = 60,
+                    maximumOutputBytes: Int = 1048576, requireCompleteOutput: Bool = false) throws -> (Int32, Data) {
+        guard (1...67108864).contains(maximumOutputBytes) else { throw fail("Invalid cleanup output bound") }
         let process = Process(); process.executableURL = URL(fileURLWithPath: command); process.arguments = arguments
         process.environment = ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "en_US.UTF-8"]
         let pipe = Pipe(); process.standardOutput = pipe; process.standardError = FileHandle.nullDevice
         let completed = DispatchSemaphore(value: 0); process.terminationHandler = { _ in completed.signal() }
         try process.run()
         let output = DispatchGroup(); output.enter()
-        let capture = RelayRemovalCapture()
+        let capture = RelayRemovalCapture(limit: maximumOutputBytes)
         DispatchQueue.global().async {
             while true { let data = pipe.fileHandleForReading.availableData; if data.isEmpty { break }; capture.append(data) }
             output.leave()
@@ -102,6 +104,7 @@ enum RelayRemoval {
             throw fail("Cleanup child did not finish")
         }
         guard output.wait(timeout: .now() + 5) == .success else { throw fail("Cleanup output did not close") }
+        if requireCompleteOutput && capture.overflowed { throw fail("Cleanup output exceeded its bound") }
         return (process.terminationStatus, capture.data)
     }
     static func requireRun(_ command: String, _ args: [String], timeout: TimeInterval = 60) throws -> Data {
@@ -137,9 +140,16 @@ enum RelayRemoval {
 }
 
 final class RelayRemovalCapture: @unchecked Sendable {
-    private let lock = NSLock(); private var storage = Data()
-    func append(_ value: Data) { lock.lock(); defer { lock.unlock() }; if storage.count < 1048576 { storage.append(value.prefix(1048576 - storage.count)) } }
+    private let lock = NSLock(); private var storage = Data(); private let limit: Int
+    private var overflow = false
+    init(limit: Int = 1048576) { self.limit = limit }
+    func append(_ value: Data) {
+        lock.lock(); defer { lock.unlock() }
+        if value.count > limit - storage.count { overflow = true }
+        if storage.count < limit { storage.append(value.prefix(limit - storage.count)) }
+    }
     var data: Data { lock.lock(); defer { lock.unlock() }; return storage }
+    var overflowed: Bool { lock.lock(); defer { lock.unlock() }; return overflow }
 }
 
 struct RelayRemovalInstallation {
@@ -170,12 +180,13 @@ struct RelayRemovalInstallation {
 // A failure never advances the checkpoint and never runs a later destructive step.
 enum RelayRemovalLifecycle {
     static func run(phase initial: String, restoreUser: () throws -> Void,
+                    removeRegistrations: () throws -> Void = {},
                     removeComponents: () throws -> Void, checkpoint: (String) throws -> Void,
                     finish: () throws -> Void) throws {
         guard ["requested", "user-cleaned", "components-cleaned"].contains(initial) else { throw RelayRemoval.fail("Unknown cleanup phase") }
         var phase = initial
         if phase == "requested" {
-            try restoreUser(); try checkpoint("user-cleaned"); phase = "user-cleaned"
+            try restoreUser(); try removeRegistrations(); try checkpoint("user-cleaned"); phase = "user-cleaned"
         }
         if phase == "user-cleaned" {
             try removeComponents(); try checkpoint("components-cleaned")

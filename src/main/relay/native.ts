@@ -1,5 +1,6 @@
 import { execFile } from 'child_process'
 import { existsSync } from 'fs'
+import { ownedNativeDiagnostic } from '../../shared/relay/diagnostic-evidence'
 import {
   validateCoreRecordRecovery,
   validateCoreSelectionSnapshot,
@@ -141,12 +142,12 @@ export async function backupMoveNative(
 export function systemProxyNative(
   executable: string,
   context: RelayStateContext,
-  action: 'inspect' | 'prepare' | 'apply' | 'prepareRestore' | 'restore',
+  action: 'inspect' | 'prepare' | 'apply' | 'prepareRestore' | 'restore' | 'retireDetached',
   settings?: NativeSystemProxySettings,
   expectedRevision?: string
 ): Promise<SystemProxyReport> {
   return (
-    action === 'apply' || action === 'restore'
+    action === 'apply' || action === 'restore' || action === 'retireDetached'
       ? nativeRuntimeExecutable(executable, context)
       : Promise.resolve(executable)
   )
@@ -357,7 +358,12 @@ export function diagnoseNative(
   context: RelayDiagnosticContext
 ): Promise<RelayReadOnlyReport> {
   const settings = validatePreferences(raw)
-  return invokeNative(executable, '--diagnose', { settings, context }).then(validateReadOnlyReport)
+  return invokeNative(executable, '--diagnose', { settings, context }).then((raw) => ({
+    ...validateReadOnlyReport(raw),
+    ...(context.owned
+      ? { owned: ownedNativeDiagnostic((raw as Record<string, unknown>).owned) }
+      : {})
+  }))
 }
 
 export function guardPlanNative(
@@ -437,7 +443,7 @@ function invokeNative(
       }
     | {
         context: RelayStateContext
-        action: 'inspect' | 'prepare' | 'apply' | 'prepareRestore' | 'restore'
+        action: 'inspect' | 'prepare' | 'apply' | 'prepareRestore' | 'restore' | 'retireDetached'
         settings?: NativeSystemProxySettings
         expectedRevision?: string
       }

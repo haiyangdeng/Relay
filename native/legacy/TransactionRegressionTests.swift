@@ -147,13 +147,13 @@ func runTransactionRegressionTests() -> Int32 {
         let before = try Data(contentsOf: settingsFile)
         let prefs = b.support.appendingPathComponent("preferences.json")
         try fm.createDirectory(at: prefs, withIntermediateDirectories: true)
-        var settings = AssistantSettings(); settings.httpPort = 8888
+        var settings = AssistantSettings(); settings.httpPort = 8888; settings.node = "fixture-node"
         try check(rejected { _ = try b.applyClaudeCode(settings) }, "invalid preferences target rejected")
         try check(try Data(contentsOf: settingsFile) == before, "Claude settings unchanged when preferences cannot be committed")
         try check(!fm.fileExists(atPath: b.browserProfile.appendingPathComponent("Local State").path), "browser settings unchanged on preflight failure")
     }
     scenario("preferences-rollback") { b in
-        var settings = AssistantSettings(); settings.httpPort = 8888
+        var settings = AssistantSettings(); settings.httpPort = 8888; settings.node = "fixture-node"
         let backup = try b.applyClaudeCode(settings)
         try check(b.readSavedSettings().httpPort == 8888, "preferences committed in same transaction")
         try b.restore(backup)

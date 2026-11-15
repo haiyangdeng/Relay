@@ -109,6 +109,43 @@ describe('one-action system proxy workflow', () => {
     expect(selectedSystemProxyServices(report, [])).toEqual([])
   })
 
+  it.each(['pending', 'conflict'] as const)(
+    'allows explicit re-enabling from a confirmed detached %s record',
+    async (status) => {
+      const report: SystemProxyReport = {
+        status,
+        revision: 'r',
+        location: 'l',
+        recordID: evidenceId,
+        canApply: false,
+        canRestore: false,
+        canRetireDetached: true,
+        services: [],
+        warnings: []
+      }
+      expect(canPrepareSystemProxy(report)).toBe(true)
+      expect(canPrepareSystemProxy({ ...report, recordID: undefined })).toBe(false)
+      expect(canPrepareSystemProxy({ ...report, canRetireDetached: false })).toBe(false)
+      expect(canPrepareSystemProxy({ ...report, status: 'uncertain' })).toBe(false)
+
+      const plan = { evidenceId, action: 'apply', report }
+      const result = { status: 'applied', warnings: [] }
+      const invoke = vi.fn().mockResolvedValueOnce(plan).mockResolvedValueOnce(result)
+      expect(await submitSystemProxy('apply', settings, invoke, () => {})).toBe(result)
+      expect(invoke.mock.calls).toEqual([
+        ['relaySystemProxyPrepare', settings],
+        ['relaySystemProxyExecute', { evidenceId }]
+      ])
+
+      const restore = vi
+        .fn()
+        .mockResolvedValueOnce({ ...plan, action: 'restore' })
+        .mockResolvedValueOnce(undefined)
+      await expect(submitSystemProxy('restore', settings, restore, () => {})).rejects.toThrow()
+      expect(restore.mock.calls.at(-1)).toEqual(['relaySystemProxyCancel', { evidenceId }])
+    }
+  )
+
   it('follows a later core port until the user edits it, without adopting an unavailable endpoint', () => {
     expect(systemProxyPortFromCore(18191, false, 18192)).toBe(18192)
     expect(systemProxyPortFromCore(7890, true, 18192)).toBe(7890)

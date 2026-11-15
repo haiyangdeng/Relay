@@ -145,7 +145,7 @@ describe('Private content-addressed native deployment without executing fixture 
 })
 
 describe('Proxy bridge deploys before a confirmed mutation, without fallback retries', () => {
-  it('keeps inspection on the resource and only apply/restore on the verified private runtime', async () => {
+  it('keeps inspection on the resource and only mutations on the verified private runtime', async () => {
     await fixture(async (source, context) => {
       const result = {
         status: 'inactive',
@@ -166,10 +166,14 @@ describe('Proxy bridge deploys before a confirmed mutation, without fallback ret
       await expect(lstat(join(context.stateRoot, 'NativeRuntime'))).rejects.toMatchObject({
         code: 'ENOENT'
       })
-      for (const action of ['apply', 'restore'] as const)
+      for (const action of ['apply', 'restore', 'retireDetached'] as const)
         await systemProxyNative(source, context, action, undefined, 'b'.repeat(64))
       const cached = await nativeRuntimeExecutable(source, context)
-      expect(mock.execFile.mock.calls.slice(3).map((call) => call[0])).toEqual([cached, cached])
+      expect(mock.execFile.mock.calls.slice(3).map((call) => call[0])).toEqual([
+        cached,
+        cached,
+        cached
+      ])
       mock.execFile.mockImplementation((_path, _args, _options, done) => {
         queueMicrotask(() => done(new Error('fixture native failure'), ''))
         return { stdin: { end: vi.fn(), on: vi.fn() } }

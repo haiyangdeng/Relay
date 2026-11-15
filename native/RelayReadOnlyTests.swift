@@ -97,6 +97,43 @@ func runRelayReadOnlySelfTests() -> Int32 {
         unforced.edgePolicies = { NetworkConfiguration.assessEdgePolicies(values: expected, forced: []) }
         let needsPolicy = RelayReadOnly.report(backend: backend, settings: settings, environment: unforced, timezone: "UTC", preferredLanguages: ["en"])
         check(needsPolicy.checks.first { $0.id == "browser-config" }?.state == .attention && needsPolicy.snapshot.summary.contains("有待检查"), "summary cannot hide unforced browser policy")
+
+        var ownedEnvironment = environment
+        var legacyReads = 0
+        ownedEnvironment.readYAML = { _ in legacyReads += 1; throw AssistantError("legacy forbidden") }
+        ownedEnvironment.controller = { legacyReads += 1; return nil }
+        ownedEnvironment.portReady = { _ in legacyReads += 1; return true }
+        ownedEnvironment.systemProxies = { ["HTTPEnable": 1, "HTTPSEnable": 1, "SOCKSEnable": 1,
+            "HTTPProxy": "127.0.0.1", "HTTPSProxy": "127.0.0.1", "SOCKSProxy": "127.0.0.1",
+            "HTTPPort": 18191, "HTTPSPort": 18191, "SOCKSPort": 18191] }
+        for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] { env[key] = "http://127.0.0.1:17891" }
+        let ownedPorts = RelayOwnedDiagnosticPorts(systemHTTPPort: 18191, systemSOCKSPort: 18191, codeHTTPPort: 17891, dedicatedSOCKSPort: 17890)
+        try ownedPorts.validate()
+        let ownedReport = RelayReadOnly.report(backend: backend, settings: settings, environment: ownedEnvironment,
+            timezone: "UTC", preferredLanguages: ["en"], owned: ownedPorts)
+        check(ownedReport.snapshot.systemProxy && ownedReport.snapshot.cliConfigured, "owned ordinary and Code ports are independent")
+        check(legacyReads == 0, "owned diagnosis never reads legacy YAML/controller or probes arbitrary ports")
+        check(ownedReport.warnings.first?.hasPrefix("仅核对 Relay") == true, "owned native report identifies its source")
+        check(!ownedReport.snapshot.controllerConnected && ownedReport.snapshot.nodeNames.isEmpty,
+            "native client-only read cannot claim owned core evidence")
+        check(ownedReport.snapshot.routingVerified == nil && ownedReport.snapshot.dnsVerified == nil,
+            "native client config cannot certify dedicated route or DNS")
+        check(ownedReport.checks.suffix(6).allSatisfy { $0.state == .pending }, "owned runtime claims remain pending")
+        let idlePorts = RelayOwnedDiagnosticPorts(systemHTTPPort: nil, systemSOCKSPort: nil, codeHTTPPort: nil, dedicatedSOCKSPort: nil)
+        let idle = backend.diagnose(settings, environment: ownedEnvironment, owned: idlePorts)
+        check(!idle.systemProxy && !idle.cliConfigured, "no owned listener cannot match another application")
+        var wrongSOCKS = ownedEnvironment
+        wrongSOCKS.systemProxies = { var value = ownedEnvironment.systemProxies(); value["SOCKSPort"] = 7891; return value }
+        check(!backend.diagnose(settings, environment: wrongSOCKS, owned: ownedPorts).systemProxy, "foreign ordinary SOCKS port not green")
+        var pac = ownedEnvironment
+        pac.systemProxies = { var value = ownedEnvironment.systemProxies(); value["ProxyAutoConfigEnable"] = 1; return value }
+        check(!backend.diagnose(settings, environment: pac, owned: ownedPorts).systemProxy, "PAC override not manual match")
+        var wrongCode = ownedEnvironment
+        wrongCode.readJSON = { url in
+            if url.lastPathComponent == "settings.json" { return ["env": ["HTTP_PROXY": "http://127.0.0.1:18191", "HTTPS_PROXY": "http://127.0.0.1:18191", "http_proxy": "http://127.0.0.1:18191", "https_proxy": "http://127.0.0.1:18191"]] }
+            return try ownedEnvironment.readJSON(url)
+        }
+        check(!backend.diagnose(settings, environment: wrongCode, owned: ownedPorts).cliConfigured, "Code ordinary port cannot match dedicated expectation")
     } catch {
         failures.append("unexpected fixture failure")
     }

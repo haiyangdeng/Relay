@@ -50,28 +50,28 @@ export const geoFields: {
     kind: 'geoip-dat',
     name: 'GeoIP DAT',
     selector: 'CN',
-    url: 'https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip-lite.dat'
+    url: 'https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/release/geoip-lite.dat'
   },
   {
     key: 'geosite',
     kind: 'geosite-dat',
     name: 'GeoSite DAT',
     selector: 'CN',
-    url: 'https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geosite.dat'
+    url: 'https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/release/geosite.dat'
   },
   {
     key: 'mmdb',
     kind: 'country-mmdb',
     name: 'Country DB',
     selector: 'CN',
-    url: 'https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip.metadb'
+    url: 'https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/release/country.mmdb'
   },
   {
     key: 'asn',
     kind: 'asn-mmdb',
     name: 'ASN DB',
     selector: '64512',
-    url: 'https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/GeoLite2-ASN.mmdb'
+    url: 'https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/release/GeoLite2-ASN.mmdb'
   }
 ]
 export interface GeoOriginDraft {

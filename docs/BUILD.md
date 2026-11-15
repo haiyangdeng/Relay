@@ -1,6 +1,6 @@
 # 构建与发布准备
 
-本仓库是 **V1.0.0** 的对应源码，内部构建号为 **2**。以下流程用于从源码生成本地资源与安装包。打包、安装验收和 GitHub 发布分别记录，不把构建成功视为网络功能实测通过。
+本仓库是 **V1.0.0** 的对应源码，内部构建号为 **11**。以下流程用于从源码生成本地资源与安装包。打包、安装验收和 GitHub 发布分别记录，不把构建成功视为网络功能实测通过。
 
 ## 工具
 
@@ -49,7 +49,9 @@ python3 scripts/relay/build-public.py installer --arch arm64 --execute
 python3 scripts/relay/build-public.py installer --arch x64 --execute
 ```
 
-App 输出位于 `release/mac-arm64/Relay.app` 或 `release/mac/Relay.app`。同一次 resources 构建可打两种架构。electron-builder 根据请求架构取得 lockfile 固定的 Electron，不引用本机历史 Intel Electron 路径。`afterSign` 会核对双架构 Core、浏览器 wrapper、禁用 Guard 边界及签名完整性；不自动发布。
+App 中间产物位于 `release/apps.noindex/mac-arm64/Relay.app` 或 `release/apps.noindex/mac/Relay.app`；公开 PKG 仍交付到 `release/` 根目录。同一次 resources 构建可打两种架构。electron-builder 根据请求架构取得 lockfile 固定的 Electron，不引用本机历史 Intel Electron 路径。`afterSign` 会核对双架构 Core、浏览器 wrapper、禁用 Guard 边界及签名完整性；不自动发布。
+
+`.noindex` 用于避免 Spotlight 索引中间 App；Finder 浏览仍可能触发 Launch Services 登记。因此，共用的 `afterSign` 在全部验证通过后，还会核对本次固定 staging 路径、包身份和签名，仅对其中的 RelayBrowser、四个 Electron Helper 和 Relay 主 App 执行定向 `lsregister -u`。未注册路径返回退出码 1 时，只有只读复查确认精确路径已不存在才视为幂等成功；其余失败会中止构建。不重置注册库、不注销其他副本，也不改已安装 App。请勿从中间产物启动应用；之后再用 Finder 浏览这些目录仍可能重新登记。已有旧目录不会被新构建或产品卸载器自动删除。
 
 Installer 从源码生成经过校验的 helper PKG，再将已签名 App 与 helper 安装脚本组合成同一个安装组件。产品版本为 `1.0.0`。安装器固定写入 `/Applications/Relay.app`，发现已有 Relay 应用、组件、运行实例或安装记录时会停止，清理后才可全新安装。重复构建同架构时需先移开原构建输出，第二架构可复用本次通过摘要和源码校验的 helper 构建。
 
@@ -58,6 +60,8 @@ Installer 从源码生成经过校验的 helper PKG，再将已签名 App 与 he
 ### 自动卸载
 
 本版一体安装包在 App 之外安装独立的卸载组件。用户将 `/Applications/Relay.app` 拖入废纸篓后，组件核对 App 文件身份并保存卸载意图；先由安装绑定的普通用户恢复 Relay 管理的配置和关闭专属进程，再移除系统组件、登录项、安装收据及专属数据，最后移除卸载组件自身。
+
+用户数据清理会同步清空 Relay 和 RelayBrowser 的专属偏好域，再删除对应文件，避免只删除磁盘文件却留下偏好缓存。清理清单包括专用浏览器在 `~/Library/Caches/Relay-Preview` 下生成的缓存。应用注册清理限定于本次安装的固定路径、经过身份核对的废纸篓路径及其内置辅助应用；完成前再次检查这些注册已消失。失败时保留卸载进度供重试。另行导出的恢复备份、源码、构建产物和安装包不属于安装数据。
 
 该过程无需另外运行卸载脚本。普通移动或仅原路径缺失不会被直接当作卸载意图。旧版兼容卸载工具仍由构建器生成，新安装存在时会交给自动卸载链，不并行执行旧清理流程。
 

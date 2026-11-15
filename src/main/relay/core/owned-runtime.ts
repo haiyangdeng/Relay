@@ -51,6 +51,7 @@ import {
 } from './probe-owners'
 import { coreEnvironment, isolatedCoreConfiguration } from './configuration'
 import { controlledListeners, validateDedicatedRoute } from './dedicated-listeners'
+import { assertDedicatedPinnedNodeUnchanged } from './dedicated-pinned-node'
 import { probeLocalPort, probeLocalUdpPort, ownsHttpListener, ownsUdpListener } from './port'
 import { localProxyInheritedOptions } from './local-proxy-options'
 import {
@@ -948,6 +949,12 @@ export async function startOwnedCore(
       candidate.dedicated?.route !== dedicated?.route
     )
       throw new Error('本次热载不能更换在用专用监听端口或路由。')
+    if (dedicated)
+      assertDedicatedPinnedNodeUnchanged(
+        JSON.parse(runtimeConfiguration) as Record<string, unknown>,
+        candidate.parsed,
+        dedicated.route
+      )
     reloadPending = true
     const evidenceId = randomUUID(),
       runtimeSHA256 = resourceHash(Buffer.from(next))

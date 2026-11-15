@@ -1,6 +1,7 @@
 import type { RuntimeAsset } from '../configuration/bindings'
 import { validateBoundConfiguration } from '../configuration/checker'
 import type { ProfileRuntimeGeography } from '../profiles/runtime'
+import { controlledListeners, validateDedicatedRoute } from './dedicated-listeners'
 
 export const localProxyGeoControls = {
   'geo-auto-update': false,
@@ -70,5 +71,12 @@ export function validateLocalProxyGeoAssets(
   assets: readonly RuntimeAsset[] = []
 ): void {
   localProxyGeography(configuration, assets)
-  if (assets.length) validateBoundConfiguration(JSON.stringify(configuration), assets)
+  if (assets.length) {
+    const dedicated = controlledListeners(configuration.listeners)
+    if (dedicated) validateDedicatedRoute(dedicated, configuration)
+    // These exact owned listeners cannot reference files. Check all other
+    // resource dependencies without passing their projection-only fields to
+    // the generic inbound schema; the actual runtime keeps its listeners.
+    validateBoundConfiguration(JSON.stringify({ ...configuration, listeners: [] }), assets)
+  }
 }

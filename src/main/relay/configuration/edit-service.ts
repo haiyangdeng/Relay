@@ -45,6 +45,22 @@ export interface ConfigurationLibraryBindingUpdate {
 export type RuntimeProfileRead = Awaited<ReturnType<ProfileStore['read']>> & {
   runtimeAssets?: readonly RuntimeAsset[]
 }
+// Only fixed resource labels reach the ordinary-proxy preparation error UI.
+// Dependency references may contain private paths or URLs and stay in main.
+export class MissingRuntimeGeoDataError extends Error {
+  constructor(kinds: readonly string[]) {
+    const names = new Map([
+      ['geoip-dat', 'GeoIP.dat'],
+      ['geosite-dat', 'GeoSite.dat'],
+      ['country-mmdb', 'Country.mmdb']
+    ])
+    const files = [...new Set(kinds.flatMap((kind) => names.get(kind) ?? []))].sort()
+    super(
+      `HTTP 地理规则的本地数据库尚未齐全${files.length ? `（${files.join('、')}）` : ''}；请在“外部资源”中同步或导入对应地理数据库；不会自动下载。`
+    )
+    this.name = 'MissingRuntimeGeoDataError'
+  }
+}
 function libraryItem(item: RuntimeOverride): boolean {
   if (!item.id.startsWith(OVERRIDE_LIBRARY_RUNTIME_PREFIX)) return false
   if (
@@ -297,9 +313,10 @@ export function createConfigurationEditService(adapters: {
       // editor remain unchanged, including when no edit document exists yet.
       return prepareRecord(selection, await adapters.store.read(), [], true)
     },
-    async readRuntimeProfile(
+    async readComposedProfile(
       selection: RelayProfileSelection,
-      resolverMode: LocalResolverMode = 'off'
+      resolverMode: LocalResolverMode,
+      purpose: 'http' | 'isolated-probe'
     ): Promise<RuntimeProfileRead> {
       const generation = runtimeGeneration
       const recheckGeneration = (): void => {
@@ -310,6 +327,9 @@ export function createConfigurationEditService(adapters: {
       await assertLibrary(record.document, selection.id)
       recheckGeneration()
       const bindGeo = async (text: string, revision: string): Promise<RuntimeProfileRead> => {
+        // Independent probes project their own rules, DNS and hosts. Binding
+        // the saved route's databases here would block unrelated static nodes.
+        if (purpose === 'isolated-probe') return { ...stored, text, revision }
         const configuration = readConfigurationMap(text).data
         if (!configuration) throw new Error('HTTP 运行配置无效。')
         // Bind only databases used by HTTP's rules and selected DNS policies.
@@ -324,18 +344,20 @@ export function createConfigurationEditService(adapters: {
         if (
           dependencies.some(
             (dependency) => !['geoip-dat', 'geosite-dat', 'country-mmdb'].includes(dependency.kind)
-          ) ||
-          !adapters.runtimeResources ||
-          !adapters.defaultGeoResource
+          )
         )
           throw new Error('HTTP 地理规则需要已保存并检查的本地数据库；不会自动下载。')
+        if (!adapters.runtimeResources || !adapters.defaultGeoResource)
+          throw new MissingRuntimeGeoDataError(dependencies.map((dependency) => dependency.kind))
         const bundle = await bindRuntimeResources(geoSource, [], {
           resources: adapters.runtimeResources,
           providers: adapters.profiles,
           defaultGeoResource: adapters.defaultGeoResource
         })
         if (bundle.unresolved.length)
-          throw new Error('HTTP 地理规则的本地数据库尚未齐全；不会自动下载。')
+          throw new MissingRuntimeGeoDataError(
+            bundle.unresolved.map((dependency) => dependency.kind)
+          )
         await bundle.recheck()
         const [latestSource, latestEdit] = await Promise.all([
           adapters.profiles.read(selection),
@@ -433,8 +455,15 @@ export function createConfigurationEditService(adapters: {
       }
     }
   }
+  const { readComposedProfile, ...operations } = service
   return {
-    ...service,
+    ...operations,
+    readRuntimeProfile: (
+      selection: RelayProfileSelection,
+      resolverMode: LocalResolverMode = 'off'
+    ) => readComposedProfile(selection, resolverMode, 'http'),
+    readIsolatedProbeProfile: (selection: RelayProfileSelection) =>
+      readComposedProfile(selection, 'profile', 'isolated-probe'),
     isBusy: (): boolean => pending,
     whenIdle: (): Promise<void> =>
       pending ? new Promise((resolve) => waiters.push(resolve)) : Promise.resolve(),

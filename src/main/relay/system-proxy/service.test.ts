@@ -48,15 +48,30 @@ function fixture() {
     adapters = {
       native: vi.fn(
         async (
-          action: 'inspect' | 'prepare' | 'apply' | 'prepareRestore' | 'restore',
+          action: 'inspect' | 'prepare' | 'apply' | 'prepareRestore' | 'restore' | 'retireDetached',
           _settings?: NativeSystemProxySettings,
           _revision?: string
         ): Promise<SystemProxyReport> => {
           if (action === 'prepare')
             return {
               ...structuredClone(current),
-              canApply: ['inactive', 'active', 'applied'].includes(current.status)
+              canApply: ['inactive', 'active', 'applied'].includes(current.status),
+              canRetireDetached: false
             }
+          if (action === 'retireDetached') {
+            if (!current.canRetireDetached || _revision !== current.revision)
+              throw new Error('fixture retirement refused')
+            current = {
+              ...current,
+              status: 'inactive',
+              revision: 'd'.repeat(64),
+              recordID: undefined,
+              canApply: false,
+              canRestore: false,
+              canRetireDetached: false,
+              quitProxyPorts: undefined
+            }
+          }
           if (action === 'apply')
             current = {
               ...current,
@@ -64,7 +79,9 @@ function fixture() {
               revision: 'b'.repeat(64),
               recordID: '00000000-0000-0000-0000-000000000001',
               canApply: false,
-              canRestore: true
+              canRestore: true,
+              canRetireDetached: false,
+              quitProxyPorts: undefined
             }
           if (action === 'restore')
             current = {
@@ -403,4 +420,225 @@ describe('Confirmed system proxy lifecycle with retained PAC and restoration evi
     expect(systemProxySettings({ ...settings, host: '::1' }).host).toBe('::1')
     expect(() => systemProxySettings({ ...settings, host: '127.0.0.1;command' })).toThrow()
   })
+})
+
+function detachedFixture(status: 'conflict' | 'pending' = 'conflict') {
+  const f = fixture()
+  f.set({
+    status,
+    recordID: '00000000-0000-0000-0000-000000000002',
+    canApply: false,
+    canRestore: status === 'pending',
+    canRetireDetached: true,
+    currentProxyPorts: [7890],
+    ...(status === 'conflict' ? { quitProxyPorts: [7890] } : {})
+  })
+  return f
+}
+
+describe('Explicit apply after a proven detached restoration record', () => {
+  it.each(['conflict', 'pending'] as const)(
+    'reads full detached proof for %s without changing the active pointer during prepare or cancel',
+    async (status) => {
+      const f = detachedFixture(status),
+        before = f.current()
+      const plan = await f.service.prepare(settings)
+      expect(plan.report).toMatchObject({ canApply: false, canRetireDetached: true, status })
+      expect(f.adapters.native.mock.calls.map(([action]) => action)).toEqual(['prepare', 'inspect'])
+      f.service.cancel({ evidenceId: plan.evidenceId })
+      expect(f.current()).toEqual(before)
+      expect(f.close).toHaveBeenCalledOnce()
+      expect(f.adapters.confirm).not.toHaveBeenCalled()
+    }
+  )
+  it.each([
+    ['manual', 'conflict'],
+    ['pac', 'conflict'],
+    ['manual', 'pending']
+  ] as const)(
+    'retires only the confirmed old record then freshly prepares the %s apply from %s with a new revision',
+    async (mode, status) => {
+      const f = detachedFixture(status)
+      f.adapters.confirm.mockResolvedValue(true)
+      const plan = await f.service.prepare({ ...settings, mode })
+      expect((await f.service.execute({ evidenceId: plan.evidenceId })).status).toBe('applied')
+      expect(f.adapters.native.mock.calls.map(([action]) => action)).toEqual([
+        'prepare',
+        'inspect',
+        'inspect',
+        'retireDetached',
+        'prepare',
+        'apply'
+      ])
+      expect(f.adapters.native).toHaveBeenCalledWith(
+        'retireDetached',
+        undefined,
+        plan.report.revision
+      )
+      expect(f.adapters.native.mock.calls.at(-1)?.[2]).toBe('d'.repeat(64))
+      expect(f.adapters.confirm).toHaveBeenCalledOnce()
+      expect(f.adapters.verifyTarget).toHaveBeenCalledTimes(3)
+      expect(f.close).not.toHaveBeenCalled()
+    }
+  )
+  it('does not retire a detached apply as part of quit or after expiry during the fresh read', async () => {
+    for (const change of ['quit', 'expiry'] as const) {
+      const f = detachedFixture(),
+        native = f.adapters.native.getMockImplementation()!
+      const plan = await f.service.prepare(settings),
+        before = f.current()
+      f.adapters.confirm.mockResolvedValue(true)
+      f.adapters.native.mockImplementation(async (...args) => {
+        if (change === 'expiry' && args[0] === 'inspect') f.adapters.now.mockReturnValue(60002)
+        return native(...args)
+      })
+      expect(
+        (
+          await f.service.execute(
+            { evidenceId: plan.evidenceId },
+            change === 'quit' ? 'quit' : 'user'
+          )
+        ).status
+      ).toBe('failed')
+      expect(f.current()).toEqual(before)
+      expect(
+        f.adapters.native.mock.calls.some(([a]) => a === 'retireDetached' || a === 'apply')
+      ).toBe(false)
+    }
+  })
+  it.each(['cancel', 'sleep', 'expired'] as const)(
+    'never clears the old pointer when confirmation is %s',
+    async (change) => {
+      const f = detachedFixture(),
+        before = f.current()
+      f.adapters.confirm.mockImplementation(async () => {
+        if (change === 'sleep') f.service.clear()
+        if (change === 'expired') f.adapters.now.mockReturnValue(60002)
+        return change !== 'cancel'
+      })
+      const plan = await f.service.prepare(settings)
+      expect((await f.service.execute({ evidenceId: plan.evidenceId })).status).toBe(
+        change === 'cancel' ? 'cancelled' : 'failed'
+      )
+      expect(f.current()).toEqual(before)
+      expect(
+        f.adapters.native.mock.calls.some(([a]) => a === 'retireDetached' || a === 'apply')
+      ).toBe(false)
+    }
+  )
+  it.each(['revision', 'record', 'eligibility'] as const)(
+    'refuses a changed detached %s after confirmation without retiring or applying',
+    async (change) => {
+      const f = detachedFixture()
+      const plan = await f.service.prepare(settings)
+      f.adapters.confirm.mockImplementation(async () => {
+        f.set(
+          change === 'revision'
+            ? { revision: 'e'.repeat(64) }
+            : change === 'record'
+              ? { recordID: '00000000-0000-0000-0000-000000000003' }
+              : { canRetireDetached: false }
+        )
+        return true
+      })
+      expect((await f.service.execute({ evidenceId: plan.evidenceId })).status).toBe('failed')
+      expect(f.current().recordID).toBeDefined()
+      expect(
+        f.adapters.native.mock.calls.some(([a]) => a === 'retireDetached' || a === 'apply')
+      ).toBe(false)
+    }
+  )
+  it('refuses a mixed prepare/inspect snapshot instead of returning a stale retirement proof', async () => {
+    const f = detachedFixture(),
+      native = f.adapters.native.getMockImplementation()!
+    f.adapters.native.mockImplementation(async (...args) => {
+      if (args[0] === 'inspect') f.set({ revision: 'e'.repeat(64) })
+      return native(...args)
+    })
+    await expect(f.service.prepare(settings)).rejects.toThrow('变化')
+    expect(f.current().recordID).toBeDefined()
+    expect(f.close).toHaveBeenCalledOnce()
+  })
+  it('keeps a refused retirement uncertain with its old pointer and no network apply or retry', async () => {
+    const f = detachedFixture(),
+      native = f.adapters.native.getMockImplementation()!
+    f.adapters.confirm.mockResolvedValue(true)
+    f.adapters.native.mockImplementation(async (...args) => {
+      if (args[0] === 'retireDetached') throw new Error('fixture refused recheck')
+      return native(...args)
+    })
+    const plan = await f.service.prepare(settings)
+    expect((await f.service.execute({ evidenceId: plan.evidenceId })).status).toBe('uncertain')
+    expect(f.current().recordID).toBe(plan.report.recordID)
+    expect(f.adapters.native.mock.calls.filter(([a]) => a === 'retireDetached')).toHaveLength(1)
+    expect(f.adapters.native.mock.calls.some(([a]) => a === 'apply')).toBe(false)
+    expect(f.close).not.toHaveBeenCalled()
+    expect(f.service.isBlocking()).toBe(true)
+  })
+  it('does not apply or accept an unrelated later inactive inspection after losing the retirement acknowledgement', async () => {
+    const f = detachedFixture(),
+      native = f.adapters.native.getMockImplementation()!
+    f.adapters.confirm.mockResolvedValue(true)
+    f.adapters.native.mockImplementation(async (...args) => {
+      const result = await native(...args)
+      if (args[0] === 'retireDetached') throw new Error('fixture lost receipt after write')
+      return result
+    })
+    const plan = await f.service.prepare(settings)
+    expect((await f.service.execute({ evidenceId: plan.evidenceId })).status).toBe('uncertain')
+    expect(f.current().recordID).toBeUndefined()
+    await expect(f.service.inspect()).rejects.toThrow('未确认')
+    expect(f.adapters.native.mock.calls.some(([a]) => a === 'apply')).toBe(false)
+    expect(f.close).not.toHaveBeenCalled()
+    expect(f.service.isBlocking()).toBe(true)
+  })
+  it.each(['status', 'revision', 'record', 'capability'] as const)(
+    'rejects an unexpected retirement %s acknowledgement without applying',
+    async (change) => {
+      const f = detachedFixture(),
+        native = f.adapters.native.getMockImplementation()!
+      f.adapters.confirm.mockResolvedValue(true)
+      f.adapters.native.mockImplementation(async (...args) => {
+        const result = await native(...args)
+        if (args[0] !== 'retireDetached') return result
+        return {
+          ...result,
+          ...(change === 'status'
+            ? { status: 'restored' as const }
+            : change === 'revision'
+              ? { revision: 'a'.repeat(64) }
+              : change === 'record'
+                ? { recordID: '00000000-0000-0000-0000-000000000002' }
+                : { canApply: true })
+        }
+      })
+      const plan = await f.service.prepare(settings)
+      expect((await f.service.execute({ evidenceId: plan.evidenceId })).status).toBe('uncertain')
+      expect(f.adapters.native.mock.calls.some(([a]) => a === 'apply')).toBe(false)
+      expect(f.service.state().report?.status).toBe('uncertain')
+      expect(f.close).not.toHaveBeenCalled()
+    }
+  )
+  it.each(['revision', 'ownership', 'cancel'] as const)(
+    'stops before network apply if %s changes after retirement',
+    async (change) => {
+      const f = detachedFixture(),
+        native = f.adapters.native.getMockImplementation()!
+      f.adapters.confirm.mockResolvedValue(true)
+      f.adapters.native.mockImplementation(async (...args) => {
+        const result = await native(...args)
+        if (args[0] === 'retireDetached') {
+          if (change === 'revision') f.set({ revision: 'e'.repeat(64) })
+          if (change === 'ownership')
+            f.adapters.verifyTarget.mockRejectedValue(new Error('target lost'))
+          if (change === 'cancel') f.service.clear()
+        }
+        return result
+      })
+      const plan = await f.service.prepare(settings)
+      expect((await f.service.execute({ evidenceId: plan.evidenceId })).status).toBe('uncertain')
+      expect(f.adapters.native.mock.calls.some(([a]) => a === 'apply')).toBe(false)
+      expect(f.close).not.toHaveBeenCalled()
+    }
+  )
 })

@@ -1,9 +1,9 @@
 appId: local.relay.network.preview
 productName: Relay
 copyright: Relay contributors; Clash Party and third-party notices retained
-buildVersion: '2'
+buildVersion: '11'
 directories:
-  output: release
+  output: release/apps.noindex
   buildResources: build
 files:
   - out/**

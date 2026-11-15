@@ -1,4 +1,5 @@
 import Foundation
+import CoreFoundation
 import Darwin
 import Security
 
@@ -104,6 +105,7 @@ enum RelayAutomaticUninstall {
     // are never recursive-delete targets. Recovery evidence is removed last.
     static let cleanupPaths = [
         "Library/LaunchAgents/local.relay.network.login.plist",
+        "Library/Caches/Relay-Preview",
         "Library/Caches/local.relay.network.preview",
         "Library/HTTPStorages/local.relay.network.preview",
         "Library/HTTPStorages/local.relay.network.preview.binarycookies",
@@ -125,6 +127,7 @@ enum RelayAutomaticUninstall {
         let retireCore: () throws -> Void
         let restoreClients: () throws -> Void
         let assertIdle: () throws -> Void
+        let clearPreferences: () throws -> Void
         let removeCredentials: () throws -> Void
         let removeTemporaryLease: () throws -> Void
         let remove: (String) throws -> Void
@@ -138,6 +141,8 @@ enum RelayAutomaticUninstall {
         try environment.retireCore()
         try environment.restoreClients()
         try environment.assertIdle()
+        try environment.assertAuthorized()
+        try environment.clearPreferences()
         try environment.assertAuthorized()
         try environment.removeCredentials()
         try environment.removeTemporaryLease()
@@ -376,6 +381,49 @@ enum RelayAutomaticUninstall {
             throw AssistantError("Relay核心所有者或核心仍在运行，保留会话记录。")
         }
     }
+    static let preferenceDomains = ["local.relay.network.preview", "local.relay.browser"]
+    struct PreferenceEnvironment {
+        let synchronize: (String) -> Bool
+        let keys: (String) throws -> [String]
+        let removeKeys: (String, [String]) -> Void
+        static let live = Self(synchronize: { domain in
+            CFPreferencesSynchronize(domain as CFString, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
+        }, keys: { domain in
+            guard let raw = CFPreferencesCopyKeyList(domain as CFString, kCFPreferencesCurrentUser, kCFPreferencesAnyHost) else { return [] }
+            guard let keys = raw as? [String] else { throw failure() }
+            return keys
+        }, removeKeys: { domain, keys in
+            CFPreferencesSetMultiple(nil, keys as CFArray, domain as CFString, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
+        })
+    }
+    static func clearPreferences(_ environment: PreferenceEnvironment, assertAuthorized: () throws -> Void) throws {
+        for domain in preferenceDomains {
+            try assertAuthorized()
+            guard environment.synchronize(domain) else { throw AssistantError("Relay系统偏好同步失败，保留卸载进度。") }
+            let keys = try environment.keys(domain)
+            try assertAuthorized()
+            environment.removeKeys(domain, keys)
+            guard environment.synchronize(domain), try environment.keys(domain).isEmpty else {
+                throw AssistantError("Relay系统偏好清理未确认，保留卸载进度。")
+            }
+        }
+    }
+    private static func clearPreferences(_ authority: Authorization) throws {
+        try clearPreferences(.live, assertAuthorized: {
+            try authority.revalidate()
+            guard getuid() > 0, getuid() == geteuid(), getgid() == getegid(),
+                  authority.environment.uid == getuid(),
+                  authority.environment.home.path == (try RelayBrowserContract.realHome()).path else { throw failure() }
+            let directory = authority.environment.home.appendingPathComponent("Library/Preferences", isDirectory: true)
+            _ = try RelayCoreRecovery.directory(directory, home: authority.environment.home)
+            for domain in preferenceDomains {
+                let path = directory.appendingPathComponent(domain + ".plist")
+                if let file = try RelayRecoveryInspector.read(path) {
+                    guard file.mode & 0o022 == 0 else { throw failure() }
+                }
+            }
+        })
+    }
     static func removeCredentials() throws {
         // Electron 43 uses app_name + " Safe Storage" / app_name for its
         // generic-password key. Relay fixes app_name to "Relay" at startup.
@@ -448,7 +496,7 @@ enum RelayAutomaticUninstall {
         return try await cleanup(CleanupEnvironment(assertAuthorized: authority.revalidate,
             restoreProxy: { try restoreProxy(context) }, restoreDesktop: { try await restoreDesktop(context) },
             retireCore: { try retireCore(context) }, restoreClients: { try restoreClients(context) },
-            assertIdle: { try assertIdle(context) }, removeCredentials: removeCredentials, removeTemporaryLease: removeTemporaryLease,
+            assertIdle: { try assertIdle(context) }, clearPreferences: { try clearPreferences(authority) }, removeCredentials: removeCredentials, removeTemporaryLease: removeTemporaryLease,
             remove: { try removeOwnedPath($0, home: authority.environment.home, uid: authority.environment.uid) }))
     }
 
@@ -460,6 +508,20 @@ enum RelayAutomaticUninstall {
         let parts = relative.components(separatedBy: "/")
         var parent = Darwin.open(home.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard parent >= 0 else { throw failure() }; defer { Darwin.close(parent) }
+        if temporary {
+            // The user's temporary directory may have broader permissions.
+            // An absent lease needs no deletion; existing leases still require
+            // every original directory and deletion check below.
+            var opened = stat(), linked = stat(), leaf = stat()
+            guard fstat(parent, &opened) == 0, opened.st_uid == uid,
+                  opened.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR),
+                  lstat(home.path, &linked) == 0, linked.st_uid == uid,
+                  linked.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR),
+                  linked.st_dev == opened.st_dev, linked.st_ino == opened.st_ino else { throw failure() }
+            if fstatat(parent, ".rlt1", &leaf, AT_SYMLINK_NOFOLLOW) != 0 {
+                guard errno == ENOENT else { throw failure() }; return
+            }
+        }
         func checkedDirectory(_ fd: Int32) throws {
             var info = stat()
             guard fstat(fd, &info) == 0, info.st_uid == uid, info.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR), info.st_mode & 0o022 == 0 else { throw failure() }

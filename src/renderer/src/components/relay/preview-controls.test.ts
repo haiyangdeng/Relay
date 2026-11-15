@@ -103,7 +103,11 @@ describe('Preview sidebar boundary', () => {
       expect(markup).not.toContain('aria-label="sider.cards.dns"')
       const rule = markup.match(/<button[^>]*aria-label="sider.cards.rules"[^>]*>/)?.[0]
       expect(rule).toBeDefined()
-      expect(rule?.includes('col-span-2')).toBe(!iconOnly)
+      const ruleGridItem = markup.match(
+        /<div class="([^"]*)"[^>]*><button[^>]*data-card="rule"[^>]*>/
+      )?.[1]
+      expect(ruleGridItem).toBeDefined()
+      expect(ruleGridItem?.split(/\s+/).includes('col-span-2')).toBe(!iconOnly)
       expect(markup).toContain('href="#/relay?panel=guard"')
     }
     expect(fixture.patchAppConfig).not.toHaveBeenCalled()

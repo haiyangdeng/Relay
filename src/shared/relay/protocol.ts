@@ -1,4 +1,5 @@
 import { validateEdgeReviewKeys } from './edge'
+import type { OwnedDiagnosticObservation, OwnedNativeDiagnostic } from './diagnostic-evidence'
 
 export interface RelayPreviewInput {
   httpPort: number
@@ -384,6 +385,7 @@ export interface RelayCriticalCheck {
   nextStep: string
 }
 export interface RelayReadOnlyReport {
+  owned?: OwnedNativeDiagnostic
   snapshot: {
     checkedAt: string
     summary: string
@@ -409,9 +411,10 @@ export interface RelayReadOnlyReport {
 }
 export interface RelayObservation {
   evidenceId: string
-  source: 'legacy-readonly'
+  source: 'legacy-readonly' | 'relay-owned'
   parameters: RelayPreferences
   report: RelayReadOnlyReport
+  owned?: OwnedDiagnosticObservation
 }
 export interface RelayGuardPlanOutput {
   plan: string

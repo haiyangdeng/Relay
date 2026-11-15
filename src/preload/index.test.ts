@@ -1,9 +1,14 @@
 import { afterEach, expect, it, vi } from 'vitest'
 
-const { expose, invoke } = vi.hoisted(() => ({ expose: vi.fn(), invoke: vi.fn() }))
+const { expose, invoke, on, removeListener } = vi.hoisted(() => ({
+  expose: vi.fn(),
+  invoke: vi.fn(),
+  on: vi.fn(),
+  removeListener: vi.fn()
+}))
 vi.mock('electron', () => ({
   contextBridge: { exposeInMainWorld: expose },
-  ipcRenderer: { invoke },
+  ipcRenderer: { invoke, on, removeListener },
   webUtils: {}
 }))
 const isolated = Object.getOwnPropertyDescriptor(process, 'contextIsolated')
@@ -102,4 +107,26 @@ it('forwards the owned Smart tools intents through the actual preload without ex
       'Invalid invoke channel'
     )
   expect(invoke).toHaveBeenCalledTimes(6)
+})
+
+it('exposes the visible-workspace handshake and removes only its own show listener', async () => {
+  Object.defineProperty(process, 'contextIsolated', { configurable: true, value: true })
+  await import('./index')
+  const api = expose.mock.calls.find(([name]) => name === 'electron')?.[1]
+  invoke.mockReset().mockResolvedValue(false)
+  on.mockReset()
+  removeListener.mockReset()
+  await expect(api.ipcRenderer.invoke('relayWorkspaceVisible')).resolves.toBe(false)
+  expect(invoke).toHaveBeenCalledExactlyOnceWith('relayWorkspaceVisible')
+  const listener = vi.fn()
+  const unsubscribe = api.ipcRenderer.on('relayWorkspaceVisible', listener)
+  expect(on).toHaveBeenCalledExactlyOnceWith('relayWorkspaceVisible', listener)
+  unsubscribe()
+  expect(removeListener).toHaveBeenCalledExactlyOnceWith('relayWorkspaceVisible', listener)
+  await expect(api.ipcRenderer.invoke('relayWorkspaceForceShow')).rejects.toThrow(
+    'Invalid invoke channel'
+  )
+  api.ipcRenderer.on('relayWorkspaceArbitraryEvent', listener)
+  expect(on).toHaveBeenCalledTimes(1)
+  expect(invoke).toHaveBeenCalledTimes(1)
 })

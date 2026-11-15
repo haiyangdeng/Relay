@@ -26,7 +26,7 @@ vi.mock('child_process', async (original) => {
       ? ` (allow network-bind (local unix-socket (path ${JSON.stringify(socket)}))) (allow network-inbound (local unix-socket (path ${JSON.stringify(socket)})))`
       : '')
   const admit = (file: string, args: readonly string[], cwd: string): void => {
-    assert.equal(file, resolve('extra/relay/core-geodata-v1/darwin-arm64/mihomo'))
+    assert.equal(file, resolve(`extra/relay/core-geodata-v1/darwin-${process.arch}/mihomo`))
     assert.match(cwd, /^\/private\/tmp\/relay-(?:core-\d+-|complete-check-)/u)
     assert(args.includes('-f'))
   }
@@ -98,13 +98,12 @@ vi.mock('child_process', async (original) => {
 
 it('checks actual CUSTOM-only DAT through saved resource and complete configuration under deny-network', async () => {
   assert.equal(process.platform, 'darwin')
-  assert.equal(process.arch, 'arm64')
+  assert(['arm64', 'x64'].includes(process.arch))
   assert((process.getuid?.() ?? 0) > 0)
-  const expected = process.env.RELAY_GEODATA_CHECKER_EXPECT ?? 'passed',
-    output = process.env.RELAY_GEODATA_CHECKER_OUTPUT
+  const expected = process.env.RELAY_GEODATA_CHECKER_EXPECT ?? 'passed'
   assert(['rejected', 'passed'].includes(expected))
-  assert(output)
   const root = await realpath(await mkdtemp('/private/tmp/relay-geo-checker-')),
+    output = process.env.RELAY_GEODATA_CHECKER_OUTPUT ?? join(root, 'checker-evidence.json'),
     { spawn: realSpawn } = await vi.importActual<typeof import('child_process')>('child_process'),
     coreRoot = resolve('extra/relay/core-geodata-v1'),
     { verifyCoreResource } = await import('../../src/main/relay/core/resources'),
@@ -121,6 +120,7 @@ it('checks actual CUSTOM-only DAT through saved resource and complete configurat
     }),
     results: object[] = []
   assert.equal(core.capability, 'local-geodata-v1')
+  assert.equal(core.architecture, process.arch)
   let accepted = 0
   const sentinel = createServer((socket) => {
       accepted++
@@ -290,6 +290,8 @@ const net=require('node:net');let inbound=false,outbound=false;const finish=()=>
       JSON.stringify(
         {
           status: 'passed',
+          architectureExecuted: process.arch,
+          intelRuntimeVerified: process.arch === 'x64',
           expectedCompleteStatus: expected,
           root,
           core,
@@ -301,8 +303,7 @@ const net=require('node:net');let inbound=false,outbound=false;const finish=()=>
             signal: entry.child.signalCode,
             closed: true
           })),
-          limits:
-            'No active Core/TUN/App/user roots; download and Native confirmation injected; actual signed ARM resource and complete parsers, own Unix controller, deny-network exact per-child policy; fixture root retained.'
+          limits: `No active Core/TUN/App/user roots; download and Native confirmation injected; actual signed ${core.architecture} resource and complete parsers, own Unix controller, deny-network exact per-child policy; fixture root retained.`
         },
         null,
         2

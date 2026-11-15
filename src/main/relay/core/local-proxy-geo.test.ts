@@ -4,7 +4,12 @@ import { resourceHash } from '../resources/source'
 import { compileProfileRuntime } from '../profiles/runtime'
 import { localProxyConfiguration } from './local-proxy-runtime'
 import { ownedCoreConfiguration } from './owned-runtime'
-import { compatibleLocalProxyGeoAssets, sameLocalProxyGeoAssets } from './local-proxy-geo'
+import { injectDedicatedListeners } from './dedicated-listeners'
+import {
+  compatibleLocalProxyGeoAssets,
+  sameLocalProxyGeoAssets,
+  validateLocalProxyGeoAssets
+} from './local-proxy-geo'
 
 const source = {
   proxies: [{ name: 'A', type: 'http', server: '127.0.0.1', port: 1 }],
@@ -16,6 +21,124 @@ const asset = (path: string): RuntimeAsset => {
   return { path, bytes, sha256: resourceHash(bytes) }
 }
 describe('HTTP runtime local Geo resources', () => {
+  it.each([
+    { dat: false, ports: { http: 18191, socks: 18192, mixed: 0, redir: 0 } },
+    { dat: true, ports: { http: 18191, socks: 18192, mixed: 0, redir: 0 } },
+    { dat: false, ports: { http: 0, socks: 0, mixed: 18191, redir: 0 } },
+    { dat: true, ports: { http: 0, socks: 0, mixed: 18191, redir: 0 } }
+  ])(
+    'admits dedicated HTTP/SOCKS and ordinary ports with pinned Geo rules and DNS (%j)',
+    ({ dat, ports }) => {
+      const input = JSON.stringify({
+        ...source,
+        'geodata-mode': dat,
+        'unified-delay': true,
+        listeners: [{ name: 'foreign-source', type: 'http', port: 29999, listen: '0.0.0.0' }],
+        dns: {
+          enable: true,
+          nameserver: ['1.1.1.1'],
+          'default-nameserver': ['1.1.1.1'],
+          'nameserver-policy': { 'geosite:cn': ['1.1.1.1'] }
+        }
+      })
+      const assets = [asset('GeoSite.dat'), asset(dat ? 'GeoIP.dat' : 'Country.mmdb')]
+      const dedicated = { httpPort: 17891, socksPort: 17892, route: 'A' }
+      const built = localProxyConfiguration(
+        input,
+        ports.http || ports.mixed,
+        'profile',
+        dedicated,
+        undefined,
+        assets,
+        ports
+      )
+      const admitted = ownedCoreConfiguration(
+        built.configuration,
+        'localProxy',
+        undefined,
+        undefined,
+        assets
+      )
+      expect(admitted.parsed.listeners).toEqual([
+        {
+          name: 'relay-ai-http',
+          type: 'http',
+          port: 17891,
+          listen: '127.0.0.1',
+          proxy: 'A',
+          udp: false
+        },
+        {
+          name: 'relay-ai-socks',
+          type: 'socks',
+          port: 17892,
+          listen: '127.0.0.1',
+          proxy: 'A',
+          udp: false
+        }
+      ])
+      expect(admitted.parsed.port).toBe(ports.http)
+      expect(admitted.parsed['socks-port']).toBe(ports.socks)
+      expect(admitted.parsed['mixed-port']).toBe(ports.mixed)
+      expect(admitted.parsed['redir-port']).toBe(ports.redir)
+      expect(built.ports).toEqual(ports)
+      expect(admitted.parsed.rules).toEqual(source.rules)
+      expect(admitted.parsed['unified-delay']).toBe(true)
+      expect(admitted.parsed['geo-auto-update']).toBe(false)
+      expect((admitted.parsed.dns as Record<string, unknown>)['nameserver-policy']).toEqual({
+        'geosite:cn': ['1.1.1.1']
+      })
+      expect(JSON.parse(built.configuration).listeners).toEqual(admitted.parsed.listeners)
+      expect(admitted.parsed.listeners).not.toContainEqual(
+        expect.objectContaining({ name: 'foreign-source' })
+      )
+    }
+  )
+  it('keeps dedicated-listener and resource boundaries strict when checking Geo assets', () => {
+    const assets = [asset('GeoSite.dat'), asset('Country.mmdb')]
+    const baseline = JSON.parse(
+      localProxyConfiguration(JSON.stringify(source), 18191, 'off', undefined, undefined, assets)
+        .configuration
+    )
+    injectDedicatedListeners(baseline, { httpPort: 17891, socksPort: 17892, route: 'A' })
+    const [http, socks] = baseline.listeners
+    for (const listeners of [
+      [{ ...http, name: 'foreign' }],
+      [{ ...http, certificate: '/unbound/private.pem' }],
+      [{ ...http, listen: '0.0.0.0' }],
+      [http, { ...socks, udp: true }],
+      [{ ...http, proxy: 'DIRECT' }],
+      [{ ...http, proxy: 'G' }],
+      [http, { ...socks, proxy: 'missing' }]
+    ]) {
+      const changed = { ...baseline, listeners }
+      expect(() => validateLocalProxyGeoAssets(changed, assets)).toThrow()
+      expect(() =>
+        ownedCoreConfiguration(JSON.stringify(changed), 'localProxy', undefined, undefined, assets)
+      ).toThrow()
+    }
+    for (const patch of [
+      { proxies: [{ ...source.proxies[0], 'dialer-proxy': 'G' }] },
+      { 'geo-auto-update': true },
+      { 'geox-url': { geoip: 'https://example.invalid/geoip.dat' } },
+      { tls: { certificate: '/unbound/private.pem' } }
+    ])
+      expect(() => validateLocalProxyGeoAssets({ ...baseline, ...patch }, assets)).toThrow()
+    for (const changedAssets of [
+      assets.slice(0, 1),
+      [{ ...assets[0], bytes: Buffer.from('changed') }, assets[1]]
+    ])
+      expect(() => validateLocalProxyGeoAssets(baseline, changedAssets)).toThrow()
+    expect(() =>
+      ownedCoreConfiguration(
+        JSON.stringify({ ...baseline, listeners: [{ ...http, port: baseline.port }] }),
+        'localProxy',
+        undefined,
+        undefined,
+        assets
+      )
+    ).toThrow('AI 专用监听端口不能与普通监听端口重复。')
+  })
   it('preserves Geo DNS policies and static rcode responses only with a pinned site database', () => {
     const input = {
       ...source,

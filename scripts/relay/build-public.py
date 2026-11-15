@@ -268,7 +268,7 @@ def verify_staged_resources():
 
 
 def app_path(arch):
-    return ROOT / 'release' / ('mac-arm64' if arch == 'arm64' else 'mac') / 'Relay.app'
+    return ROOT / 'release/apps.noindex' / ('mac-arm64' if arch == 'arm64' else 'mac') / 'Relay.app'
 
 
 def app_inventory(app):

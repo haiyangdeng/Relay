@@ -63,7 +63,7 @@ const SNIFFER_KEYS = new Set([
 export function snifferSettings(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value))
     throw new Error('sniffer字段必须为映射。')
-  const record = value as Record<string, unknown>
+  const record = structuredClone(value) as Record<string, unknown>
   for (const [key, entry] of Object.entries(record)) {
     if (!SNIFFER_KEYS.has(key)) throw new Error('sniffer字段不被接受：' + key)
     if (['enable', 'override-destination', 'force-dns-mapping', 'parse-pure-ip'].includes(key)) {
@@ -85,14 +85,20 @@ export function snifferSettings(value: unknown): Record<string, unknown> {
           (item['override-destination'] !== undefined &&
             typeof item['override-destination'] !== 'boolean') ||
           (item.ports !== undefined &&
-            (!Array.isArray(item.ports) || item.ports.some((port) => typeof port !== 'string')))
+            (!Array.isArray(item.ports) ||
+              item.ports.some(
+                (port) =>
+                  typeof port !== 'string' &&
+                  !(Number.isSafeInteger(port) && port >= 1 && port <= 65535)
+              )))
         )
           throw new Error('嗅探协议字段无效。')
+        if (Array.isArray(item.ports)) item.ports = item.ports.map(String)
       }
     } else if (!Array.isArray(entry) || entry.some((item) => typeof item !== 'string'))
       throw new Error('sniffer列表字段无效。')
   }
-  return structuredClone(record)
+  return record
 }
 
 function stringId(value: unknown): string {
@@ -162,15 +168,15 @@ function rulePatch(value: unknown): RuntimeRulePatch {
 function controlledEdits(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value))
     throw new Error('受控编辑字段无效。')
-  const record = value as Record<string, unknown>
+  const record = structuredClone(value) as Record<string, unknown>
   const allowed = new Set(['sniffer', 'dns', 'hosts', 'ipv6', 'geodata-mode', 'tcp-concurrent'])
   for (const key of Object.keys(record)) {
     if (!allowed.has(key)) throw new Error('受控编辑字段不被接受：' + key)
   }
   if (record.sniffer !== undefined) {
-    snifferSettings(record.sniffer)
+    record.sniffer = snifferSettings(record.sniffer)
   }
-  return structuredClone(record)
+  return record
 }
 
 export function configurationEditDocument(value: unknown): ConfigurationEditDocument {

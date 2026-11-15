@@ -13,7 +13,7 @@ import type { OwnedPacServer } from './pac'
 
 export function createSystemProxyService(adapters: {
   native(
-    action: 'inspect' | 'prepare' | 'apply' | 'prepareRestore' | 'restore',
+    action: 'inspect' | 'prepare' | 'apply' | 'prepareRestore' | 'restore' | 'retireDetached',
     settings?: NativeSystemProxySettings,
     revision?: string
   ): Promise<SystemProxyReport>
@@ -61,12 +61,33 @@ export function createSystemProxyService(adapters: {
       }
     adapters.notify()
   }
-  const accept = (raw: unknown, completedWrite = false): SystemProxyReport => {
+  const detached = (value: SystemProxyReport): boolean =>
+    !!value.recordID &&
+    value.canRetireDetached === true &&
+    ['pending', 'conflict'].includes(value.status)
+  const accept = (
+    raw: unknown,
+    completedWrite: boolean | 'retireDetached' = false
+  ): SystemProxyReport => {
     const next = systemProxyReport(raw)
+    if (
+      completedWrite === 'retireDetached' &&
+      (!knownRecord ||
+        !report ||
+        !detached(report) ||
+        next.status !== 'inactive' ||
+        next.recordID !== undefined ||
+        next.canApply ||
+        next.canRestore ||
+        next.canRetireDetached !== false ||
+        next.revision === report.revision)
+    )
+      throw new Error('旧系统代理记录归档回执未确认。')
     if (
       knownRecord &&
       !next.recordID &&
-      !(completedWrite && ['restored', 'rolledBack'].includes(next.status))
+      !(completedWrite === true && ['restored', 'rolledBack'].includes(next.status)) &&
+      completedWrite !== 'retireDetached'
     ) {
       markUnknown()
       throw new Error('已持有的恢复记录丢失；不能确认系统已恢复，不关闭PAC或核心。')
@@ -139,9 +160,22 @@ export function createSystemProxyService(adapters: {
         const { pacScript: _script, ...fields } = settings
         native = { ...fields, ...(pac ? { pacURL: pac.url } : {}) }
       }
-      const current = accept(
+      let current = accept(
         await adapters.native(action === 'apply' ? 'prepare' : 'prepareRestore', native)
       )
+      if (
+        action === 'apply' &&
+        !current.canApply &&
+        current.recordID &&
+        ['pending', 'conflict'].includes(current.status)
+      ) {
+        // prepare validates the target but only inspect reads every effective
+        // proxy configuration needed to prove that an old record is detached.
+        const inspected = accept(await adapters.native('inspect'))
+        if (inspected.revision !== current.revision || inspected.recordID !== current.recordID)
+          throw new Error('准备期间系统代理或恢复记录已变化。')
+        current = inspected
+      }
       if (epoch !== generation) throw new Error('准备期间发生挂起或取消，请重新准备。')
       const output: SystemProxyPreparation = {
         evidenceId: randomUUID(),
@@ -179,22 +213,60 @@ export function createSystemProxyService(adapters: {
     const action = current.public.action
     let submitted = false
     try {
-      if (!(action === 'apply' ? current.public.report.canApply : current.public.report.canRestore))
+      const retiring =
+        reason === 'user' &&
+        action === 'apply' &&
+        !current.public.report.canApply &&
+        detached(current.public.report)
+      if (
+        !(action === 'apply'
+          ? current.public.report.canApply || retiring
+          : current.public.report.canRestore)
+      )
         throw new Error('当前状态不能应用或恢复，请先处理冲突。')
       if (!(await adapters.confirm(structuredClone(current.public), reason)))
         return { status: 'cancelled', warnings: ['已取消；未提交系统网络变更。'] }
       if (current.generation !== generation || now() - current.at > 60000)
         throw new Error('确认期间凭据失效。')
       if (current.public.settings) await adapters.verifyTarget(current.public.settings)
-      const fresh = accept(
-        await adapters.native(action === 'apply' ? 'prepare' : 'prepareRestore', current.native)
+      let fresh = accept(
+        await adapters.native(
+          retiring ? 'inspect' : action === 'apply' ? 'prepare' : 'prepareRestore',
+          retiring ? undefined : current.native
+        )
       )
       if (
         fresh.revision !== current.public.report.revision ||
-        !(action === 'apply' ? fresh.canApply : fresh.canRestore) ||
-        current.generation !== generation
+        fresh.recordID !== current.public.report.recordID ||
+        !(retiring ? detached(fresh) : action === 'apply' ? fresh.canApply : fresh.canRestore) ||
+        current.generation !== generation ||
+        now() - current.at > 60000
       )
         throw new Error('确认后系统代理、网络服务或恢复记录已变化。')
+      if (retiring) {
+        // This is a user-confirmed write to the active pointer, never an
+        // inspect/prepare side effect. Unknown acknowledgements retain PACs.
+        submitted = true
+        needsRestore = true
+        if (current.pac) retained.add(current.pac)
+        const retired = accept(
+          await adapters.native('retireDetached', undefined, fresh.revision),
+          'retireDetached'
+        )
+        if (current.generation !== generation || now() - current.at > 60000)
+          throw new Error('归档期间凭据失效。')
+        if (current.public.settings) await adapters.verifyTarget(current.public.settings)
+        fresh = accept(await adapters.native('prepare', current.native))
+        if (
+          fresh.revision !== retired.revision ||
+          fresh.recordID !== undefined ||
+          fresh.status !== 'inactive' ||
+          !fresh.canApply ||
+          current.generation !== generation ||
+          now() - current.at > 60000
+        )
+          throw new Error('归档后系统代理、目标或恢复记录已变化，请重新准备。')
+      }
       submitted = true
       needsRestore = true
       if (current.pac) retained.add(current.pac)

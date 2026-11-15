@@ -33,7 +33,7 @@ export interface SimpleFileRecord<T> {
   exists: boolean
 }
 
-type PrivateDocumentArea = 'configuration' | 'app-update' | 'ui-reset'
+type PrivateDocumentArea = 'configuration' | 'app-update' | 'ui-reset' | 'diagnostics'
 const privateDocumentNames: Record<PrivateDocumentArea, readonly string[]> = {
   configuration: [
     'simple.json',
@@ -44,12 +44,14 @@ const privateDocumentNames: Record<PrivateDocumentArea, readonly string[]> = {
     'app-log-preferences.json'
   ],
   'app-update': ['app-update-installation.json'],
-  'ui-reset': ['maintenance.json']
+  'ui-reset': ['maintenance.json'],
+  diagnostics: ['external-verification.json']
 }
 const privateDocumentDirectories: Record<PrivateDocumentArea, readonly string[]> = {
   configuration: ['Configuration'],
   'app-update': ['Transactions', 'AppUpdate'],
-  'ui-reset': ['Transactions', 'UIReset']
+  'ui-reset': ['Transactions', 'UIReset'],
+  diagnostics: ['Diagnostics']
 }
 // Fixed internal areas, selected only by Main module callers. Runtime journals
 // are outside portable Configuration backups; renderer input never chooses one.
@@ -67,7 +69,8 @@ export class SimplePrivateDocumentFile<T> {
       | 'system-proxy-defaults.json'
       | 'local-proxy-plan.json'
       | 'app-log-preferences.json'
-      | 'maintenance.json',
+      | 'maintenance.json'
+      | 'external-verification.json',
     private readonly decode: (raw: unknown) => T,
     private readonly missing: () => T,
     area: PrivateDocumentArea = 'configuration'
@@ -77,11 +80,13 @@ export class SimplePrivateDocumentFile<T> {
     this.files = new SubscriptionFiles(context)
     this.path = join(context.stateRoot, ...privateDocumentDirectories[area], name)
     this.maxBytes =
-      name === 'simple.json'
-        ? SIMPLE_DOCUMENT_BYTES
-        : name === 'system-proxy-defaults.json'
-          ? 512 * 1024
-          : 16 * 1024
+      name === 'external-verification.json'
+        ? 64 * 1024
+        : name === 'simple.json'
+          ? SIMPLE_DOCUMENT_BYTES
+          : name === 'system-proxy-defaults.json'
+            ? 512 * 1024
+            : 16 * 1024
   }
   private absent(): SimpleFileRecord<T> {
     return { value: this.missing(), revision: '', exists: false }

@@ -229,6 +229,56 @@ func runRelaySystemProxySelfTests() -> Int32 {
         check(returnedOriginal.status == "pending" && returnedOriginal.canRestore && returnedOriginal.canRetireDetached && returnedOriginal.quitProxyPorts == nil, "inspect recognizes a settled proxy already returned to the original manual values")
         let returnedRetired = try run("retireDetached", nil, returnedOriginal.revision)
         check(returnedRetired.status == "inactive" && current == originalManual && writes == writesBeforeReturnedRetire, "returning to the original proxy permits history-only retirement")
+        struct LifecycleRecord: Decodable {
+            let id: String
+            let parent: String?
+            let original: Proxy.Snapshot
+            let before: Proxy.Snapshot
+        }
+        for scenario in ["external-7890", "external-off"] {
+            current = original
+            let firstPlan = try run("prepare", manual)
+            let firstApply = try run("apply", manual, firstPlan.revision)
+            check(firstApply.status == "applied", "\(scenario) lifecycle first apply succeeds")
+            let oldHistory = root.appendingPathComponent(firstApply.recordID!)
+            let oldRecordBytes = try Data(contentsOf: oldHistory.appendingPathComponent("record.json"))
+            let oldPhaseBytes = try Data(contentsOf: oldHistory.appendingPathComponent("phase.json"))
+            var externalValues: [String: Any] = [
+                "HTTPEnable": 0, "HTTPSEnable": 0, "SOCKSEnable": 0,
+                "ProxyAutoConfigEnable": 0, "ProxyAutoDiscoveryEnable": 0,
+                "ExceptionsList": ["external.local"], "ExternalOpaque": Data([4, 5, 6])
+            ]
+            if scenario == "external-7890" {
+                for prefix in ["HTTP", "HTTPS", "SOCKS"] {
+                    externalValues[prefix + "Enable"] = 1
+                    externalValues[prefix + "Proxy"] = "127.0.0.1"
+                    externalValues[prefix + "Port"] = 7890
+                }
+            }
+            // The off variant removes endpoint keys rather than replaying the
+            // first original or target; both variants are independent edits.
+            current = Proxy.Snapshot(location: original.location, services: [
+                Proxy.Service(id: "A", name: "Wi-Fi", enabled: true, configuration: try data(externalValues))
+            ] + Array(original.services.dropFirst()))
+            let externalBaseline = current, beforeRetirementWrites = writes
+            let observed = try run("inspect")
+            check(observed.status == "conflict" && !observed.canRestore && observed.canRetireDetached && observed.recordID == firstApply.recordID, "\(scenario) lifecycle proves detached conflict")
+            check(observed.currentProxyPorts == (scenario == "external-7890" ? [7890] : []), "\(scenario) lifecycle observes only the external proxy references")
+            let retired = try run("retireDetached", nil, observed.revision)
+            check(retired.status == "inactive" && retired.recordID == nil && current == externalBaseline && writes == beforeRetirementWrites, "\(scenario) lifecycle retirement performs zero system writes")
+            check(try !fm.fileExists(atPath: active.path) && Data(contentsOf: oldHistory.appendingPathComponent("record.json")) == oldRecordBytes && Data(contentsOf: oldHistory.appendingPathComponent("phase.json")) == oldPhaseBytes, "\(scenario) lifecycle retirement preserves both history files")
+            let nextPlan = try run("prepare", manual)
+            check(nextPlan.canApply && nextPlan.recordID == nil && nextPlan.revision == retired.revision && current == externalBaseline && writes == beforeRetirementWrites, "\(scenario) lifecycle fresh prepare permits explicit reapply without mutation")
+            let reapplied = try run("apply", manual, nextPlan.revision)
+            check(reapplied.status == "applied" && reapplied.canRestore && reapplied.recordID != firstApply.recordID && writes == beforeRetirementWrites + 1, "\(scenario) lifecycle reapply creates one new transaction")
+            let newHistory = root.appendingPathComponent(reapplied.recordID!)
+            let newRecord = try JSONDecoder().decode(LifecycleRecord.self, from: Data(contentsOf: newHistory.appendingPathComponent("record.json")))
+            check(try newRecord.id == reapplied.recordID && newRecord.parent == nil && Proxy.changedServiceIDs(newRecord.original, externalBaseline).isEmpty && Proxy.changedServiceIDs(newRecord.before, externalBaseline).isEmpty, "\(scenario) lifecycle new original and before are the exact external baseline")
+            let restorePlan = try run("prepareRestore")
+            let restored = try run("restore", nil, restorePlan.revision)
+            check(restored.status == "restored" && restored.recordID == nil && current == externalBaseline && writes == beforeRetirementWrites + 2 && !fm.fileExists(atPath: active.path), "\(scenario) lifecycle restore returns the external baseline exactly")
+            check(try Data(contentsOf: oldHistory.appendingPathComponent("record.json")) == oldRecordBytes && Data(contentsOf: oldHistory.appendingPathComponent("phase.json")) == oldPhaseBytes && fm.fileExists(atPath: newHistory.appendingPathComponent("record.json").path), "\(scenario) lifecycle retains old and new history after restore")
+        }
         current = original
         let copiedPlan = try run("prepare", pac)
         _ = try run("apply", pac, copiedPlan.revision)

@@ -228,12 +228,36 @@ describe('Fixed sniffer schema and profile scope', () => {
       { enable: 'true' },
       { 'skip-domain': 'example.com' },
       { sniff: { TCP: {} } },
-      { sniff: { TLS: { ports: [443] } } },
+      { sniff: { TLS: { ports: [65536] } } },
       { 'override-dest': true }
     ])
       expect(() =>
         configurationEditDocument({ ...defaultEditDocument(), controlled: { sniffer } })
       ).toThrow()
+  })
+  it('normalizes numeric sniffer ports without changing the subscription', () => {
+    const sniffer = {
+      sniff: { HTTP: { ports: [80, '8080-8880'] }, TLS: { ports: [443, 8443] } }
+    }
+    const before = structuredClone(sniffer)
+    const result = configurationEditDocument({
+      ...defaultEditDocument(),
+      controlled: { sniffer }
+    }).controlled.sniffer
+    expect(result).toEqual({
+      sniff: { HTTP: { ports: ['80', '8080-8880'] }, TLS: { ports: ['443', '8443'] } }
+    })
+    expect(sniffer).toEqual(before)
+  })
+  it('rejects invalid numeric and non-string sniffer ports', () => {
+    for (const port of [0, -1, 1.5, 65536, NaN, Infinity, true, null, {}]) {
+      expect(() =>
+        configurationEditDocument({
+          ...defaultEditDocument(),
+          controlled: { sniffer: { sniff: { TLS: { ports: [port] } } } }
+        })
+      ).toThrow('嗅探协议字段无效')
+    }
   })
   it('requires a bound source for profile overrides instead of applying them to every profile', () => {
     const profileOverrides = [{ id: 'local', kind: 'yaml', content: 'ipv6: false' }]

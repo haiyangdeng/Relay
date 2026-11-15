@@ -332,9 +332,17 @@ export default function RelayWorkspace(): React.JSX.Element {
       edits = localPlanEdits.current
     setLocalPlanLoading(true)
     setLocalPlanRecord(undefined)
-    void window.electron.ipcRenderer
-      .invoke('relayLocalProxyPlanRead')
-      .then((raw) => {
+    // DOM focus can be true while Electron still hides the first window.
+    // Subscribe before querying Main so an already-shown window cannot be missed.
+    let requested = false
+    const read = async (): Promise<void> => {
+      if (!active || requested) return
+      try {
+        const visible = await window.electron.ipcRenderer.invoke('relayWorkspaceVisible')
+        if (visible !== true || !active || requested) return
+        requested = true
+        unsubscribe()
+        const raw = await window.electron.ipcRenderer.invoke('relayLocalProxyPlanRead')
         const record = localProxyPlanRecord(raw)
         if (!active || epoch !== localPlanEpoch.current) return
         setLocalPlanRecord(record)
@@ -347,18 +355,21 @@ export default function RelayWorkspace(): React.JSX.Element {
         setLocalPlanNotice(
           record.exists ? '已读取保存的启动设置。' : '尚未保存；启动代理时会保存当前设置。'
         )
-      })
-      .catch(() => {
+      } catch {
         if (active && epoch === localPlanEpoch.current) {
           setLocalPlanRecord(undefined)
           setLocalPlanNotice('启动设置读取失败；不会用默认值覆盖，也不会自动启动。')
+          setLocalPlanLoading(false)
         }
-      })
-      .finally(() => {
-        if (active && epoch === localPlanEpoch.current) setLocalPlanLoading(false)
-      })
+      } finally {
+        if (requested && active && epoch === localPlanEpoch.current) setLocalPlanLoading(false)
+      }
+    }
+    const unsubscribe = window.electron.ipcRenderer.on('relayWorkspaceVisible', () => void read())
+    void read()
     return () => {
       active = false
+      unsubscribe()
     }
   }, [restoredRevision])
   const markLocalPlanEdited = (): void => {
@@ -1313,13 +1324,8 @@ export default function RelayWorkspace(): React.JSX.Element {
     setActivity('')
     setObservation(undefined)
     try {
-      const { httpPort, node, internalExceptions } = input
       setObservation(
-        (await window.electron.ipcRenderer.invoke('relayDiagnose', {
-          httpPort,
-          node,
-          internalExceptions
-        })) as RelayObservation
+        (await window.electron.ipcRenderer.invoke('relayDiagnose')) as RelayObservation
       )
     } catch {
       setError('只读检测未完成；没有修改网络或客户端配置。')

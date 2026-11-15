@@ -9,6 +9,8 @@ import type {
 } from '../../shared/relay/protocol'
 import type { RelayCoreMode } from '../../shared/relay/core'
 import type { LocalProxyRulesSnapshot, LocalResolverMode } from '../../shared/relay/local-proxy'
+import type { DedicatedListenerPlan } from '../../shared/relay/dedicated-listeners'
+import type { LocalProxyPlanRecord } from '../../shared/relay/local-proxy-plan'
 import type { RelayStoredProfile } from '../../shared/relay/profiles'
 import type { RelayRuntimeCheckResult } from '../../shared/relay/runtime'
 import type { RelayBackupRecoveryPlan } from '../../shared/relay/backup'
@@ -78,6 +80,7 @@ const fixture = vi.hoisted(() => {
     isDestroyed: vi.fn(() => false),
     setWindowOpenHandler: vi.fn(),
     on: vi.fn(),
+    removeListener: vi.fn(),
     openDevTools: vi.fn(),
     send: vi.fn()
   }
@@ -102,6 +105,8 @@ const fixture = vi.hoisted(() => {
   }
   return {
     window,
+    privateHome: '',
+    browserChannels: [] as { dispose(): Promise<void> }[],
     startupWarn: vi.fn(async () => {}),
     packaged: false,
     knownNoRetainedCore: false,
@@ -553,27 +558,88 @@ vi.mock('electron', () => ({
 }))
 
 vi.mock('./backup/key-file', () => ({ writeBackupKeyFile: fixture.write }))
-vi.mock('fs/promises', () => ({
-  readFile: fixture.readFile,
-  realpath: fixture.resolvePath,
-  lstat: async (path: string, options?: { bigint?: boolean }) => {
-    // Model an owned home without saved state. Probe and update startup must
-    // distinguish this from an unknown owner or an unreadable directory.
-    if (path !== '/fake/home')
-      throw Object.assign(new Error('Fixture path is absent'), { code: 'ENOENT' })
-    const uid = process.getuid?.() ?? -1
-    return {
-      isDirectory: () => true,
-      isSymbolicLink: () => false,
-      mode: options?.bigint ? 0o40700n : 0o40700,
-      uid: options?.bigint ? BigInt(uid) : uid
+vi.mock('fs/promises', async (original) => {
+  const actual = await original<typeof import('fs/promises')>()
+  const privatePath = (path: unknown): boolean =>
+    typeof path === 'string' &&
+    !!fixture.privateHome &&
+    (path === fixture.privateHome || path.startsWith(fixture.privateHome + '/'))
+  const privateOperation =
+    (name: 'mkdir' | 'open' | 'chmod' | 'rename' | 'rm') =>
+    (...args: unknown[]) => {
+      if (!privatePath(args[0]) || (name === 'rename' && !privatePath(args[1])))
+        throw new Error('Unexpected fixture filesystem mutation: ' + name)
+      return (actual[name] as (...input: unknown[]) => unknown)(...args)
+    }
+  return {
+    readFile: (...args: Parameters<typeof actual.readFile>) =>
+      privatePath(args[0]) ? actual.readFile(...args) : fixture.readFile(...args),
+    realpath: (path: string) =>
+      privatePath(path) ? actual.realpath(path) : fixture.resolvePath(path),
+    mkdir: privateOperation('mkdir'),
+    open: privateOperation('open'),
+    chmod: privateOperation('chmod'),
+    rename: privateOperation('rename'),
+    rm: privateOperation('rm'),
+    lstat: async (path: string, options?: { bigint?: boolean }) => {
+      if (privatePath(path)) return actual.lstat(path, options)
+      // Model an owned home without saved state. Probe and update startup must
+      // distinguish this from an unknown owner or an unreadable directory.
+      if (path !== '/fake/home')
+        throw Object.assign(new Error('Fixture path is absent'), { code: 'ENOENT' })
+      const uid = process.getuid?.() ?? -1
+      return {
+        isDirectory: () => true,
+        isSymbolicLink: () => false,
+        mode: options?.bigint ? 0o40700n : 0o40700,
+        uid: options?.bigint ? BigInt(uid) : uid
+      }
     }
   }
-}))
-vi.mock('../utils/safeFile', async (original) => ({
-  ...(await original<typeof import('../utils/safeFile')>()),
-  atomicWriteFile: fixture.write
-}))
+})
+vi.mock('../utils/safeFile', async (original) => {
+  const actual = await original<typeof import('../utils/safeFile')>()
+  return {
+    ...actual,
+    atomicWriteFile: (...args: Parameters<typeof actual.atomicWriteFile>) =>
+      args[0].startsWith(fixture.privateHome + '/')
+        ? actual.atomicWriteFile(...args)
+        : fixture.write(...args)
+  }
+})
+// Exercise the actual private-file and Unix binding checks under an owned
+// temporary home; the simulated OS context must never create /fake/home.
+vi.mock('./core/local-proxy-plan-store', async (original) => {
+  const actual = await original<typeof import('./core/local-proxy-plan-store')>()
+  return {
+    LocalProxyPlanStore: class extends actual.LocalProxyPlanStore {
+      constructor() {
+        super({
+          home: fixture.privateHome,
+          stateRoot: fixture.privateHome + '/Library/Application Support/Relay-Preview'
+        })
+      }
+    }
+  }
+})
+vi.mock('./browser-binding', async (original) => {
+  const actual = await original<typeof import('./browser-binding')>()
+  return {
+    createBrowserBindingChannel: (
+      ...args: Parameters<typeof actual.createBrowserBindingChannel>
+    ) => {
+      const channel = actual.createBrowserBindingChannel(
+        {
+          home: fixture.privateHome,
+          stateRoot: fixture.privateHome + '/Library/Application Support/Relay-Preview'
+        },
+        args[1]
+      )
+      fixture.browserChannels.push(channel)
+      return channel
+    }
+  }
+})
 vi.mock('./native', () => ({
   nativeReady: () => true,
   previewNative: fixture.previewNative,
@@ -950,6 +1016,8 @@ function libraryRecordFixture(): OverrideLibraryRecord {
   }
 }
 beforeEach(async (context) => {
+  const actualFS = await vi.importActual<typeof import('fs/promises')>('fs/promises')
+  fixture.privateHome = await actualFS.mkdtemp('/private/tmp/re-')
   fixture.appQuit.mockReset()
   fixture.appRelaunch.mockReset()
   fixture.automaticUninstallStop.mockReset()
@@ -1308,11 +1376,12 @@ beforeEach(async (context) => {
         source: string,
         port: number,
         register: (stop: () => Promise<void>) => void,
-        mode: LocalResolverMode = 'off'
+        mode: LocalResolverMode = 'off',
+        dedicated?: DedicatedListenerPlan
       ) => {
         localChild = 'running'
         localMember = 'Node'
-        let configuration = localProxyConfiguration(source, port, mode).configuration
+        let configuration = localProxyConfiguration(source, port, mode, dedicated).configuration
         fixture.localPatchMode.mockImplementation(async (next: RelayCoreMode) => {
           configuration = JSON.stringify({ ...JSON.parse(configuration), mode: next })
         })
@@ -1469,6 +1538,16 @@ beforeEach(async (context) => {
   await vi.waitFor(() => expect(fixture.window.loadFile).toHaveBeenCalled())
 })
 
+afterEach(async () => {
+  try {
+    for (const [name, listener] of fixture.window.on.mock.calls) if (name === 'closed') listener()
+  } finally {
+    await Promise.all(fixture.browserChannels.splice(0).map((channel) => channel.dispose()))
+    const actualFS = await vi.importActual<typeof import('fs/promises')>('fs/promises')
+    await actualFS.rm(fixture.privateHome, { recursive: true, force: true })
+  }
+})
+
 describe('Relay entry IPC integration with simulated OS adapters', () => {
   it('prepares diagnostics during startup without opening a native host or a core', () => {
     expect(fixture.tunDiagnostics).toHaveBeenCalledExactlyOnceWith()
@@ -1488,6 +1567,19 @@ describe('Relay entry IPC integration with simulated OS adapters', () => {
     if (!handler) throw new Error('handler missing')
     return handler(event(), input)
   }
+  it('reads workspace visibility only from the trusted main frame without changing startup state', () => {
+    expect(invoke('relayWorkspaceVisible')).toBe(true)
+    fixture.window.isVisible.mockReturnValue(false)
+    expect(invoke('relayWorkspaceVisible')).toBe(false)
+    expect(() => invoke('relayWorkspaceVisible', { visible: true })).toThrow('不接受参数')
+    const handler = fixture.handlers.get('relayWorkspaceVisible')
+    expect(() => handler?.({ sender: {}, senderFrame: {} })).toThrow('Untrusted')
+    expect(() => handler?.({ sender: fixture.window.webContents, senderFrame: {} })).toThrow(
+      'Untrusted'
+    )
+    expect(fixture.coreStart).not.toHaveBeenCalled()
+    expect(fixture.localStart).not.toHaveBeenCalled()
+  })
   it('automatically drains an authenticated removal intent with the independent native after the app moves', async () => {
     fixture.knownNoRetainedCore = true
     fixture.loginRead.mockReturnValue({ openAtLogin: true })
@@ -1584,14 +1676,176 @@ describe('Relay entry IPC integration with simulated OS adapters', () => {
       fixture.handlers.get('relayAppLogSizeSave')?.({ sender: {}, senderFrame: {} })
     ).toThrow('Untrusted')
   })
-  const localPreparation = async (): Promise<{ evidenceId: string }> =>
-    (await invoke('relayLocalProxyPrepare', {
+  const localPreparation = async (
+    dedicated?: DedicatedListenerPlan
+  ): Promise<{ evidenceId: string }> => {
+    const saved = (await invoke('relayLocalProxyPlanRead')) as LocalProxyPlanRecord
+    await invoke('relayLocalProxyPlanSave', {
+      expectedRevision: saved.revision,
+      document: { httpPort: 18191, resolverMode: 'off', ...(dedicated ? { dedicated } : {}) }
+    })
+    return (await invoke('relayLocalProxyPrepare', {
       profile: {
         id: '00000000-0000-0000-0000-000000000001',
         sha256: profileHash(profileRuntimeSource)
       },
-      httpPort: 18191
+      httpPort: 18191,
+      resolverMode: 'off',
+      ...(dedicated ? { dedicated } : {})
     })) as { evidenceId: string }
+  }
+  describe('legacy dedicated pin before the first idle profile switch', () => {
+    const plan = {
+      httpPort: 18191,
+      resolverMode: 'off',
+      dedicated: { route: 'Node', httpPort: 17891, socksPort: 17890 }
+    }
+    const legacyPlan = async () => {
+      await invoke('relayLocalProxyPlanSave', { expectedRevision: '', document: plan })
+      const fs = await vi.importActual<typeof import('fs/promises')>('fs/promises')
+      const path =
+        fixture.privateHome +
+        '/Library/Application Support/Relay-Preview/Configuration/local-proxy-plan.json'
+      await fs.writeFile(path, JSON.stringify(plan, null, 2) + '\n', { mode: 0o600 })
+      return { fs, path }
+    }
+    it.each(['missing-node', 'different-same-name'])(
+      'pins the previous selected source before selecting %s without starting a core',
+      async (kind) => {
+        const original = await fixture.profileRead()
+        const text =
+          kind === 'missing-node'
+            ? original.text.replaceAll('Node', 'Other')
+            : original.text.replace('127.0.0.1', '192.0.2.99')
+        const candidate = {
+          ...original,
+          profile: {
+            ...original.profile,
+            id: '00000000-0000-0000-0000-000000000002',
+            sha256: profileHash(text)
+          },
+          text,
+          revision: 'b'.repeat(64)
+        }
+        fixture.profileRead.mockImplementation(async (selection) => {
+          const stored = selection.id === original.profile.id ? original : candidate
+          if (stored.profile.sha256 !== selection.sha256) throw new Error('stale profile')
+          return stored
+        })
+        fixture.readCoreSelectionNative.mockResolvedValue({
+          selection: { id: original.profile.id, sha256: original.profile.sha256 },
+          revision: 'a'.repeat(64)
+        })
+        fixture.saveCoreSelectionNative.mockImplementation(
+          async (_executable, _context, selection) => {
+            const snapshot = { selection, revision: 'b'.repeat(64) }
+            fixture.readCoreSelectionNative.mockResolvedValue(snapshot)
+            return snapshot
+          }
+        )
+        const { fs, path } = await legacyPlan()
+        const before = await invoke('relayLocalProxyPlanRead')
+        fixture.window.isVisible.mockReturnValue(false)
+        await invoke('changeCurrentProfile', {
+          id: candidate.profile.id,
+          sha256: candidate.profile.sha256
+        })
+        fixture.window.isVisible.mockReturnValue(true)
+        const saved = JSON.parse(await fs.readFile(path, 'utf8'))
+        expect(saved.pinnedNode).toMatchObject({
+          sourceProfileId: original.profile.id,
+          node: { name: 'Node', server: '127.0.0.1' }
+        })
+        expect(await invoke('relayLocalProxyPlanRead')).toEqual(before)
+        expect(fixture.localStart).not.toHaveBeenCalled()
+        const preparation = invoke('relayLocalProxyPrepare', {
+          profile: { id: candidate.profile.id, sha256: candidate.profile.sha256 },
+          ...plan
+        })
+        if (kind === 'missing-node')
+          await expect(preparation).resolves.toMatchObject({ canStart: true })
+        else await expect(preparation).rejects.toThrow('本地代理准备未完成')
+        expect(JSON.parse(await fs.readFile(path, 'utf8')).pinnedNode).toEqual(saved.pinnedNode)
+        expect(fixture.localStart).not.toHaveBeenCalled()
+      }
+    )
+    it.each(['missing', 'stale'])(
+      'refuses a %s previous selection without binding a candidate or persisting selection',
+      async (kind) => {
+        const original = await fixture.profileRead()
+        const candidate = { id: original.profile.id, sha256: original.profile.sha256 }
+        fixture.readCoreSelectionNative.mockResolvedValue({
+          revision: 'a'.repeat(64),
+          ...(kind === 'stale'
+            ? { selection: { id: '00000000-0000-0000-0000-000000000002', sha256: 'f'.repeat(64) } }
+            : {})
+        })
+        fixture.profileRead.mockImplementation(async (selection) => {
+          if (selection.id !== candidate.id) throw new Error('stale previous profile')
+          return original
+        })
+        const { fs, path } = await legacyPlan()
+        const bytes = await fs.readFile(path)
+        await expect(invoke('changeCurrentProfile', candidate)).rejects.toThrow()
+        expect(await fs.readFile(path)).toEqual(bytes)
+        expect(fixture.saveCoreSelectionNative).not.toHaveBeenCalled()
+        expect(fixture.localStart).not.toHaveBeenCalled()
+      }
+    )
+    it('cannot bind a different same-name candidate through direct preparation before switching', async () => {
+      const original = await fixture.profileRead()
+      const text = original.text.replace('127.0.0.1', '192.0.2.99')
+      const candidate = {
+        ...original,
+        profile: {
+          ...original.profile,
+          id: '00000000-0000-0000-0000-000000000002',
+          sha256: profileHash(text)
+        },
+        text,
+        revision: 'b'.repeat(64)
+      }
+      fixture.profileRead.mockImplementation(async (selection) =>
+        selection.id === original.profile.id ? original : candidate
+      )
+      fixture.readCoreSelectionNative.mockResolvedValue({
+        selection: { id: original.profile.id, sha256: original.profile.sha256 },
+        revision: 'a'.repeat(64)
+      })
+      const { fs, path } = await legacyPlan()
+      await expect(
+        invoke('relayLocalProxyPrepare', {
+          profile: { id: candidate.profile.id, sha256: candidate.profile.sha256 },
+          ...plan
+        })
+      ).rejects.toThrow('本地代理准备未完成')
+      expect(JSON.parse(await fs.readFile(path, 'utf8')).pinnedNode).toMatchObject({
+        sourceProfileId: original.profile.id,
+        node: { name: 'Node', server: '127.0.0.1' }
+      })
+      expect(fixture.saveCoreSelectionNative).not.toHaveBeenCalled()
+      expect(fixture.localStart).not.toHaveBeenCalled()
+    })
+    it('refuses a dedicated plan change while an idle profile selection is being persisted', async () => {
+      const original = await fixture.profileRead()
+      const selection = { id: original.profile.id, sha256: original.profile.sha256 }
+      const before = (await invoke('relayLocalProxyPlanRead')) as LocalProxyPlanRecord
+      const pending = Promise.withResolvers<{ revision: string; selection: typeof selection }>()
+      fixture.saveCoreSelectionNative.mockReturnValueOnce(pending.promise)
+      const changing = invoke('changeCurrentProfile', selection)
+      await vi.waitFor(() => expect(fixture.saveCoreSelectionNative).toHaveBeenCalledOnce())
+      try {
+        await expect(
+          invoke('relayLocalProxyPlanSave', { expectedRevision: before.revision, document: plan })
+        ).rejects.toThrow('配置选择')
+        expect(await invoke('relayLocalProxyPlanRead')).toEqual(before)
+      } finally {
+        pending.resolve({ revision: 'b'.repeat(64), selection })
+        await changing
+      }
+      expect(fixture.localStart).not.toHaveBeenCalled()
+    })
+  })
   describe('selected-profile startup Main wiring', () => {
     // The older fixture intentionally lacks DNS bootstrapping and is normally
     // used with resolverMode=off. Startup uses the supported profile DNS path.
@@ -1633,6 +1887,54 @@ describe('Relay entry IPC integration with simulated OS adapters', () => {
       })
       return stored.profile
     }
+    it.each(['legacy', 'new'] as const)(
+      'distinguishes a %s dedicated plan before default selection at cold startup',
+      async (kind) => {
+        const profile = await saved()
+        const document = {
+          httpPort: 18191,
+          resolverMode: 'off',
+          dedicated: { route: 'Node', httpPort: 17891, socksPort: 17890 }
+        }
+        await invoke('relayLocalProxyPlanSave', { expectedRevision: '', document })
+        const fs = await vi.importActual<typeof import('fs/promises')>('fs/promises')
+        const path =
+          fixture.privateHome +
+          '/Library/Application Support/Relay-Preview/Configuration/local-proxy-plan.json'
+        if (kind === 'legacy')
+          await fs.writeFile(path, JSON.stringify(document, null, 2) + '\n', { mode: 0o600 })
+        const before = await fs.readFile(path)
+        fixture.readCoreSelectionNative.mockResolvedValue({ revision: 'a'.repeat(64) })
+        fixture.profileList.mockResolvedValue({
+          profiles: [profile],
+          incomplete: 0,
+          activeId: null,
+          warnings: []
+        })
+        fixture.saveCoreSelectionNative.mockImplementation(
+          async (_executable, _context, selection) => {
+            const snapshot = { selection, revision: 'b'.repeat(64) }
+            fixture.readCoreSelectionNative.mockResolvedValue(snapshot)
+            return snapshot
+          }
+        )
+        await reboot()
+        if (kind === 'legacy') {
+          await vi.waitFor(() => expect(fixture.startupWarn).toHaveBeenCalledOnce())
+          expect(fixture.saveCoreSelectionNative).not.toHaveBeenCalled()
+          expect(fixture.localStart).not.toHaveBeenCalled()
+          expect(await fs.readFile(path)).toEqual(before)
+        } else {
+          await vi.waitFor(() => expect(fixture.localStart).toHaveBeenCalledOnce())
+          expect(fixture.saveCoreSelectionNative).toHaveBeenCalledOnce()
+          expect(JSON.parse(await fs.readFile(path, 'utf8')).pinnedNode.sourceProfileId).toBe(
+            profile.id
+          )
+          expect(fixture.startupWarn).not.toHaveBeenCalled()
+        }
+        expect(fixture.systemProxyNative).not.toHaveBeenCalled()
+      }
+    )
     it('starts the saved profile after initial navigation and content-ready, only once, without system takeover', async () => {
       const profile = await saved()
       await reboot()
@@ -2621,7 +2923,8 @@ describe('Relay entry IPC integration with simulated OS adapters', () => {
   it('keeps private subscription sources inert until the requested action persists the URL', async () => {
     expect(invoke('relaySourceState')).toMatchObject({ pending: false })
     expect(() => invoke('relaySourceState', {})).toThrow('不接受')
-    expect(fixture.sourceList).not.toHaveBeenCalled()
+    expect(fixture.sourceList).toHaveBeenCalledOnce()
+    fixture.sourceList.mockClear()
     const input = {
       name: 'Fixture',
       url: 'https://sub.invalid/PRIVATE?token=PRIVATE',
@@ -2779,7 +3082,7 @@ describe('Relay entry IPC integration with simulated OS adapters', () => {
     const inventory = await invoke('relayProvidersInspect', profile)
     expect(JSON.stringify(inventory)).not.toContain('PRIVATE')
     expect(fixture.providerCacheList).toHaveBeenCalledOnce()
-    expect(fixture.profileList).not.toHaveBeenCalled()
+    expect(fixture.profileList).toHaveBeenCalledOnce()
     const plan = (await invoke('relayProviderPrepare', {
       profile,
       provider: 'P',
@@ -3053,7 +3356,12 @@ describe('Relay entry IPC integration with simulated OS adapters', () => {
     expect(() =>
       invoke('relayConfigEditSave', { globalOverrides: [], profileOverrides: [], controlled: {} })
     ).toThrow('请先结束')
-    expect(() => invoke('relayLocalProxyAction', { action: 'stop' })).toThrow('操作尚未结束')
+    expect(() =>
+      invoke('relayLocalProxyAction', {
+        action: 'stop',
+        instanceId: (invoke('relayLocalProxyState') as { instanceId: string }).instanceId
+      })
+    ).toThrow('操作尚未结束')
     const suspend = fixture.powerOn.mock.calls.find(([name]) => name === 'suspend')?.[1]
     // Both the core lifecycle and Gist cancellation listeners are registered.
     for (const [name, listener] of fixture.powerOn.mock.calls) if (name === 'suspend') listener()
@@ -4990,7 +5298,7 @@ describe('Relay entry IPC integration with simulated OS adapters', () => {
       fixture.confirmRestore.mockResolvedValueOnce({ response: 1, checkboxChecked: false })
       await invoke('relayBackupScheduleArm', scheduleRequest())
       fixture.shellShouldHide.mockReturnValue(true)
-      const close = fixture.appOn.mock.calls.find(([name]) => name === 'before-quit')?.[1],
+      const close = fixture.window.on.mock.calls.find(([name]) => name === 'close')?.[1],
         preventDefault = vi.fn()
       close({ preventDefault })
       expect(preventDefault).toHaveBeenCalledOnce()
@@ -5022,7 +5330,7 @@ describe('Relay entry IPC integration with simulated OS adapters', () => {
           proxyPort: 18191
         })) as { evidenceId: string }
       fixture.shellShouldHide.mockReturnValue(true)
-      const close = fixture.appOn.mock.calls.find(([name]) => name === 'before-quit')?.[1]
+      const close = fixture.window.on.mock.calls.find(([name]) => name === 'close')?.[1]
       close({ preventDefault: vi.fn() })
       expect(fixture.window.webContents.send).toHaveBeenCalledWith(
         'relayBackupPreparationsInvalidated'
@@ -5059,7 +5367,7 @@ describe('Relay entry IPC integration with simulated OS adapters', () => {
       const restoring = invoke('relayBackupRestore', { id: local.plan.id })
       await entered.promise
       fixture.shellShouldHide.mockReturnValue(true)
-      const close = fixture.appOn.mock.calls.find(([name]) => name === 'before-quit')?.[1]
+      const close = fixture.window.on.mock.calls.find(([name]) => name === 'close')?.[1]
       close({ preventDefault: vi.fn() })
       finish.resolve()
       expect(await restoring).toMatchObject({ status: 'restored' })
@@ -6267,7 +6575,12 @@ describe('Relay entry IPC integration with simulated OS adapters', () => {
     }>
     await vi.waitFor(() => expect(fixture.remoteDownload).toHaveBeenCalled())
     expect(() => invoke('relayConfigEditClear')).toThrow('远程备份')
-    expect(() => invoke('relayLocalProxyAction', { action: 'stop' })).toThrow('备份')
+    expect(() =>
+      invoke('relayLocalProxyAction', {
+        action: 'stop',
+        instanceId: (invoke('relayLocalProxyState') as { instanceId: string }).instanceId
+      })
+    ).toThrow('备份')
     finish(Buffer.from('validated fixture archive'))
     const result = await pending
     expect(result.status).toBe('prepared')
@@ -6304,7 +6617,7 @@ describe('Relay entry IPC integration with simulated OS adapters', () => {
   it('keeps restored geometry on disk instead of overwriting it from the open window', async () => {
     await fixture.afterBackupRestore?.()
     fixture.window.getNormalBounds.mockReturnValue({ x: 300, y: 100, width: 1100, height: 700 })
-    const close = fixture.window.on.mock.calls.find((call) => call[0] === 'close')?.[1]
+    const close = fixture.appOn.mock.calls.find((call) => call[0] === 'before-quit')?.[1]
     const preventDefault = vi.fn()
     close({ preventDefault })
     expect(preventDefault).toHaveBeenCalledOnce()
@@ -7457,6 +7770,8 @@ describe('Relay entry IPC integration with simulated OS adapters', () => {
         assertOwner: expect.any(Function)
       }),
       undefined,
+      undefined,
+      { http: 18191, socks: 0, mixed: 0, redir: 0 },
       undefined
     )
     expect(invoke('relayStatus')).toMatchObject({
@@ -7520,6 +7835,8 @@ describe('Relay entry IPC integration with simulated OS adapters', () => {
         assertOwner: expect.any(Function)
       }),
       undefined,
+      undefined,
+      { http: 18191, socks: 0, mixed: 0, redir: 0 },
       undefined
     )
     expect(fixture.confirmRestore).not.toHaveBeenCalled()
@@ -7641,7 +7958,7 @@ describe('Relay entry IPC integration with simulated OS adapters', () => {
     expect(fixture.coreStart).not.toHaveBeenCalled()
   })
   it('uses the native picker only on request and saves the chosen profile without starting a core', async () => {
-    expect(fixture.profileList).not.toHaveBeenCalled()
+    expect(fixture.profileList).toHaveBeenCalledOnce()
     expect(fixture.chooseOpen).not.toHaveBeenCalled()
     await expect(invoke('relayProfilePrepare', { path: '/injected' })).rejects.toThrow('不接受')
     expect(await invoke('relayProfilePrepare')).toBeUndefined()
@@ -8494,7 +8811,7 @@ describe('Relay entry IPC integration with simulated OS adapters', () => {
     expect(fixture.shellHostOptions?.information?.()).toEqual({
       mode: undefined,
       systemProxy: undefined,
-      tun: undefined
+      tun: false
     })
     expect(fixture.coreStart).not.toHaveBeenCalled()
     expect(fixture.copy).not.toHaveBeenCalled()
@@ -8680,13 +8997,7 @@ describe('Relay entry IPC integration with simulated OS adapters', () => {
     expect(fixture.openEdgeToolNative).toHaveBeenCalledTimes(2)
   })
   it('blocks configuration and desktop actions while an Edge native open is pending and waits before quit', async () => {
-    const proxyPlan = (await invoke('relayLocalProxyPrepare', {
-      profile: {
-        id: '00000000-0000-0000-0000-000000000001',
-        sha256: profileHash(profileRuntimeSource)
-      },
-      httpPort: 18191
-    })) as { evidenceId: string }
+    const proxyPlan = await localPreparation()
     let finish!: (value: unknown) => void
     fixture.openEdgeToolNative.mockImplementationOnce(
       () =>
@@ -8709,7 +9020,7 @@ describe('Relay entry IPC integration with simulated OS adapters', () => {
       'relayBrowserOpen',
       'relayDesktopAction'
     ])
-      expect(() => invoke(channel)).toThrow('Edge')
+      await expect(async () => invoke(channel)).rejects.toThrow('Edge')
     const quit = fixture.appOn.mock.calls.find((call) => call[0] === 'before-quit')?.[1]
     const preventDefault = vi.fn()
     quit({ preventDefault })
@@ -8750,7 +9061,7 @@ describe('Relay entry IPC integration with simulated OS adapters', () => {
       'relayRecoveryRestore',
       'relayBrowserOpen'
     ])
-      expect(() => invoke(channel)).toThrow('桌面登录')
+      await expect(async () => invoke(channel)).rejects.toThrow('桌面登录')
     expect(await invoke('relayDesktopAction', { action: 'finish' })).toMatchObject({
       state: { host: 'absent' }
     })
@@ -8826,8 +9137,26 @@ describe('Relay entry IPC integration with simulated OS adapters', () => {
     await args[2]('/fixture/validated-by-directory-opener')
     expect(fixture.openPath).toHaveBeenCalledWith('/fixture/validated-by-directory-opener')
   })
+  const startDedicatedFixture = async () => {
+    const settings = { ...preferenceFixture().preferences, node: 'Node' }
+    const plan = await localPreparation({
+      route: settings.node,
+      httpPort: settings.httpPort,
+      socksPort: 17890
+    })
+    await invoke('relayLocalProxyAction', { action: 'start', evidenceId: plan.evidenceId })
+    const applied = appliedCodeFixture()
+    fixture.applyCodeNative.mockResolvedValue({
+      ...applied,
+      preferenceSnapshot: { ...applied.preferenceSnapshot, preferences: settings }
+    })
+    return settings
+  }
   it('prepares actual Code files through owned context and applies once with the cached native revision', async () => {
-    const settings = preferenceFixture().preferences
+    await expect(invoke('relayCodePrepare', preferenceFixture().preferences)).rejects.toThrow(
+      '启动本次自有HTTP代理'
+    )
+    const settings = await startDedicatedFixture()
     const proof = (await invoke('relayCodePrepare', settings)) as RelayCodePreparation
     expect(fixture.prepareCodeNative).toHaveBeenCalledWith(
       expect.stringContaining('/extra/relay/RelayNative'),
@@ -8854,14 +9183,19 @@ describe('Relay entry IPC integration with simulated OS adapters', () => {
     )
   })
   it('uses only the bundled browser entry and rejects supplied paths or URLs', async () => {
+    await expect(invoke('relayBrowserOpen')).rejects.toThrow('指定节点HTTP入口未就绪')
+    await startDedicatedFixture()
     expect(await invoke('relayBrowserOpen')).toMatchObject({ status: 'requested' })
     expect(fixture.openRelayBrowser).toHaveBeenCalledWith(
       expect.stringContaining('/extra/relay/RelayBrowser')
     )
-    expect(() => invoke('relayBrowserOpen', { url: 'http://injected' })).toThrow('不接受路径')
+    await expect(invoke('relayBrowserOpen', { url: 'http://injected' })).rejects.toThrow(
+      '不接受路径'
+    )
     expect(fixture.openRelayBrowser).toHaveBeenCalledTimes(1)
   })
   it('waits for a pending Code transaction and blocks competing restore, save and launch actions', async () => {
+    const settings = await startDedicatedFixture()
     let finish!: (answer: ReturnType<typeof appliedCodeFixture>) => void
     fixture.applyCodeNative.mockImplementationOnce(
       () =>
@@ -8870,10 +9204,7 @@ describe('Relay entry IPC integration with simulated OS adapters', () => {
         })
     )
     fixture.confirmRestore.mockResolvedValue({ response: 1, checkboxChecked: false })
-    const proof = (await invoke(
-      'relayCodePrepare',
-      preferenceFixture().preferences
-    )) as RelayCodePreparation
+    const proof = (await invoke('relayCodePrepare', settings)) as RelayCodePreparation
     const result = invoke('relayCodeApply', { evidenceId: proof.evidenceId })
     await vi.waitFor(() => expect(fixture.applyCodeNative).toHaveBeenCalled())
     for (const channel of [
@@ -8884,14 +9215,18 @@ describe('Relay entry IPC integration with simulated OS adapters', () => {
       'relayDesktopReadiness',
       'relayDesktopAction'
     ])
-      expect(() => invoke(channel)).toThrow('尚未结束')
+      await expect(async () => invoke(channel)).rejects.toThrow('尚未结束')
     const close = fixture.appOn.mock.calls.find((call) => call[0] === 'before-quit')?.[1]
     const preventDefault = vi.fn()
     close({ preventDefault })
     expect(preventDefault).toHaveBeenCalledTimes(1)
     expect(fixture.appQuit).not.toHaveBeenCalled()
-    finish(appliedCodeFixture())
-    await result
+    const applied = appliedCodeFixture()
+    finish({
+      ...applied,
+      preferenceSnapshot: { ...applied.preferenceSnapshot, preferences: settings }
+    })
+    await expect(result).resolves.toMatchObject({ status: 'applied' })
     await vi.waitFor(() => expect(fixture.appQuit).toHaveBeenCalledTimes(1))
   })
   it('reads recovery metadata only after a request using the fixed namespace', async () => {
@@ -8959,7 +9294,7 @@ describe('Relay entry IPC integration with simulated OS adapters', () => {
     const result = invoke('relayRecoveryRestore', { evidenceId: proof.evidenceId })
     await vi.waitFor(() => expect(fixture.recoveryRestoreNative).toHaveBeenCalled())
     for (const channel of ['relayBackupDirectoryOpen', 'relayDesktopReadiness'])
-      expect(() => invoke(channel)).toThrow('尚未结束')
+      await expect(async () => invoke(channel)).rejects.toThrow('尚未结束')
     const beforeQuit = fixture.appOn.mock.calls.find((call) => call[0] === 'before-quit')?.[1]
     const beforeClose = fixture.window.on.mock.calls.find((call) => call[0] === 'close')?.[1]
     const preventDefault = vi.fn()
@@ -8995,29 +9330,61 @@ describe('Relay entry IPC integration with simulated OS adapters', () => {
     expect(fixture.write).not.toHaveBeenCalled()
     expect(fixture.diagnoseNative).not.toHaveBeenCalled()
   })
+  const startDiagnosticCore = async (): Promise<void> => {
+    const original = fixture.localStart.getMockImplementation()
+    if (!original) throw new Error('Missing local core fixture')
+    fixture.localStart.mockImplementationOnce(async (...args: unknown[]) => {
+      const child = await original(...args)
+      return {
+        ...child,
+        read: async (endpoint: string) =>
+          endpoint === 'proxies'
+            ? {
+                proxies: {
+                  Node: { type: 'Shadowsocks' },
+                  Group: { type: 'Selector', now: 'Node', all: ['Node', 'DIRECT'] }
+                }
+              }
+            : child.read(endpoint)
+      }
+    })
+    const prepared = await localPreparation({ route: 'Node', httpPort: 17891, socksPort: 17890 })
+    await invoke('relayLocalProxyAction', { action: 'start', evidenceId: prepared.evidenceId })
+  }
   it('does not diagnose automatically and routes explicit observation to only main-owned paths', async () => {
     expect(fixture.diagnoseNative).not.toHaveBeenCalled()
-    const settings = { httpPort: 7890, node: 'fixture-node', internalExceptions: '' }
-    const observation = (await invoke('relayDiagnose', settings)) as RelayObservation
+    await expect(
+      invoke('relayDiagnose', { httpPort: 7890, node: 'fixture-node', internalExceptions: '' })
+    ).rejects.toThrow('不接受参数')
+    expect(fixture.diagnoseNative).not.toHaveBeenCalled()
+    await startDiagnosticCore()
+    const observation = (await invoke('relayDiagnose')) as RelayObservation
+    expect(observation.source).toBe('relay-owned')
     expect(fixture.diagnoseNative).toHaveBeenCalledWith(
       expect.stringContaining('/extra/relay/RelayNative'),
-      settings,
+      { httpPort: 17891, node: 'Relay 当前实例', internalExceptions: '' },
       {
         home: '/fake/home',
         clashRoot: '/fake/home/Library/Application Support/mihomo-party',
         browserProfile: '/fake/home/Library/Application Support/Relay-Preview/Private Browser',
-        browserExecutable: expect.stringContaining('/extra/relay/RelayBrowser')
+        browserExecutable: expect.stringContaining('/extra/relay/RelayBrowser'),
+        owned: {
+          systemHTTPPort: 18191,
+          systemSOCKSPort: null,
+          codeHTTPPort: 17891,
+          dedicatedSOCKSPort: 17890
+        }
       }
     )
     await invoke('relayGenerate', {
       kind: 'guardPlan',
-      node: 'fixture-node',
+      node: 'Node',
       evidenceId: observation.evidenceId
     })
     expect(fixture.guardPlanNative).toHaveBeenCalledWith(
       expect.stringContaining('/extra/relay/RelayNative'),
-      'fixture-node',
-      { 'fixture-node': 'Shadowsocks', group: 'Selector' }
+      'Node',
+      { Node: 'Shadowsocks', Group: 'Selector' }
     )
     await invoke('relayGenerate', { kind: 'edgeProfile' })
     expect(fixture.edgeProfileNative).toHaveBeenCalledWith(
@@ -9046,24 +9413,24 @@ describe('Relay entry IPC integration with simulated OS adapters', () => {
     ])
   })
   it('keeps diagnostic evidence for in-page navigation and retires it with the old document', async () => {
-    const settings = { httpPort: 7890, node: 'fixture-node', internalExceptions: '' }
+    await startDiagnosticCore()
     const plan = (observation: RelayObservation): unknown =>
       invoke('relayGenerate', {
         kind: 'guardPlan',
-        node: 'fixture-node',
+        node: 'Node',
         evidenceId: observation.evidenceId
       })
     const navigate = (details: { isMainFrame: boolean; isSameDocument: boolean }): void => {
       for (const [name, handler] of fixture.window.webContents.on.mock.calls)
         if (name === 'did-start-navigation') handler(details)
     }
-    const observation = (await invoke('relayDiagnose', settings)) as RelayObservation
+    const observation = (await invoke('relayDiagnose')) as RelayObservation
     navigate({ isMainFrame: false, isSameDocument: false })
     navigate({ isMainFrame: true, isSameDocument: true })
     await expect(plan(observation)).resolves.toBeDefined()
     navigate({ isMainFrame: true, isSameDocument: false })
     await expect(plan(observation)).rejects.toThrow('证据缺失')
-    const afterReload = (await invoke('relayDiagnose', settings)) as RelayObservation
+    const afterReload = (await invoke('relayDiagnose')) as RelayObservation
     for (const [name, handler] of fixture.window.webContents.on.mock.calls)
       if (name === 'render-process-gone') handler()
     await expect(plan(afterReload)).rejects.toThrow('证据缺失')

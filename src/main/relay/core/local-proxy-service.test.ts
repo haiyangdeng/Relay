@@ -2,8 +2,8 @@ import { describe, expect, it, vi } from 'vitest'
 import { profileRuntimeSource } from '../__fixtures__/profile-runtime'
 import { profileHash } from '../profiles/source'
 import { resourceHash } from '../resources/source'
-import { inspectProfile } from '../profiles/inspect'
-import type { RuntimeProfileRead } from '../configuration/edit-service'
+import { analyzeProfile, inspectProfile } from '../profiles/inspect'
+import { MissingRuntimeGeoDataError, type RuntimeProfileRead } from '../configuration/edit-service'
 import type { RuntimeAsset } from '../configuration/bindings'
 import type { LocalProxyState, LocalResolverMode } from '../../../shared/relay/local-proxy'
 import type { LocalProxyPorts } from '../../../shared/relay/local-proxy-ports'
@@ -20,6 +20,32 @@ import type {
 } from './owned-runtime'
 import type { CoreStoreLease, CoreStoreSnapshot } from './store'
 import type { SmartLearningStopResult } from './smart-state-runtime'
+
+describe('Local proxy preparation diagnostics', () => {
+  it('identifies missing local databases without acquiring a core', async () => {
+    const f = fixture()
+    const missing = new MissingRuntimeGeoDataError(['geosite-dat', 'country-mmdb'])
+    f.adapters.read.mockRejectedValue(missing)
+    await expect(f.service.prepare({ profile: f.selection, httpPort: 18191 })).rejects.toThrow(
+      missing.message
+    )
+    expect(f.adapters.acquire).not.toHaveBeenCalled()
+    expect(f.adapters.start).not.toHaveBeenCalled()
+    expect(f.service.state().pending).toBe(false)
+  })
+
+  it('does not expose arbitrary reader errors containing private configuration', async () => {
+    const f = fixture()
+    f.adapters.read.mockRejectedValue(new Error('https://private.invalid/?token=private-token'))
+    const failure = await f.service
+      .prepare({ profile: f.selection, httpPort: 18191 })
+      .catch((e) => e)
+    expect(failure.message).toContain('本地代理准备未完成')
+    expect(failure.message).not.toContain('private')
+    expect(f.adapters.acquire).not.toHaveBeenCalled()
+    expect(f.adapters.start).not.toHaveBeenCalled()
+  })
+})
 
 describe('Saved dedicated startup plan admission', () => {
   it.each([18191, 18193, 18190])(
@@ -328,7 +354,9 @@ function fixture() {
     resolverMode: LocalResolverMode = 'off',
     activeLogLevel: Parameters<typeof localProxyConfiguration>[4],
     activeAssets: readonly RuntimeAsset[] | undefined,
-    activePorts: LocalProxyPorts | undefined
+    activePorts: LocalProxyPorts | undefined,
+    activeDedicated: DedicatedListenerPlan | undefined,
+    activePinnedNode: Record<string, unknown> | undefined
   const summary = inspectProfile(profileRuntimeSource).summary
   if (!summary) throw new Error('fixture summary missing')
   const selection = {
@@ -350,10 +378,11 @@ function fixture() {
               activeSource,
               port,
               resolverMode,
-              undefined,
+              activeDedicated,
               activeLogLevel,
               activeAssets,
-              activePorts
+              activePorts,
+              activePinnedNode
             ).configuration
           )
         : endpoint === 'version'
@@ -414,13 +443,16 @@ function fixture() {
         _lifetime?: 'main' | 'persistent',
         level?: Parameters<typeof localProxyConfiguration>[4],
         assets?: readonly RuntimeAsset[],
-        ports?: LocalProxyPorts
+        ports?: LocalProxyPorts,
+        pinnedNode?: Record<string, unknown>
       ) => {
         activeSource = _source
         resolverMode = mode
         activeLogLevel = level
         activeAssets = assets
         activePorts = ports
+        activeDedicated = _dedicated
+        activePinnedNode = pinnedNode
         port = httpPort
         child = 'running'
         register(stop)
@@ -1136,7 +1168,8 @@ describe('Manual local proxy ownership, selection and close consent', () => {
       'main',
       undefined,
       undefined,
-      { http: 18191, socks: 0, mixed: 0, redir: 0 }
+      { http: 18191, socks: 0, mixed: 0, redir: 0 },
+      undefined
     )
     await expect(
       f.service.action({ action: 'start', evidenceId: plan.evidenceId, resolverMode: 'off' })
@@ -2076,5 +2109,149 @@ describe('ordinary multiport service lifecycle', () => {
     expect((await f.service.captureRuntime(new AbortController().signal)).status).toBe(
       'unavailable'
     )
+  })
+})
+
+describe('Persisted dedicated node service admission', () => {
+  const dedicated = { httpPort: 18193, socksPort: 18190, route: 'Node' }
+  const make = () => {
+    const f = reloadFixture()
+    const node = (
+      analyzeProfile(profileRuntimeSource).data?.proxies as Record<string, unknown>[]
+    )[0]
+    const pin = { node, revision: 'd'.repeat(64) }
+    const resolvePinnedNode = vi.fn(async () => structuredClone(pin))
+    f.service = createLocalProxyService({
+      ...f.adapters,
+      confirmReload: f.confirmReload,
+      resolvePinnedNode
+    })
+    f.adapters.confirmStart.mockResolvedValue(true)
+    return { ...f, pin, resolvePinnedNode }
+  }
+  it('forwards the same private snapshot through preparation and actual start without exposing it in IPC results', async () => {
+    const f = make()
+    const prepared = await f.service.prepare({ profile: f.selection, httpPort: 18191, dedicated })
+    const result = await f.service.action({ action: 'start', evidenceId: prepared.evidenceId })
+    expect(result.status).toBe('started')
+    expect(f.resolvePinnedNode).toHaveBeenCalledTimes(2)
+    expect(f.adapters.start.mock.calls[0][10]).toEqual(f.pin.node)
+    expect(prepared).not.toHaveProperty('pinnedNode')
+    expect(result.state).not.toHaveProperty('pinnedNode')
+  })
+  it('refuses a changed private revision between preparation and start before acquiring or spawning', async () => {
+    const f = make()
+    const prepared = await f.service.prepare({ profile: f.selection, httpPort: 18191, dedicated })
+    f.pin.revision = 'e'.repeat(64)
+    expect(
+      (await f.service.action({ action: 'start', evidenceId: prepared.evidenceId })).status
+    ).toBe('failed')
+    expect(f.adapters.acquire).not.toHaveBeenCalled()
+    expect(f.adapters.start).not.toHaveBeenCalled()
+  })
+  it('injects the persisted node on cold start when the selected ordinary profile no longer contains it', async () => {
+    const f = make()
+    f.stored.text = profileRuntimeSource.replaceAll('Node', 'Other')
+    f.stored.profile.sha256 = profileHash(f.stored.text)
+    const original = f.read.getMockImplementation()
+    if (!original) throw new Error('missing core reader fixture')
+    f.read.mockImplementation(async (endpoint) =>
+      endpoint === 'proxies'
+        ? { proxies: { Group: { type: 'Selector', now: 'Other', all: ['Other', 'DIRECT'] } } }
+        : original(endpoint)
+    )
+    const prepared = await f.service.prepare({ profile: f.selection, httpPort: 18191, dedicated })
+    expect(prepared.canStart).toBe(true)
+    expect(
+      (await f.service.action({ action: 'start', evidenceId: prepared.evidenceId })).status
+    ).toBe('started')
+    expect(f.adapters.start.mock.calls[0][10]).toEqual(f.pin.node)
+  })
+  it('switches the ordinary profile on the same process while retaining the fixed node and listener plan', async () => {
+    const f = make()
+    const prepared = await f.service.prepare({ profile: f.selection, httpPort: 18191, dedicated })
+    expect(
+      (await f.service.action({ action: 'start', evidenceId: prepared.evidenceId })).status
+    ).toBe('started')
+    const originalState = f.service.state()
+    f.stored.text = profileRuntimeSource.replaceAll('Node', 'Other')
+    f.stored.profile = {
+      ...f.stored.profile,
+      id: '00000000-0000-0000-0000-000000000002',
+      sha256: profileHash(f.stored.text)
+    }
+    f.stored.revision = 'f'.repeat(64)
+    const candidate = await f.service.prepareReload({
+      profile: { id: f.stored.profile.id, sha256: f.stored.profile.sha256 },
+      httpPort: 18191,
+      dedicated
+    })
+    const original = f.read.getMockImplementation()
+    if (!original) throw new Error('missing core reader fixture')
+    f.read.mockImplementation(async (endpoint) =>
+      endpoint === 'proxies'
+        ? { proxies: { Group: { type: 'Selector', now: 'Other', all: ['Other', 'DIRECT'] } } }
+        : original(endpoint)
+    )
+    f.confirmReload.mockResolvedValue(true)
+    const result = await f.service.reload({ evidenceId: candidate.evidenceId })
+    expect(result.status).toBe('reloaded')
+    expect(result.state).toMatchObject({
+      pid: originalState.pid,
+      instanceId: originalState.instanceId,
+      dedicated: originalState.dedicated,
+      profileId: f.stored.profile.id
+    })
+    const runtime = JSON.parse(f.reload.mock.calls[0][0])
+    expect(runtime.proxies.find((node: { name: string }) => node.name === 'Node')).toEqual(
+      f.pin.node
+    )
+    expect(
+      runtime.listeners.every((listener: { proxy: string }) => listener.proxy === 'Node')
+    ).toBe(true)
+    expect(f.adapters.start).toHaveBeenCalledOnce()
+    expect(f.stop).not.toHaveBeenCalled()
+  })
+  it('refuses a refreshed same-name replacement before preparing any core reload', async () => {
+    const f = make()
+    const prepared = await f.service.prepare({ profile: f.selection, httpPort: 18191, dedicated })
+    expect(
+      (await f.service.action({ action: 'start', evidenceId: prepared.evidenceId })).status
+    ).toBe('started')
+    const before = f.service.state()
+    const source = analyzeProfile(profileRuntimeSource).data
+    if (!source) throw new Error('missing profile fixture')
+    ;(source.proxies as Record<string, unknown>[])[0].server = '192.0.2.55'
+    f.stored.text = JSON.stringify(source)
+    f.stored.revision = 'f'.repeat(64)
+    await expect(
+      f.service.prepareReload({ profile: f.selection, httpPort: 18191, dedicated })
+    ).rejects.toThrow('同名')
+    expect(f.service.state()).toMatchObject({
+      pid: before.pid,
+      instanceId: before.instanceId,
+      owned: true,
+      dedicated: before.dedicated
+    })
+    expect(f.reload).not.toHaveBeenCalled()
+    expect(f.stop).not.toHaveBeenCalled()
+  })
+  it('preserves the running core when the private pin changes after reload preparation', async () => {
+    const f = make()
+    const prepared = await f.service.prepare({ profile: f.selection, httpPort: 18191, dedicated })
+    expect(
+      (await f.service.action({ action: 'start', evidenceId: prepared.evidenceId })).status
+    ).toBe('started')
+    const reload = await f.service.prepareReload({
+      profile: f.selection,
+      httpPort: 18191,
+      dedicated
+    })
+    f.confirmReload.mockResolvedValue(true)
+    f.pin.revision = 'e'.repeat(64)
+    expect((await f.service.reload({ evidenceId: reload.evidenceId })).status).toBe('failed')
+    expect(f.reload).not.toHaveBeenCalled()
+    expect(f.stop).not.toHaveBeenCalled()
+    expect(f.service.state().owned).toBe(true)
   })
 })

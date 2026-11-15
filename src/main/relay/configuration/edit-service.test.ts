@@ -11,7 +11,7 @@ import { isolatedProbeConfiguration } from '../network-info/probe-configuration'
 import { createIsolatedProbes } from '../network-info/probes'
 import type { GeoResourceKind } from '../../../shared/relay/geo-origins'
 import { ConfigurationEditStore } from './edit-store'
-import { createConfigurationEditService } from './edit-service'
+import { createConfigurationEditService, MissingRuntimeGeoDataError } from './edit-service'
 import { createCompleteConfigurationService } from './service'
 import type { DefaultGeoResourceBinding } from './bindings'
 
@@ -131,6 +131,106 @@ async function runtimeFixture(
 }
 
 describe('Persisted edits used by isolated delay preparation', () => {
+  it('exposes only fixed missing-database labels in the actionable HTTP error', async () => {
+    const privateReference = 'https://private.invalid/database?token=secret'
+    const error = new MissingRuntimeGeoDataError([
+      'country-mmdb',
+      privateReference,
+      'geosite-dat',
+      'country-mmdb'
+    ])
+    expect(error.message).toBe(
+      'HTTP 地理规则的本地数据库尚未齐全（Country.mmdb、GeoSite.dat）；请在“外部资源”中同步或导入对应地理数据库；不会自动下载。'
+    )
+    expect(JSON.stringify(error)).not.toContain(privateReference)
+    await runtimeFixture(async ({ profiles, store }) => {
+      const saved = await profiles.save(
+        'Requires local database',
+        JSON.stringify({
+          ...JSON.parse(isolatedDelayProfile),
+          rules: ['GEOIP,CN,DIRECT', 'MATCH,G']
+        })
+      )
+      const editor = createConfigurationEditService({ profiles, store })
+      await expect(
+        editor.readRuntimeProfile({ id: saved.id, sha256: saved.sha256 }, 'profile')
+      ).rejects.toThrow(MissingRuntimeGeoDataError)
+    })
+  })
+  it.each(['nodeDelay', 'groupDelay'] as const)(
+    'prepares %s without databases used only by the saved rules and DNS',
+    async (kind) => {
+      await runtimeFixture(async ({ home, profiles, store }) => {
+        const source = JSON.stringify({
+          ...JSON.parse(isolatedDelayProfile),
+          rules: ['GEOSITE,cn,DIRECT', 'GEOIP,CN,DIRECT', 'MATCH,G'],
+          dns: {
+            enable: true,
+            nameserver: ['tls://1.1.1.1'],
+            'nameserver-policy': { 'geosite:cn': ['tls://1.1.1.1'] }
+          }
+        })
+        const saved = await profiles.save('Saved geography', source)
+        const selection = { id: saved.id, sha256: saved.sha256 }
+        const original = await profiles.read(selection)
+        const context = { home, stateRoot: join(home, 'Library/Application Support/Relay') }
+        const defaultGeoResource = vi.fn(async () => undefined)
+        const editor = createConfigurationEditService({
+          profiles,
+          store,
+          runtimeResources: new ResourceStore(context),
+          defaultGeoResource
+        })
+        const resourceRoot = vi.fn(async () => '/unused-fixture-core')
+        const independentNetwork = vi.fn(async () => 'unused-fixture-network')
+        const confirm = vi.fn(async () => true)
+        const probes = createIsolatedProbes({
+          context,
+          readProfile: (selected) => editor.readIsolatedProbeProfile(selected),
+          resourceRoot,
+          independentNetwork,
+          confirm
+        })
+        const request = {
+          profile: selection,
+          target: kind === 'nodeDelay' ? 'NodeA' : 'G',
+          kind,
+          provider: 'ip.sb'
+        }
+        for (const edited of [false, true]) {
+          if (edited)
+            await editor.save({
+              globalOverrides: [{ id: 'delay', kind: 'yaml', content: 'unified-delay: true\n' }],
+              profileOverrides: [],
+              controlled: {}
+            })
+          await expect(probes.prepare(request, () => {})).resolves.toMatchObject({
+            kind,
+            nodes: ['NodeA'],
+            sourceSHA256: selection.sha256
+          })
+          const effective = await editor.readIsolatedProbeProfile(selection)
+          const projected = JSON.parse(
+            isolatedProbeConfiguration(effective.text, request, 49152).configuration
+          )
+          expect(projected.rules).toEqual(['MATCH,__RELAY_ISOLATED_PROBE__'])
+          expect(projected.dns).toEqual({ enable: false })
+          expect(projected['unified-delay']).toBe(edited)
+          expect(JSON.parse(effective.text).rules).toEqual(JSON.parse(source).rules)
+          expect(defaultGeoResource).not.toHaveBeenCalled()
+        }
+        // The HTTP runtime must still require its routing databases, including
+        // when the shared composed-source cache was first populated by a probe.
+        await expect(editor.readRuntimeProfile(selection, 'profile')).rejects.toThrow(
+          MissingRuntimeGeoDataError
+        )
+        expect(resourceRoot).not.toHaveBeenCalled()
+        expect(independentNetwork).not.toHaveBeenCalled()
+        expect(confirm).not.toHaveBeenCalled()
+        expect(await profiles.read(selection)).toEqual(original)
+      })
+    }
+  )
   it('uses effective unified-delay true and false without changing the raw subscription', async () => {
     await runtimeFixture(async ({ profiles, store }) => {
       const saved = await profiles.save('Isolated delay', isolatedDelayProfile)
@@ -145,7 +245,7 @@ describe('Persisted edits used by isolated delay preparation', () => {
           profileOverrides: [],
           controlled: {}
         })
-        const effective = await editor.readRuntimeProfile(selection, 'profile')
+        const effective = await editor.readIsolatedProbeProfile(selection)
         const built = isolatedProbeConfiguration(
           effective.text,
           { kind: 'nodeDelay', target: 'NodeA' },
@@ -183,7 +283,7 @@ describe('Persisted edits used by isolated delay preparation', () => {
       })
       const probes = createIsolatedProbes({
         context: { home, stateRoot: join(home, 'Library/Application Support/Relay') },
-        readProfile: (selected) => editor.readRuntimeProfile(selected, 'profile'),
+        readProfile: (selected) => editor.readIsolatedProbeProfile(selected),
         resourceRoot,
         confirm: async () => true,
         independentNetwork: async () => 'synthetic-network-snapshot'
@@ -954,12 +1054,49 @@ describe('Imported Clash settings through the owned HTTP runtime', () => {
         ).toThrow()
     })
   })
-  it('rejects active authentication, LAN restrictions and automatic downloads instead of dropping them', async () => {
+  it.each([false, true])(
+    'accepts source allow-lan=%s while keeping the owned runtime on loopback',
+    async (allowLan) => {
+      await runtimeFixture(async ({ profiles, store }) => {
+        const source = JSON.stringify({
+          ...JSON.parse(fixtureProfile),
+          'allow-lan': allowLan,
+          'bind-address': '*'
+        })
+        const saved = await profiles.save('LAN subscription', source)
+        const selection = { id: saved.id, sha256: saved.sha256 }
+        const service = createConfigurationEditService({ profiles, store })
+        for (const edited of [false, true]) {
+          if (edited)
+            await service.save({ globalOverrides: [], profileOverrides: [], controlled: {} })
+          const effective = await service.readRuntimeProfile(selection)
+          expect(JSON.parse(effective.text)['allow-lan']).toBe(allowLan)
+          const built = localProxyConfiguration(effective.text, 18191)
+          const admitted = ownedCoreConfiguration(built.configuration, 'localProxy').parsed
+          expect(admitted).toMatchObject({
+            'allow-lan': false,
+            'bind-address': '127.0.0.1',
+            port: 18191
+          })
+          expect(() =>
+            ownedCoreConfiguration(JSON.stringify({ ...admitted, 'allow-lan': true }), 'localProxy')
+          ).toThrow()
+        }
+        expect((await profiles.read(selection)).text).toBe(source)
+      })
+    }
+  )
+  it('rejects invalid LAN types, active authentication, LAN restrictions and automatic downloads', async () => {
     await runtimeFixture(async ({ profiles, store, selection }) => {
       const service = createConfigurationEditService({ profiles, store })
       for (const settings of [
         { authentication: ['user:secret'] },
-        { 'allow-lan': true },
+        { 'allow-lan': 'true' },
+        { 'allow-lan': 'false' },
+        { 'allow-lan': 1 },
+        { 'allow-lan': null },
+        { 'allow-lan': [] },
+        { 'allow-lan': {} },
         { 'lan-allowed-ips': ['192.168.0.0/16'] },
         { 'lan-disallowed-ips': ['127.0.0.1/32'] },
         { 'skip-auth-prefixes': ['not-cidr'] },

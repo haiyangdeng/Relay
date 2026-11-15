@@ -20,6 +20,22 @@ must add an explicit update transaction guard. User restoration runs as the boun
 component removal uses the existing fixed-path, owner-checked uninstall paths.
 The monitor removes itself last.
 
+After user restoration and namespace cleanup succeed, the supervisor removes
+Launch Services registrations in the bound user's GUI context. Targets are only
+the fixed installed bundle and the same-generation intent's observed Trash
+location, each with the four fixed Electron helpers and Relay Browser. A present
+Trash bundle must still match the registered device/inode; an occupied installed
+path blocks every step. Direct deletion and an immediately emptied Trash still
+retire the fixed installed paths. No other copy is discovered by bundle ID, no
+Trash bundle is deleted, and the Launch Services database is never reset.
+
+The complete, bounded Bundle table is read without saving or logging it. An
+unregister result is accepted only after another complete table confirms exact
+path absence. Failures retain the requested checkpoint for retry; user
+restoration may already have finished and removed its journals, so this does not
+claim those journals remain available. Registration cleanup precedes the
+user-cleaned checkpoint and privileged component removal.
+
 ## Reviewed implementations and fixed sources
 
 - **Apple XNU** commit

@@ -10,6 +10,7 @@ import {
 
 export function createDiagnosticService(adapters: {
   observe(settings: RelayPreferences): Promise<RelayReadOnlyReport>
+  ownedObserve?(): Promise<Pick<RelayObservation, 'parameters' | 'report' | 'owned'>>
   guardPlan(node: string, proxyTypes: Record<string, string>): Promise<RelayGuardPlanOutput>
   now(): number
 }): {
@@ -27,17 +28,23 @@ export function createDiagnosticService(adapters: {
   }
   return {
     async observe(raw) {
-      const parameters = validatePreferences(raw)
+      if (adapters.ownedObserve && raw !== undefined)
+        throw new Error('Relay 当前配置检测不接受参数。')
+      const requested = adapters.ownedObserve ? undefined : validatePreferences(raw)
       const request = ++sequence
       const startedAt = adapters.now()
       latest = undefined
-      const report = validateReadOnlyReport(await adapters.observe(parameters))
+      const owned = await adapters.ownedObserve?.()
+      const parameters = owned?.parameters ?? requested
+      if (!parameters) throw new Error('检测参数未确认。')
+      const report = validateReadOnlyReport(owned?.report ?? (await adapters.observe(parameters)))
       if (request !== sequence) throw new Error('检测结果已过期，请重新执行只读检测。')
       const observation: RelayObservation = {
         evidenceId: randomUUID(),
-        source: 'legacy-readonly',
+        source: owned ? 'relay-owned' : 'legacy-readonly',
         parameters,
-        report
+        report,
+        ...(owned ? { owned: owned.owned } : {})
       }
       latest = { observation: structuredClone(observation), at: startedAt }
       return observation

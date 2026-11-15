@@ -10,6 +10,7 @@ import { createLocalProxyService } from '../../src/main/relay/core/local-proxy-s
 import { inspectProfile } from '../../src/main/relay/profiles/inspect'
 import { profileHash } from '../../src/main/relay/profiles/source'
 import { verifyCoreResource } from '../../src/main/relay/core/resources'
+import { ownedHealthTestPolicy } from '../../src/shared/relay/health'
 import { createLocalNetworkFixture, freeFixturePort } from './fixtures/local-network'
 
 const rows: { name: string; passed: boolean }[] = []
@@ -300,7 +301,8 @@ try {
     summary = inspectProfile(text).summary
   if (!summary) throw new Error('fixture summary missing')
   const selection = { id: '00000000-0000-0000-0000-000000000023', sha256 }
-  let allowTest = false
+  let confirmTestCalls = 0,
+    testDelayCalls = 0
   const service = createLocalProxyService({
     read: async () => ({
       text,
@@ -311,8 +313,8 @@ try {
     resources: () => verifyCoreResource(resolve('extra/relay/core')),
     portAvailable: async () => true,
     acquire: async () => ({ update: async () => {}, release: async () => {} }),
-    start: (source, port, register, mode) =>
-      startLocalProxyCore(
+    start: async (source, port, register, mode) => {
+      const core = await startLocalProxyCore(
         resolve('extra/relay/core'),
         source,
         port,
@@ -321,10 +323,21 @@ try {
           register(stop)
         },
         mode
-      ),
+      )
+      const testDelay = core.testDelay
+      core.testDelay = async (...args) => {
+        testDelayCalls++
+        if (!testDelay) throw new Error('fixture core testDelay unavailable')
+        return testDelay(...args)
+      }
+      return core
+    },
     confirmStart: async () => true,
     confirmStop: async () => true,
-    confirmTest: async () => allowTest
+    confirmTest: async () => {
+      confirmTestCalls++
+      return true
+    }
   })
   const prepared = await service.prepare({ profile: selection, httpPort: await freeFixturePort() })
   const started = await service.action({ action: 'start', evidenceId: prepared.evidenceId }),
@@ -344,16 +357,16 @@ try {
       .groups[0].health?.every((h) => !!h.at && typeof h.delay === 'number' && h.delay > 0) === true
   )
   const before = host.stats().originRequests
+  let manualTestBlocked = false
+  try {
+    await service.action({ action: 'delay', instanceId: id, group: 'Auto', member: 'NodeB' })
+  } catch (error) {
+    manualTestBlocked = error instanceof Error && error.message === ownedHealthTestPolicy.reason
+  }
+  check('App service refuses manual health tests on the active core', manualTestBlocked)
   check(
-    'native test confirmation cancellation sends no probe',
-    (await service.action({ action: 'delay', instanceId: id, group: 'Auto', member: 'NodeB' }))
-      .status === 'cancelled' && host.stats().originRequests === before
-  )
-  allowTest = true
-  check(
-    'App service manual provider test works',
-    (await service.action({ action: 'delay', instanceId: id, group: 'Auto', member: 'NodeB' }))
-      .status === 'tested'
+    'disabled manual health test invokes neither confirmation nor core probe',
+    confirmTestCalls === 0 && testDelayCalls === 0 && host.stats().originRequests === before
   )
   check(
     'App service fixes automatic group using fresh GET',

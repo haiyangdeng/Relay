@@ -19,7 +19,9 @@ describe('Joint Code configuration presentation', () => {
     )
     expect(markup).toContain('JSON 草稿不写入实际设置')
     expect(markup).toMatch(/<button>备份并配置<\/button>/)
-    expect(markup).toContain('不依赖旧助手 App')
+    expect(markup).toContain('入口随 Relay 打包，使用本次 Relay 已核实的专用 HTTP')
+    expect(markup).toContain('仅复用代理与资料状态匹配的窗口')
+    expect(markup).toContain('修改浏览器配置前需退出该专用资料')
   })
   it('shows missing helper and active browser instead of a ready configuration', () => {
     const preparation = {

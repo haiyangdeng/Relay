@@ -26,6 +26,14 @@ export function selectedSystemProxyServices(
   return selected === undefined ? [...available] : selected.filter((id) => available.has(id))
 }
 
+function canReapplyDetachedSystemProxy(report: SystemProxyReport): boolean {
+  return (
+    !!report.recordID &&
+    report.canRetireDetached === true &&
+    (report.status === 'pending' || report.status === 'conflict')
+  )
+}
+
 export function canPrepareSystemProxy(report?: SystemProxyReport): boolean {
   if (!report) return false
   // inspect has no target settings and deliberately returns canApply=false.
@@ -39,6 +47,9 @@ export function canPrepareSystemProxy(report?: SystemProxyReport): boolean {
       return !!report.recordID && report.canRestore
     case 'rolledBack':
       return !report.recordID || report.canRestore
+    case 'pending':
+    case 'conflict':
+      return canReapplyDetachedSystemProxy(report)
     default:
       return false
   }
@@ -71,7 +82,9 @@ export async function submitSystemProxy(
   onPreparation(plan)
   if (
     plan.action !== action ||
-    !(action === 'apply' ? plan.report.canApply : plan.report.canRestore)
+    !(action === 'apply'
+      ? plan.report.canApply || canReapplyDetachedSystemProxy(plan.report)
+      : plan.report.canRestore)
   ) {
     await invoke('relaySystemProxyCancel', { evidenceId: plan.evidenceId })
     throw new Error('系统代理状态需要核对，请刷新后处理冲突。')

@@ -262,7 +262,7 @@ export function useRelayGeoData({
     setDirty(true)
     setRequiresRead(false)
     setResult(undefined)
-    setNotice('新来源草稿使用原版默认URL；尚未保存、获取或授权。')
+    setNotice('新来源草稿使用官方数据库地址；尚未保存、获取或授权。')
   }
   const discard = async () => {
     if (busy || owned.current) return

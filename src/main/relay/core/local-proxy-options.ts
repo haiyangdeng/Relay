@@ -82,7 +82,8 @@ export function validateLocalProxySourceOptions(source: Map): void {
       stripProfileControls(source['external-controller']) !== source['external-controller'])
   )
     invalid('external-controller')
-  if (source['allow-lan'] !== undefined && source['allow-lan'] !== false) invalid('allow-lan')
+  if (source['allow-lan'] !== undefined && typeof source['allow-lan'] !== 'boolean')
+    invalid('allow-lan')
   if (
     source['bind-address'] !== undefined &&
     (typeof source['bind-address'] !== 'string' ||

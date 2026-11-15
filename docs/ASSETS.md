@@ -36,7 +36,7 @@ These hashes identify the retained assets; hashes alone do not establish permiss
 | File                                     | SHA-256                                                            |
 | ---------------------------------------- | ------------------------------------------------------------------ |
 | `src/renderer/src/assets/relay-icon.png` | `32ab69a4db74f1e066d7b0e70fe868cb2d6bb343d7d7c1f2cf8bb0bc5fc14f07` |
-| `build/relay-app-icon-source.png`        | `796bec473fc040a7ed55733ef3b8e8350d711c61646a006c93e0559825b2bc58` |
+| `build/relay-app-icon-source.png`        | `c67c6d3300f92a47dfbec81f83ce4f70fadd726bbe9a5592f0d5103684140359` |
 | `resources/relay-tray.svg`               | `ad6502f0ee84736f3f374722eda5780431c145e068e85e0326c61ee515fda634` |
 
 ## 2026-11-12 visual refinement
@@ -52,3 +52,9 @@ Dock edit prompt (built-in tool):
 Hero cutout prompt (built-in tool, source `src/renderer/src/assets/relay-icon.png`, transparent background enabled):
 
 > Use case: background-extraction. Edit target: supplied Relay squirrel app icon. Create a clean transparent-background PNG cutout of only this exact lavender-blue and cream flying squirrel. Change only the background: remove the dark navy square background, including the gaps between its tail, arms and body. Preserve the squirrel's identity, facial expression, silhouette, pose, proportions, lavender-blue and cream palette, and clean illustration style exactly. Center the complete squirrel with a small even transparent margin; do not crop ears, arms, feet or tail. Actual alpha transparency, not a checkerboard picture. No text, no badge, no square plate, no border, no extra objects or shadow background. This will sit above a separately drawn blue curved background in the Relay desktop app hero.
+
+## 2026-11-15 application icon size
+
+The built-in image editing tool reduced the transparent outer margin of the existing rounded app icon. Both Intel and Apple Silicon packages use the same regenerated `build/relay.icns`; `site/assets/app-icon.png` mirrors the generated 1024 px icon. In-app artwork and menu-bar icons are unchanged.
+
+Edit prompt: enlarge the existing navy tile and squirrel together to occupy 93% of a square canvas, centered, with a transparent exterior. Preserve the character, pose, internal proportions, colors and gradients; add no text, border or objects, and do not crop the tile.

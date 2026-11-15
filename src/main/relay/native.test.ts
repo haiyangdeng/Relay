@@ -339,6 +339,44 @@ describe('Fixed native command bridge', () => {
       diagnoseNative('/fixture/RelayNative', { ...settings, path: '/injected' }, context)
     ).toThrow()
   })
+  it('requires owned native metadata without relaxing the legacy runtime-claim validator', async () => {
+    const report = readOnlyFixture()
+    report.owned = {
+      appVersion: '1.0.0',
+      appBuild: '7',
+      browsers: [{ bundleId: 'com.google.Chrome', version: '100.0', profile: 'relay-private' }]
+    }
+    const end = vi.fn()
+    mock.execFile.mockImplementation((_path, _args, _options, done) => {
+      queueMicrotask(() => done(null, JSON.stringify(report)))
+      return { stdin: { end, on: vi.fn() } }
+    })
+    const context = {
+      home: '/fixture/home',
+      clashRoot: '/unused-legacy',
+      browserProfile: '/fixture/browser',
+      browserExecutable: '/fixture/RelayBrowser',
+      owned: {
+        systemHTTPPort: 18191,
+        systemSOCKSPort: 18191,
+        codeHTTPPort: 17891,
+        dedicatedSOCKSPort: 17890
+      }
+    }
+    const settings = { httpPort: 17891, node: 'Relay 当前实例', internalExceptions: '' }
+    expect((await diagnoseNative('/fixture/RelayNative', settings, context)).owned).toEqual(
+      report.owned
+    )
+    const webrtc = report.checks.find((row) => row.id === 'webrtc')
+    if (!webrtc) throw new Error('Missing WebRTC fixture')
+    webrtc.state = 'verifiedConfiguration'
+    await expect(diagnoseNative('/fixture/RelayNative', settings, context)).rejects.toThrow(
+      '状态无效'
+    )
+    webrtc.state = 'pending'
+    delete report.owned
+    await expect(diagnoseNative('/fixture/RelayNative', settings, context)).rejects.toThrow()
+  })
   it('passes the trusted core metadata to a text-only guard plan operation', async () => {
     const end = vi.fn()
     mock.execFile.mockImplementation((_path, _args, _options, done) => {

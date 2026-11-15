@@ -52,6 +52,7 @@ export function createClashBackend(adapters: {
   notify(): void
   readSelection?(): Promise<RelayProfileSelection | undefined>
   rememberSelection?(selection: RelayProfileSelection): Promise<void>
+  beforeProfileChange?(): Promise<void>
 }) {
   let selected: RelayProfileSelection | undefined
   let loaded = false,
@@ -198,6 +199,7 @@ export function createClashBackend(adapters: {
             )
               throw new Error('本次代理仍在运行且未具备可确认的热载条件；没有隐式停止或重启。')
             if (state.profileId === stored.profile.id) return
+            await adapters.beforeProfileChange?.()
             const preparation = await adapters.local.prepareReload({
               profile: { id: stored.profile.id, sha256: stored.profile.sha256 },
               httpPort: state.httpPort,
@@ -218,7 +220,7 @@ export function createClashBackend(adapters: {
             if (result.status === 'cancelled') return
             if (result.status !== 'reloaded')
               throw new Error('热载结果未确认，保留本次实例和证据；没有自动重启。')
-          }
+          } else await adapters.beforeProfileChange?.()
           selected = { id: stored.profile.id, sha256: stored.profile.sha256 }
           loaded = true
           try {

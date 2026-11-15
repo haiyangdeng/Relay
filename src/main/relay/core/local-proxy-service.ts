@@ -28,7 +28,7 @@ import {
 } from '../../../shared/relay/local-proxy-ports'
 import type { RelayProfileSelection } from '../../../shared/relay/runtime'
 import type { RuntimeLogSnapshot } from '../../../shared/relay/observability'
-import type { RuntimeProfileRead } from '../configuration/edit-service'
+import { MissingRuntimeGeoDataError, type RuntimeProfileRead } from '../configuration/edit-service'
 import type { RuntimeAsset } from '../configuration/bindings'
 import { profileHash } from '../profiles/source'
 import { groupTypes } from '../profiles/groups'
@@ -82,6 +82,10 @@ export function createLocalProxyService(adapters: {
     selection: RelayProfileSelection,
     resolverMode?: LocalResolverMode
   ): Promise<RuntimeProfileRead>
+  resolvePinnedNode?(
+    stored: RuntimeProfileRead,
+    plan: DedicatedListenerPlan
+  ): Promise<{ node: Record<string, unknown>; revision: string }>
   inspect(): Promise<CoreStoreSnapshot>
   resources(
     lifetime?: LocalProxyLifetime,
@@ -104,7 +108,8 @@ export function createLocalProxyService(adapters: {
     lifetime?: LocalProxyLifetime,
     logLevel?: LocalCoreLogLevel,
     runtimeAssets?: readonly RuntimeAsset[],
-    ports?: LocalProxyPorts
+    ports?: LocalProxyPorts,
+    pinnedNode?: Record<string, unknown>
   ): Promise<RelayOwnedCore>
   confirmStart(preparation: LocalProxyPreparation): Promise<boolean>
   confirmStop(state: LocalProxyState, reason: 'stop' | 'quit'): Promise<boolean>
@@ -180,6 +185,7 @@ export function createLocalProxyService(adapters: {
         report: LocalProxyPreparation
         selection: RelayProfileSelection
         sourceRevision: string
+        pinnedNodeRevision?: string
         coreRevision: string
         resourceSHA256: string
         at: number
@@ -190,6 +196,7 @@ export function createLocalProxyService(adapters: {
         report: LocalReloadPreparation
         selection: RelayProfileSelection
         revision: string
+        pinnedNodeRevision?: string
         configuration: string
         built: ReturnType<typeof localProxyConfiguration>
         at: number
@@ -767,6 +774,9 @@ export function createLocalProxyService(adapters: {
         actionGeneration = generation
       try {
         const stored = await adapters.read(selected.profile, selected.resolverMode),
+          pin = selected.dedicated
+            ? await adapters.resolvePinnedNode?.(stored, selected.dedicated)
+            : undefined,
           config = await session.read('configs')
         if (
           closing ||
@@ -798,7 +808,8 @@ export function createLocalProxyService(adapters: {
             selected.dedicated,
             logLevel,
             stored.runtimeAssets,
-            selected.ports
+            selected.ports,
+            pin?.node
           ),
           candidate: Record<string, unknown> = JSON.parse(built.configuration)
         candidate.mode = mode
@@ -822,6 +833,7 @@ export function createLocalProxyService(adapters: {
           report,
           selection: selected.profile,
           revision: stored.revision,
+          pinnedNodeRevision: pin?.revision,
           configuration,
           built,
           at: now(),
@@ -865,12 +877,16 @@ export function createLocalProxyService(adapters: {
           return result('cancelled')
         }
         const stored = await adapters.read(current.selection, current.built.resolution.mode),
+          pin = current.built.dedicated
+            ? await adapters.resolvePinnedNode?.(stored, current.built.dedicated)
+            : undefined,
           config = await session.read('configs')
         const previous: Record<string, unknown> = JSON.parse(runtimeConfiguration ?? '{}')
         previous.mode = validateCoreMode(config.mode)
         if (
           !fresh() ||
           stored.revision !== current.revision ||
+          pin?.revision !== current.pinnedNodeRevision ||
           !compatibleLocalProxyGeoAssets(runtimeAssets, stored.runtimeAssets) ||
           profileHash(JSON.stringify(previous)) !== current.report.previousSHA256 ||
           !ports ||
@@ -965,7 +981,7 @@ export function createLocalProxyService(adapters: {
         end()
       }
     },
-    async inspectLive(): Promise<
+    async inspectLive(includeResource = false): Promise<
       | {
           instanceId: string
           config: Record<string, unknown>
@@ -974,6 +990,7 @@ export function createLocalProxyService(adapters: {
           providers: Record<string, unknown>
           version: Record<string, unknown>
           rules: Record<string, unknown>
+          coreSHA256?: string
         }
       | undefined
     > {
@@ -990,6 +1007,9 @@ export function createLocalProxyService(adapters: {
           current.read('version'),
           current.read('rules')
         ])
+        const resource = includeResource
+          ? await adapters.resources(lifetime, runtimeAssets)
+          : undefined
         if (
           session !== current ||
           instanceId !== id ||
@@ -1000,12 +1020,26 @@ export function createLocalProxyService(adapters: {
         )
           throw new Error()
         observedMode = validateCoreMode(config.mode)
-        if (!ports || !localProxyPortsMatch(config, ports) || version.version !== current.version)
+        if (
+          !ports ||
+          !localProxyPortsMatch(config, ports) ||
+          version.version !== current.version ||
+          (resource && resource.version !== current.version)
+        )
           throw new Error()
         if (!runtimeConfiguration) throw new Error()
         const runtime: Record<string, unknown> = JSON.parse(runtimeConfiguration)
         runtime.mode = config.mode
-        return { instanceId: id, config, runtime, proxies, providers, version, rules }
+        return {
+          instanceId: id,
+          config,
+          runtime,
+          proxies,
+          providers,
+          version,
+          rules,
+          ...(resource ? { coreSHA256: resource.sha256 } : {})
+        }
       } catch {
         observedMode = undefined
         throw new Error('本次自有核心状态未能完整读取。')
@@ -1027,6 +1061,9 @@ export function createLocalProxyService(adapters: {
       const current = ++generation
       try {
         const stored = await adapters.read(input.profile, input.resolverMode)
+        const pin = input.dedicated
+          ? await adapters.resolvePinnedNode?.(stored, input.dedicated)
+          : undefined
         const [snapshot, resource] = await Promise.all([
           adapters.inspect(),
           adapters.resources(input.lifetime, stored.runtimeAssets)
@@ -1038,7 +1075,8 @@ export function createLocalProxyService(adapters: {
           input.dedicated,
           input.logLevel,
           stored.runtimeAssets,
-          preparedPorts
+          preparedPorts,
+          pin?.node
         )
         if (input.lifetime === 'persistent') {
           if (input.resolverMode !== 'off' || input.dedicated || stored.runtimeAssets?.length)
@@ -1102,12 +1140,14 @@ export function createLocalProxyService(adapters: {
             report,
             selection: input.profile,
             sourceRevision: stored.revision,
+            pinnedNodeRevision: pin?.revision,
             coreRevision: snapshot.revision,
             resourceSHA256: resource.sha256,
             at: now()
           }
         return structuredClone(report)
-      } catch {
+      } catch (error) {
+        if (error instanceof MissingRuntimeGeoDataError) throw error
         throw new Error(
           '本地代理准备未完成：请核对已支持的节点／规则、DNS／hosts选项和显式DNS引导地址。未启动或更改原配置。'
         )
@@ -1513,7 +1553,15 @@ export function createLocalProxyService(adapters: {
         }
         assertContext?.()
         const stored = await adapters.read(current.selection, current.report.resolverMode)
-        if (!fresh() || stored.revision !== current.sourceRevision) throw new Error()
+        const pin = current.report.dedicated
+          ? await adapters.resolvePinnedNode?.(stored, current.report.dedicated)
+          : undefined
+        if (
+          !fresh() ||
+          stored.revision !== current.sourceRevision ||
+          pin?.revision !== current.pinnedNodeRevision
+        )
+          throw new Error()
         const resource = await adapters.resources(current.report.lifetime, stored.runtimeAssets)
         if (
           resource.sha256 !== current.resourceSHA256 ||
@@ -1528,7 +1576,8 @@ export function createLocalProxyService(adapters: {
           current.report.dedicated,
           current.report.logLevel,
           stored.runtimeAssets,
-          current.report.ports
+          current.report.ports,
+          pin?.node
         )
         if (profileHash(built.configuration) !== current.report.runtimeSHA256) throw new Error()
         assertContext?.()
@@ -1601,7 +1650,8 @@ export function createLocalProxyService(adapters: {
           lifetime,
           logLevel,
           stored.runtimeAssets,
-          ports
+          ports,
+          pin?.node
         )
         cleanup ??= () => session?.stop() ?? Promise.resolve()
         assertContext?.()

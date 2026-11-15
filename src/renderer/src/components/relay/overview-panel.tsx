@@ -78,7 +78,6 @@ export function RelayOverviewPanel({
           <h1>Relay</h1>
           <p>管理配置、代理连接与客户端工作流。</p>
           <div className="relay-pills">
-            <span>自用版</span>
             <span>配置与运行状态以本次读取结果为准</span>
           </div>
         </div>

@@ -21,6 +21,27 @@ function fixture() {
 }
 
 describe('Read-only observation and verified node evidence', () => {
+  it('uses an owned observation without asking the legacy reader or accepting renderer settings', async () => {
+    const f = fixture()
+    const ownedObserve = vi.fn(async () => ({
+      parameters: settings,
+      report: readOnlyFixture(),
+      owned: {
+        ports: {
+          systemHTTPPort: null,
+          systemSOCKSPort: null,
+          codeHTTPPort: null,
+          dedicatedSOCKSPort: null
+        },
+        running: false,
+        external: { status: 'missing' as const, bindingMatches: false, browserMatches: [] }
+      }
+    }))
+    const service = createDiagnosticService({ ...f.adapters, ownedObserve })
+    expect((await service.observe(undefined)).source).toBe('relay-owned')
+    expect(f.adapters.observe).not.toHaveBeenCalled()
+    await expect(service.observe(settings)).rejects.toThrow('不接受')
+  })
   it('returns configuration evidence with runtime checks pending and no protection claim', async () => {
     const { service, adapters } = fixture()
     const observation = await service.observe(settings)

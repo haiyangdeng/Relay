@@ -19,6 +19,17 @@ struct RelayDiagnosticContext: Decodable {
     let clashRoot: String
     let browserProfile: String
     let browserExecutable: String
+    var owned: RelayOwnedDiagnosticPorts? = nil
+}
+struct RelayDiagnosticBrowser: Codable {
+    let bundleId: String
+    let version: String
+    let profile: String
+}
+struct RelayOwnedDiagnosticMetadata: Codable {
+    let appVersion: String
+    let appBuild: String
+    let browsers: [RelayDiagnosticBrowser]
 }
 struct RelayDiagnosticInput: Decodable {
     let settings: RelayPreferences
@@ -44,17 +55,19 @@ struct RelayReadOnlyReport: Codable {
     let readOnly: Bool
     let guardEnabled: Bool
     let warnings: [String]
+    var owned: RelayOwnedDiagnosticMetadata? = nil
 }
 
 enum RelayReadOnly {
     static func report(backend: NetworkConfiguration, settings: AssistantSettings,
                        environment: DiagnosticEnvironment, timezone: String,
-                       preferredLanguages: [String], policyReviewKeys: [String] = []) -> RelayReadOnlyReport {
+                       preferredLanguages: [String], policyReviewKeys: [String] = [],
+                       owned: RelayOwnedDiagnosticPorts? = nil) -> RelayReadOnlyReport {
         // One policy observation per report; count and individual rows must agree.
         let policies = environment.edgePolicies()
         var captured = environment
         captured.edgePolicies = { policies }
-        var snapshot = backend.diagnose(settings, environment: captured)
+        var snapshot = backend.diagnose(settings, environment: captured, owned: owned)
         let checks = CriticalDiagnostics.rows(snapshot).map { item -> CriticalCheck in
             guard item.id == "browser-config", !policyReviewKeys.isEmpty else { return item }
             return CriticalCheck(id: item.id, title: item.title, state: .attention,
@@ -69,13 +82,15 @@ enum RelayReadOnly {
             edgePolicies: policies.map { RelayEdgePolicy(key: $0.key, forced: $0.forced, matches: $0.matches, valid: $0.valid) },
             edgePolicyReviewKeys: policyReviewKeys,
             timezone: timezone, preferredLanguages: preferredLanguages, readOnly: true, guardEnabled: false,
-            warnings: ["只读核对现有 Clash 来源；没有接管、写入、重载或停止核心。",
+            warnings: [owned == nil ? "只读核对现有 Clash 来源；没有接管、写入、重载或停止核心。" :
+                "仅核对 Relay 客户端配置；自有核心归属由 Main 另行核对，没有读取 Clash 配置或控制接口。",
                 "端口和配置匹配不代表实际出口、DNS、WebRTC、模型请求或禁止直连已验收。",
                 "时区和语言仅作环境参考，不自动修改，也不计算账号风险分。"])
     }
 
     static func live(_ input: RelayDiagnosticInput) throws -> RelayReadOnlyReport {
         let context = input.context
+        try context.owned?.validate()
         let backend = NetworkConfiguration(home: URL(fileURLWithPath: context.home, isDirectory: true),
             diagnosticPaths: (URL(fileURLWithPath: context.clashRoot, isDirectory: true),
                               URL(fileURLWithPath: context.browserProfile, isDirectory: true)))
@@ -83,9 +98,23 @@ enum RelayReadOnly {
         var environment = backend.liveDiagnosticEnvironment(browserExecutable: executable)
         // A missing bundled helper is never reported as a working browser entry.
         environment.browserExecutable = executable
-        return report(backend: backend, settings: try input.settings.settings(), environment: environment,
+        var result = report(backend: backend, settings: try input.settings.settings(), environment: environment,
             timezone: TimeZone.current.identifier, preferredLanguages: Locale.preferredLanguages,
-            policyReviewKeys: RelayEdgeTools.additionalPolicyKeys())
+            policyReviewKeys: RelayEdgeTools.additionalPolicyKeys(), owned: context.owned)
+        if context.owned != nil {
+            let root = RelayGuardReadiness.applicationRoot(URL(fileURLWithPath: CommandLine.arguments[0]))
+            let app = root.flatMap { Bundle(url: $0) }
+            let browsers = [("/Applications/Microsoft Edge.app", "com.microsoft.edgemac", "edge-default"),
+                            ("/Applications/Google Chrome.app", "com.google.Chrome", "relay-private")].compactMap { path, id, profile -> RelayDiagnosticBrowser? in
+                guard let bundle = Bundle(path: path), bundle.bundleIdentifier == id,
+                      let version = bundle.infoDictionary?["CFBundleShortVersionString"] as? String else { return nil }
+                return RelayDiagnosticBrowser(bundleId: id, version: version, profile: profile)
+            }
+            result.owned = RelayOwnedDiagnosticMetadata(
+                appVersion: app?.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unpackaged",
+                appBuild: app?.infoDictionary?["CFBundleVersion"] as? String ?? "unpackaged", browsers: browsers)
+        }
+        return result
     }
 
     static func encode<T: Encodable>(_ value: T) throws -> String {

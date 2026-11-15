@@ -59,7 +59,7 @@ import Darwin
         func step(_ name: String) throws { events.append(name); if failStage == name { throw AssistantError("fixture failure") } }
         let environment = RelayAutomaticUninstall.CleanupEnvironment(assertAuthorized: { try step("authorize") },
             restoreProxy: { try step("proxy") }, restoreDesktop: { try step("desktop") }, retireCore: { try step("core") },
-            restoreClients: { try step("clients") }, assertIdle: { try step("idle") }, removeCredentials: { try step("credentials") }, removeTemporaryLease: { try step("temporary") }, remove: { try step("remove:" + $0) })
+            restoreClients: { try step("clients") }, assertIdle: { try step("idle") }, clearPreferences: { try step("preferences") }, removeCredentials: { try step("credentials") }, removeTemporaryLease: { try step("temporary") }, remove: { try step("remove:" + $0) })
         failStage = "desktop"
         do { _ = try await RelayAutomaticUninstall.cleanup(environment); check(false, "recovery failure propagated") }
         catch { check(!events.contains(where: { $0.hasPrefix("remove:") }), "no files deleted after recovery failure") }
@@ -67,7 +67,42 @@ import Darwin
         check(try await RelayAutomaticUninstall.cleanup(environment).status == "cleaned", "complete recovery reaches cleaned")
         check(events.last == "remove:Library/Application Support/Relay-Preview", "recovery evidence removed last")
         check(events.firstIndex(of: "proxy")! < events.firstIndex(of: "clients")!, "proxy detached before client recovery")
-        check(events.filter { $0 == "authorize" }.count == RelayAutomaticUninstall.cleanupPaths.count + 3, "intent checked before each deletion")
+        check(events.filter { $0 == "authorize" }.count == RelayAutomaticUninstall.cleanupPaths.count + 4, "intent checked before each deletion")
+
+        check(events.firstIndex(of: "preferences")! < events.firstIndex(of: "credentials")!, "preference caches cleared before credential and namespace deletion")
+        events = []; failStage = "preferences"
+        do { _ = try await RelayAutomaticUninstall.cleanup(environment); check(false, "preference clear failure propagated") }
+        catch { check(!events.contains("credentials") && !events.contains(where: { $0.hasPrefix("remove:") }), "preference failure preserves credentials and recovery namespaces") }
+        failStage = nil
+
+        let domains = RelayAutomaticUninstall.preferenceDomains
+        check(domains == ["local.relay.network.preview", "local.relay.browser"], "only two fixed Relay preference domains admitted")
+        var cached = [domains[0]: ["SKPurchaseIntentUpdatesLastChecked"], domains[1]: ["window-state"], "foreign.domain": ["keep"]]
+        var preferencesEvents: [String] = [], authorizationChecks = 0
+        let preferences = RelayAutomaticUninstall.PreferenceEnvironment(synchronize: { domain in
+            preferencesEvents.append("sync:" + domain); return true
+        }, keys: { domain in preferencesEvents.append("keys:" + domain); return cached[domain] ?? [] }, removeKeys: { domain, keys in
+            preferencesEvents.append("remove:" + domain); cached[domain] = (cached[domain] ?? []).filter { !keys.contains($0) }
+        })
+        try RelayAutomaticUninstall.clearPreferences(preferences, assertAuthorized: { authorizationChecks += 1 })
+        check(domains.allSatisfy { cached[$0]?.isEmpty == true } && cached["foreign.domain"] == ["keep"], "only owned cached keys cleared, foreign domain preserved")
+        check(authorizationChecks == 4, "preference clear rechecks authorization before sync and write for each domain")
+        check(preferencesEvents == domains.flatMap { ["sync:" + $0, "keys:" + $0, "remove:" + $0, "sync:" + $0, "keys:" + $0] }, "preference deletion flushes and confirms exact domain keys before file deletion")
+        try RelayAutomaticUninstall.clearPreferences(preferences, assertAuthorized: {})
+        check(domains.allSatisfy { cached[$0]?.isEmpty == true }, "empty preference domains are idempotent")
+        for failAt in [1, 2, 3, 4] {
+            var syncs = 0, removed: [String] = []
+            let failing = RelayAutomaticUninstall.PreferenceEnvironment(synchronize: { _ in syncs += 1; return syncs != failAt },
+                keys: { _ in [] }, removeKeys: { domain, _ in removed.append(domain) })
+            rejects("preference sync failure \(failAt) propagated") { try RelayAutomaticUninstall.clearPreferences(failing, assertAuthorized: {}) }
+            check(syncs == failAt && removed.count == failAt / 2, "sync failure stops further preference effects \(failAt)")
+        }
+        var deniedEffects = 0
+        let denied = RelayAutomaticUninstall.PreferenceEnvironment(synchronize: { _ in deniedEffects += 1; return true }, keys: { _ in [] }, removeKeys: { _, _ in deniedEffects += 1 })
+        rejects("preference authority failure precedes every effect") { try RelayAutomaticUninstall.clearPreferences(denied, assertAuthorized: { throw AssistantError("denied") }) }
+        check(deniedEffects == 0, "denied preference authority has no OS effect")
+        let retained = RelayAutomaticUninstall.PreferenceEnvironment(synchronize: { _ in true }, keys: { _ in ["retained"] }, removeKeys: { _, _ in })
+        rejects("preference cache remaining after sync is not success") { try RelayAutomaticUninstall.clearPreferences(retained, assertAuthorized: {}) }
 
         let context = RelayStateContext(home: home.path, stateRoot: home.appendingPathComponent("Library/Application Support/Relay-Preview").path)
         let store = try RelayPreferenceStore(context), client = home.appendingPathComponent(".claude/settings.json")
@@ -167,6 +202,69 @@ import Darwin
         check(fm.fileExists(atPath: external.path), "refused root preserves external content")
         try RelayAutomaticUninstall.removeOwnedPath("Library/Logs/Relay", home: home, uid: getuid())
         check(true, "absent optional namespace is idempotent")
+
+        let cacheHome = base.appendingPathComponent("browser-cache-home")
+        let browserCache = cacheHome.appendingPathComponent("Library/Caches/Relay-Preview")
+        let browserCacheFile = browserCache.appendingPathComponent("Private Browser/Default/Cache/value")
+        let ordinaryCache = cacheHome.appendingPathComponent("Library/Caches/Google/Chrome/Default/Cache/value")
+        let siblingCache = cacheHome.appendingPathComponent("Library/Caches/Relay-Preview-other/value")
+        for file in [browserCacheFile, ordinaryCache, siblingCache] {
+            try directory(file.deletingLastPathComponent())
+            try NetworkConfiguration.safeWrite(Data("fixture cache".utf8), to: file)
+        }
+        _ = try await RelayAutomaticUninstall.cleanup(.init(assertAuthorized: {}, restoreProxy: {}, restoreDesktop: {},
+            retireCore: {}, restoreClients: {}, assertIdle: {}, clearPreferences: {}, removeCredentials: {},
+            removeTemporaryLease: {}, remove: { try RelayAutomaticUninstall.removeOwnedPath($0, home: cacheHome, uid: getuid()) }))
+        check(!fm.fileExists(atPath: browserCache.path), "automatic uninstall removes derived private browser cache namespace")
+        check(try Data(contentsOf: ordinaryCache) == Data("fixture cache".utf8), "ordinary Chrome cache preserved")
+        check(try Data(contentsOf: siblingCache) == Data("fixture cache".utf8), "similar-name sibling cache preserved")
+        if fm.fileExists(atPath: browserCache.path) { try fm.removeItem(at: browserCache) }
+        try fm.createSymbolicLink(at: browserCache, withDestinationURL: ordinaryCache.deletingLastPathComponent())
+        rejects("private browser cache root symlink refused") { try RelayAutomaticUninstall.removeOwnedPath("Library/Caches/Relay-Preview", home: cacheHome, uid: getuid()) }
+        check(try Data(contentsOf: ordinaryCache) == Data("fixture cache".utf8), "refused private cache symlink preserves ordinary Chrome cache")
+
+        let temporarySize = confstr(_CS_DARWIN_USER_TEMP_DIR, nil, 0)
+        guard temporarySize > 1, temporarySize <= 4096 else { throw AssistantError("fixture temporary directory unavailable") }
+        var temporaryBytes = [CChar](repeating: 0, count: temporarySize)
+        guard confstr(_CS_DARWIN_USER_TEMP_DIR, &temporaryBytes, temporaryBytes.count) == temporarySize else { throw AssistantError("fixture temporary directory changed") }
+        let temporaryParent = URL(fileURLWithPath: NetworkConfiguration.canonicalPath(URL(fileURLWithPath: String(cString: temporaryBytes))), isDirectory: true)
+        let temporaryHome = temporaryParent.appendingPathComponent("relay-uninstall-temporary-" + UUID().uuidString)
+        defer { try? fm.removeItem(at: temporaryHome) }
+        try directory(temporaryHome)
+        let lease = temporaryHome.appendingPathComponent(".rlt1"), sibling = temporaryHome.appendingPathComponent("keep-sibling")
+        try NetworkConfiguration.safeWrite(Data("keep sibling".utf8), to: sibling)
+        try fm.setAttributes([.posixPermissions: 0o777], ofItemAtPath: temporaryHome.path)
+        try RelayAutomaticUninstall.removeOwnedPath(".rlt1", home: temporaryHome, uid: getuid(), temporary: true)
+        var temporaryInfo = stat(); _ = lstat(temporaryHome.path, &temporaryInfo)
+        check(temporaryInfo.st_mode & 0o7777 == 0o777 && !fm.fileExists(atPath: lease.path), "absent temporary lease succeeds without changing writable parent")
+        check(try Data(contentsOf: sibling) == Data("keep sibling".utf8), "absent temporary lease preserves sibling content")
+        rejects("absent temporary lease rejects wrong owner") { try RelayAutomaticUninstall.removeOwnedPath(".rlt1", home: temporaryHome, uid: getuid() + 1, temporary: true) }
+        rejects("writable parent bypass is limited to temporary lease") { try RelayAutomaticUninstall.removeOwnedPath("Library/Logs/Relay", home: temporaryHome, uid: getuid()) }
+
+        try Data("keep lease file".utf8).write(to: lease)
+        rejects("writable temporary parent retains lease file") { try RelayAutomaticUninstall.removeOwnedPath(".rlt1", home: temporaryHome, uid: getuid(), temporary: true) }
+        check(try Data(contentsOf: lease) == Data("keep lease file".utf8), "refused temporary lease file is unchanged")
+        try fm.removeItem(at: lease)
+        try directory(lease)
+        try Data("keep lease child".utf8).write(to: lease.appendingPathComponent("child"))
+        rejects("writable temporary parent retains lease directory") { try RelayAutomaticUninstall.removeOwnedPath(".rlt1", home: temporaryHome, uid: getuid(), temporary: true) }
+        check(try Data(contentsOf: lease.appendingPathComponent("child")) == Data("keep lease child".utf8), "refused temporary lease directory is unchanged")
+        try fm.removeItem(at: lease)
+        try fm.createSymbolicLink(at: lease, withDestinationURL: sibling)
+        rejects("writable temporary parent retains lease symlink") { try RelayAutomaticUninstall.removeOwnedPath(".rlt1", home: temporaryHome, uid: getuid(), temporary: true) }
+        check(try fm.destinationOfSymbolicLink(atPath: lease.path) == sibling.path && Data(contentsOf: sibling) == Data("keep sibling".utf8), "refused temporary symlink and target are unchanged")
+        try fm.removeItem(at: lease)
+
+        let linkedParent = temporaryHome.appendingPathComponent("linked-parent")
+        try fm.createSymbolicLink(at: linkedParent, withDestinationURL: temporaryHome)
+        rejects("temporary parent symlink refused even without lease") { try RelayAutomaticUninstall.removeOwnedPath(".rlt1", home: linkedParent, uid: getuid(), temporary: true) }
+        try fm.removeItem(at: linkedParent)
+        try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: temporaryHome.path)
+        try directory(lease.appendingPathComponent("nested"))
+        try Data("lease".utf8).write(to: lease.appendingPathComponent("nested/value"))
+        try RelayAutomaticUninstall.removeOwnedPath(".rlt1", home: temporaryHome, uid: getuid(), temporary: true)
+        let siblingAfterDeletion = try Data(contentsOf: sibling)
+        check(!fm.fileExists(atPath: lease.path) && siblingAfterDeletion == Data("keep sibling".utf8), "private temporary parent permits owned lease deletion and preserves sibling")
     } catch { failures.append("fixture: " + error.localizedDescription) }
     if failures.isEmpty { print("Relay automatic uninstall: \(count) isolated checks passed"); return 0 }
     failures.forEach { print("FAIL: " + $0) }; return 1

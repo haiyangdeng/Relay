@@ -1,4 +1,5 @@
 import { join } from 'path'
+import type { OwnedDiagnosticPorts } from '../../shared/relay/diagnostic-evidence'
 
 export interface RelayStateContext {
   home: string
@@ -13,6 +14,7 @@ export interface RelayDiagnosticContext {
   clashRoot: string
   browserProfile: string
   browserExecutable: string
+  owned?: OwnedDiagnosticPorts
 }
 
 export function relayDiagnosticContext(

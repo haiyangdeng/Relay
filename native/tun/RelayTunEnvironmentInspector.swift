@@ -46,9 +46,10 @@ enum RelayTunEnvironmentInspector {
                                    "interfaceIndex": interfaceIndex, "scopeIndex": scopeIndex, "flags": flags] }
     }
     private struct CacheKey: Hashable {
+        let family: String
         let destination: String
         let scopeIndex: UInt32
-        init(_ route: RouteObservation) { destination = route.destination; scopeIndex = route.scopeIndex }
+        init(_ route: RouteObservation) { family = route.family; destination = route.destination; scopeIndex = route.scopeIndex }
     }
     private struct CachePath: Hashable {
         let interfaceName: String
@@ -140,7 +141,8 @@ enum RelayTunEnvironmentInspector {
             else { parents.append(row) }
         }
         let conflicts = Set(paths.filter { $0.value.count > 1 }.map(\.key))
-        return result.filter { !redundantIPv4Clone($0, parents: parents, conflicts: conflicts) }.sorted(by: routeLess)
+        let ipv4Normalized = result.filter { !redundantIPv4Clone($0, parents: parents, conflicts: conflicts) }
+        return normalizeIPv6Cache(ipv4Normalized).sorted(by: routeLess)
     }
 
     private static func routeLess(_ lhs: RouteObservation, _ rhs: RouteObservation) -> Bool {
@@ -204,8 +206,78 @@ enum RelayTunEnvironmentInspector {
             }
         }
     }
+    private static func ipv6Bytes(_ text: String) -> [UInt8]? {
+        var bytes = [UInt8](repeating: 0, count: 16)
+        guard text.withCString({ pointer in bytes.withUnsafeMutableBytes {
+            inet_pton(AF_INET6, pointer, $0.baseAddress)
+        } }) == 1, ipv6Text(bytes, scope: 0) == text else { return nil }
+        return bytes
+    }
+    private static func validIPv6Gateway(_ text: String, interfaceIndex: UInt32) -> Bool {
+        let parts = text.split(separator: "%", omittingEmptySubsequences: false)
+        guard parts.count == 1 || parts.count == 2, let bytes = ipv6Bytes(String(parts[0])) else { return false }
+        if parts.count == 2 {
+            guard let zone = UInt32(parts[1]), zone == interfaceIndex, String(zone) == parts[1] else { return false }
+        }
+        // Darwin may encode a link-local zone in bytes 2...3 instead of the
+        // sockaddr scope field. Preserve the original gateway string in path
+        // equality, and never cover a cache whose zone names another interface.
+        if bytes[0] == 0xfe && bytes[1] & 0xc0 == 0x80 {
+            let embedded = UInt32(bytes[2]) << 8 | UInt32(bytes[3])
+            if embedded != 0 && embedded != interfaceIndex { return false }
+        }
+        return true
+    }
+    private static func observedIPv6HostCache(_ child: RouteObservation) -> Bool {
+        let required = UInt32(RTF_UP | RTF_GATEWAY | RTF_HOST | RTF_WASCLONED | RTF_IFSCOPE)
+        let allowed = required | UInt32(RTF_IFREF | RTF_GLOBAL | RTF_PROTO3)
+        return child.family == Effects.Address.Family.ipv6.rawValue && child.prefix == 128 &&
+            child.flags & required == required && child.flags & ~allowed == 0 &&
+            child.interfaceIndex > 0 && child.scopeIndex == child.interfaceIndex &&
+            !child.interfaceName.hasPrefix("index-") && child.gatewayKind == "ip" &&
+            ipv6Bytes(child.destination) != nil && validIPv6Gateway(child.gateway, interfaceIndex: child.interfaceIndex)
+    }
+    private static func normalizeIPv6Cache(_ rows: [RouteObservation]) -> [RouteObservation] {
+        var parents: [RouteObservation] = [], paths: [CacheKey: Set<CachePath>] = [:]
+        for row in rows {
+            if observedIPv6HostCache(row) { paths[CacheKey(row), default: []].insert(CachePath(row)) }
+            else { parents.append(row) }
+        }
+        let conflicts = Set(paths.filter { $0.value.count > 1 }.map(\.key))
+        return rows.filter { !redundantIPv6Clone($0, parents: parents, conflicts: conflicts) }
+    }
+    private static func redundantIPv6Clone(_ child: RouteObservation, parents: [RouteObservation], conflicts: Set<CacheKey>) -> Bool {
+        guard observedIPv6HostCache(child), !conflicts.contains(CacheKey(child)),
+              let destination = ipv6Bytes(child.destination) else { return false }
+        let applicable = parents.filter { parent in
+            guard parent.family == child.family, parent.prefix <= 128,
+                  parent.scopeIndex == 0 || parent.scopeIndex == child.scopeIndex,
+                  let network = ipv6Bytes(parent.destination) else { return false }
+            let wholeBytes = Int(parent.prefix / 8), remainingBits = Int(parent.prefix % 8)
+            guard destination.prefix(wholeBytes) == network.prefix(wholeBytes) else { return false }
+            if remainingBits == 0 { return true }
+            let mask = UInt8.max << (8 - remainingBits)
+            return destination[wholeBytes] & mask == network[wholeBytes] & mask
+        }
+        let scopes = Dictionary(grouping: applicable, by: \.scopeIndex)
+        guard !scopes.isEmpty else { return false }
+        // Observed IPv6 RA defaults lack STATIC. PRCLONING positively identifies
+        // their cache-parent role; no redirect, unknown flag or competing path
+        // may be hidden. The IPv4 STATIC proof above remains unchanged.
+        let required = UInt32(RTF_UP | RTF_GATEWAY | RTF_PRCLONING)
+        let allowed = required | UInt32(RTF_STATIC | RTF_CLONING | RTF_IFSCOPE | RTF_GLOBAL)
+        return scopes.values.allSatisfy { candidates in
+            guard let longest = candidates.map(\.prefix).max(), longest < 128 else { return false }
+            return candidates.filter { $0.prefix == longest }.allSatisfy { parent in
+                parent.flags & required == required && parent.flags & ~allowed == 0 &&
+                    parent.interfaceName == child.interfaceName && parent.interfaceIndex == child.interfaceIndex &&
+                    parent.gatewayKind == child.gatewayKind && parent.gateway == child.gateway
+            }
+        }
+    }
     #if RELAY_TUN_INSPECTOR_TESTS
     static func testRouteLess(_ lhs: RouteObservation, _ rhs: RouteObservation) -> Bool { routeLess(lhs, rhs) }
+    static func testNormalizeIPv6Cache(_ rows: [RouteObservation]) -> [RouteObservation] { normalizeIPv6Cache(rows) }
     #endif
     /// Bounds-checked frame scan shared with the observer's contract: a
     /// malformed later record invalidates earlier ones.
@@ -317,6 +389,20 @@ enum RelayTunEnvironmentInspector {
               dns: { try liveStoreEntries(suffix: "DNS", global: "State:/Network/Global/DNS") },
               proxies: { try liveStoreEntries(suffix: "Proxies", global: "State:/Network/Global/Proxies") })
     }
+    static func linkIdentity(_ bytes: UnsafeRawBufferPointer) throws -> (index: UInt32, type: UInt8) {
+        // sockaddr_dl has a variable payload. Copy only the complete SDK header,
+        // then validate its declared bounds before using the typed fields.
+        guard let headerSize = MemoryLayout<sockaddr_dl>.offset(of: \.sdl_data),
+              bytes.count >= headerSize else { throw Failure.partial }
+        var link = sockaddr_dl()
+        withUnsafeMutableBytes(of: &link) { $0.copyBytes(from: bytes.prefix(headerSize)) }
+        let length = Int(link.sdl_len)
+        guard link.sdl_family == UInt8(AF_LINK), length >= headerSize, length <= bytes.count,
+              Int(link.sdl_nlen) + Int(link.sdl_alen) + Int(link.sdl_slen) <= length - headerSize else {
+            throw Failure.partial
+        }
+        return (UInt32(link.sdl_index), link.sdl_type)
+    }
     static func liveInterfaces() throws -> [InterfaceObservation] {
         var list: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&list) == 0, let first = list else { throw Failure.partial }
@@ -331,11 +417,9 @@ enum RelayTunEnvironmentInspector {
             let family = Int32(address.pointee.sa_family)
             var row = rows[name] ?? Raw()
             if family == AF_LINK {
-                var index: UInt16 = 0, type: UInt8 = 0
-                withUnsafeMutableBytes(of: &index) { $0.copyBytes(from: UnsafeRawBufferPointer(start: UnsafeRawPointer(address).advanced(by: 2), count: 2)) }
-                withUnsafeMutableBytes(of: &type) { $0.copyBytes(from: UnsafeRawBufferPointer(start: UnsafeRawPointer(address).advanced(by: 11), count: 1)) }
-                row.type = type
-                row.index = UInt32(index)
+                let identity = try linkIdentity(UnsafeRawBufferPointer(start: address, count: Int(address.pointee.sa_len)))
+                row.type = identity.type
+                row.index = identity.index
                 row.flags = UInt32(entry.pointee.ifa_flags)
                 if let data = entry.pointee.ifa_data {
                     var value = if_data()

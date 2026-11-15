@@ -17,6 +17,25 @@ spec.loader.exec_module(build)
 
 
 class PublicBuildTests(unittest.TestCase):
+    def test_both_app_architectures_use_noindex_staging(self):
+        for arch, directory in [('arm64', 'mac-arm64'), ('x64', 'mac')]:
+            self.assertEqual(build.app_path(arch), build.ROOT / 'release/apps.noindex' / directory / 'Relay.app')
+        config = (build.ROOT / 'electron-builder.relay.yml').read_text()
+        self.assertIn('  output: release/apps.noindex\n', config)
+        self.assertIn('buildVersion:', config)
+
+    def test_installer_consumes_noindex_app_for_each_architecture_without_moving_package_work(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); work = root / 'work'
+            for arch, directory in [('arm64', 'mac-arm64'), ('x64', 'mac')]:
+                with patch.multiple(build, ROOT=root, WORK=work), patch.object(build, 'prerequisites'), \
+                        patch.object(build, 'verify_packaged_app') as verify, patch.object(build, 'run') as run:
+                    build.installer(arch)
+                    self.assertEqual(verify.call_count, 2)
+                    self.assertEqual(run.call_args.args, ('python3', 'scripts/relay/build-integrated-installer.py',
+                        '--app', root / 'release/apps.noindex' / directory / 'Relay.app',
+                        '--helper-build', work / 'system-proxy-helper', '--output', work / ('installer-' + arch)))
+
     def test_all_dry_runs_are_read_only_and_fixed_version(self):
         before = [p.exists() for p in [build.WORK, build.RESOURCE, build.ROOT / 'release']]
         for stage in ['resources', 'package', 'installer', 'tun-installer']:
@@ -104,7 +123,7 @@ class PublicBuildTests(unittest.TestCase):
     def test_installer_rejects_changed_same_version_app(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary); work = root / 'work'; work.mkdir()
-            app = root / 'release/mac-arm64/Relay.app'; app.mkdir(parents=True)
+            app = root / 'release/apps.noindex/mac-arm64/Relay.app'; app.mkdir(parents=True)
             (app / 'binary').write_bytes(b'packaged fixture')
             (work / 'resources.json').write_text('{}')
             receipt = {'architecture': 'arm64', 'version': '1.0.0',

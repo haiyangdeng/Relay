@@ -56,6 +56,13 @@ enum RelayUninstallTests {
         try check(RelayRemoval.removalFact(currentPath: RelayRemoval.trackedPath(fd), links: 1, descriptorDeleted: true, originalOccupied: false, home: root.path, uid: getuid()), "immediate empty admits cleanup")
         try check(!RelayRemoval.removalFact(currentPath: nil, links: 1, descriptorDeleted: false, originalOccupied: false, home: root.path, uid: getuid()), "failed fstat without DELETE cannot admit cleanup")
         source.cancel()
+        var registrationEvents: [String] = []
+        try RelayRemovalLifecycle.run(phase: "requested", restoreUser: { registrationEvents.append("user") },
+            removeRegistrations: { registrationEvents.append("registrations") },
+            removeComponents: { registrationEvents.append("components") },
+            checkpoint: { registrationEvents.append($0) }, finish: { registrationEvents.append("finish") })
+        try check(registrationEvents == ["user", "registrations", "user-cleaned", "components", "components-cleaned", "finish"],
+                  "registered App entries must be removed before the user-cleaned checkpoint")
         for initial in ["requested", "user-cleaned", "components-cleaned"] {
             var events: [String] = []
             try RelayRemovalLifecycle.run(phase: initial, restoreUser: { events.append("user") }, removeComponents: { events.append("components") }, checkpoint: { events.append($0) }, finish: { events.append("finish") })
@@ -73,6 +80,7 @@ enum RelayUninstallTests {
         let result = try RelayRemoval.run("/usr/bin/printf", ["fixture-output"])
         try check(result.0 == 0 && String(decoding: result.1, as: UTF8.self) == "fixture-output", "cleanup output and result captured")
         count += try RelayUninstallPrivateBrowser.tests()
+        count += try RelayUninstallRegistrationTests.run()
         print("{\"passed\":true,\"checks\":\(count),\"systemChangesExecuted\":false}")
     }
 }

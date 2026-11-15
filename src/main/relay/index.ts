@@ -27,7 +27,12 @@ import type { RelayStatus } from '../../shared/relay/protocol'
 import { atomicWriteFile } from '../utils/safeFile'
 import { mainWindowLogger, setAppLogSizeMiB } from '../utils/logger'
 import { validateCoreAction } from '../../shared/relay/core'
-import { localProxyAction, localProxyPrepare } from '../../shared/relay/local-proxy'
+import {
+  localProxyAction,
+  localProxyPrepare,
+  type LocalResolverMode
+} from '../../shared/relay/local-proxy'
+import type { RelayProfileSelection } from '../../shared/relay/runtime'
 import { enabledLocalProxyPorts } from '../../shared/relay/local-proxy-ports'
 import {
   localProxyPlan,
@@ -54,6 +59,8 @@ import { RELAY_SIMPLE_PUBLICATION_CHANNELS } from '../../shared/relay/simple-pub
 import { getAppInfo as resolveConnectionAppInfo } from '../utils/app-info'
 import type { SubStoreAdvancedStart } from '../../shared/relay/substore'
 import { coreOwnerAction } from '../../shared/relay/core-owner'
+import { createOwnedDiagnosticService } from './owned-diagnostics'
+import { createDiagnosticEvidenceReader } from './diagnostic-evidence'
 import {
   nativeReady,
   previewNative,
@@ -266,6 +273,7 @@ import { encodeCheckedTunExecutionV2, smartStateCollectsCSV } from './tun/checke
 import { SmartStateStore } from './core/smart-state-store'
 import { inspectRuntimeConfiguration } from './configuration/schema'
 import { plainConfigurationMap } from './profiles/document'
+import { analyzeProfile } from './profiles/inspect'
 
 const preparingAutomaticUninstall = process.argv.includes('--relay-uninstall-prepare')
 app.setName('Relay')
@@ -1101,6 +1109,15 @@ app
       },
       read: (selection, resolverMode) =>
         configurationEdit.readRuntimeProfile(selection, resolverMode),
+      resolvePinnedNode: async (stored, plan) => {
+        await preserveDedicatedPin(coreOwnerIntent(false, false))
+        return localProxyPlanStore.resolvePinnedNode(plan, stored.profile.id, () => {
+          const source = analyzeProfile(stored.text).data
+          return Array.isArray(source?.proxies)
+            ? source.proxies.find((node) => plainConfigurationMap(node) && node.name === plan.route)
+            : undefined
+        })
+      },
       inspect: () => coreStore.inspect(),
       resources: async (lifetime, runtimeAssets) =>
         lifetime === 'persistent'
@@ -1123,7 +1140,8 @@ app
         lifetime,
         logLevel,
         runtimeAssets,
-        ports
+        ports,
+        pinnedNode
       ) =>
         lifetime === 'persistent'
           ? ordinaryCoreOwner.start(
@@ -1153,7 +1171,8 @@ app
               }),
               logLevel,
               runtimeAssets,
-              ports
+              ports,
+              pinnedNode
             ),
       confirmStart: async (_preparation) => {
         const owner = window,
@@ -1566,12 +1585,51 @@ app
       save: (selection, revision) =>
         saveCoreSelectionNative(nativePath(), stateContext(), selection, revision)
     })
+    const preserveDedicatedPin = async (current: () => void): Promise<void> => {
+      let source:
+        | { selection: RelayProfileSelection; revision: string; resolverMode: LocalResolverMode }
+        | undefined
+      await localProxyPlanStore.preservePinnedNode(
+        async (plan) => {
+          const selection = await coreSelection.read()
+          current()
+          if (!selection) return undefined
+          const stored = await configurationEdit.readRuntimeProfile(selection, plan.resolverMode)
+          current()
+          source = { selection, revision: stored.revision, resolverMode: plan.resolverMode }
+          const configuration = analyzeProfile(stored.text).data
+          return {
+            sourceProfileId: selection.id,
+            node: Array.isArray(configuration?.proxies)
+              ? configuration.proxies.find(
+                  (node) => plainConfigurationMap(node) && node.name === plan.dedicated?.route
+                )
+              : undefined
+          }
+        },
+        current,
+        async () => {
+          current()
+          if (!source) return
+          const selected = await coreSelection.read()
+          if (
+            selected?.id !== source.selection.id ||
+            selected.sha256 !== source.selection.sha256 ||
+            (await configurationEdit.readRuntimeProfile(selected, source.resolverMode)).revision !==
+              source.revision
+          )
+            throw new Error('原 AI 固定节点所属配置已变化，未切换配置。')
+          current()
+        }
+      )
+    }
     const clashBackend = createClashBackend({
       local: localProxy,
       profiles: profileStore,
       notify: notifyClash,
       readSelection: () => coreSelection.readPreferred(),
-      rememberSelection: (selection) => coreSelection.remember(selection)
+      rememberSelection: (selection) => coreSelection.remember(selection),
+      beforeProfileChange: () => preserveDedicatedPin(coreOwnerIntent(false, false))
     })
     const systemProxy = createSystemProxyService({
       native: (action, settings, revision) =>
@@ -1583,6 +1641,7 @@ app
         (automaticUninstallRequested && reason === 'quit') || actionWindowAvailable()
     })
     const diagnostics = createDiagnosticService({
+      ownedObserve: () => ownedDiagnostics.observe(),
       observe: (settings) =>
         diagnoseNative(
           nativePath(),
@@ -1616,6 +1675,27 @@ app
           return { exists: false }
         }
       }
+    })
+    const diagnosticEvidence = createDiagnosticEvidenceReader(stateContext())
+    const ownedDiagnostics = createOwnedDiagnosticService({
+      state: () => localProxy.state(),
+      live: () => localProxy.inspectLive(true),
+      association: () => aiClients.inspect(),
+      clients: (owned) =>
+        diagnoseNative(
+          nativePath(),
+          {
+            httpPort: 17891,
+            node: 'Relay 当前实例',
+            internalExceptions: ''
+          },
+          {
+            ...relayDiagnosticContext(app.getPath('home'), nativePath(), runtime.stateDirectory),
+            owned
+          }
+        ),
+      guard: () => guardReadiness.read(),
+      evidence: () => diagnosticEvidence.read()
     })
     let browserBindingReady = false
     const browserBinding = createBrowserBindingChannel(stateContext(), async () => {
@@ -1767,8 +1847,9 @@ app
       },
       // Use the same composed source (including global/profile overrides) as
       // the ordinary core. The probe still projects its own restricted network
-      // configuration; this read never applies edits to the running core.
-      readProfile: (selection) => configurationEdit.readRuntimeProfile(selection, 'profile'),
+      // configuration without the original route's geodata dependencies; this
+      // read never applies edits to the running core.
+      readProfile: (selection) => configurationEdit.readIsolatedProbeProfile(selection),
       resourceRoot: async () => coreRoot,
       independentNetwork: async () => {
         const observed = await inspectProbeNetwork(
@@ -4006,7 +4087,7 @@ app
       if (localProxy.state().owned) localProxy.acknowledgeRetiredPersistentOwner()
       ordinaryCoreOwner.acknowledgeNoLaunchRetirement()
     }
-    const coreOwnerIntent = (finalQuit = false): (() => void) => {
+    const coreOwnerIntent = (finalQuit = false, requireVisible = true): (() => void) => {
       const owner = window,
         epoch = backupRendererEpoch,
         frame = owner?.webContents.mainFrame
@@ -4017,7 +4098,7 @@ app
           owner !== window ||
           owner.isDestroyed() ||
           owner.webContents.isDestroyed() ||
-          !owner.isVisible() ||
+          (requireVisible && !owner.isVisible()) ||
           owner.webContents.mainFrame !== frame ||
           epoch !== backupRendererEpoch ||
           (!finalQuit && (quitAfterRestore || shellQuitting))
@@ -4751,6 +4832,11 @@ app
         if ((await backupStore.unresolved()).length)
           throw new Error('备份恢复状态未确认，请先完成恢复核对。')
       })
+    })
+    ipcMain.handle('relayWorkspaceVisible', (event, input: unknown) => {
+      trusted(event)
+      if (input !== undefined) throw new Error('窗口可见状态不接受参数。')
+      return !!window?.isVisible() && !quitAfterRestore && !shellQuitting
     })
     ipcMain.handle('relayStatus', (event): RelayStatus => {
       trusted(event)
@@ -5852,6 +5938,7 @@ app
       await profileStartup?.cancelAndWait()
       trusted(event)
       requireCompleteIdle()
+      if (clashBackend.isBusy()) throw new Error('配置选择尚未结束，请等待后再修改启动设置。')
       localProxy.invalidatePending()
       return localProxyPlanStore.save(input, publicUIPreferencesContext(), async () => {
         if ((await backupStore.unresolved()).length)
@@ -6232,7 +6319,10 @@ app
     profileStartup = createProfileStartup({
       readSelection: () => coreSelection.read(),
       readPlan: () => localProxyPlanStore.read(),
-      resolveSelection: (current) => coreSelection.resolveStartup(current),
+      resolveSelection: async (current) => {
+        await preserveDedicatedPin(current)
+        return coreSelection.resolveStartup(current)
+      },
       state: () => localProxy.state(),
       context: coreOwnerIntent,
       waitForInventory: async (current) => {
@@ -7374,7 +7464,10 @@ app
           )
       })
     }
-    startupWindow.on('show', startSelectedProfile)
+    startupWindow.on('show', () => {
+      startupWindow.webContents.send('relayWorkspaceVisible')
+      startSelectedProfile()
+    })
     let shellInitialization: Promise<void> | undefined
     const initializeShell = (): Promise<void> =>
       (shellInitialization ??= (async () => {

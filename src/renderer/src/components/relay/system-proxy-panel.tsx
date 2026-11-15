@@ -86,11 +86,13 @@ export function RelaySystemProxyPanel({
   useEffect(() => {
     mounted.current = true
     const generation = draftEpoch
+    let awaitingVisibility = false
     const invalidate = (): void => {
       ++generation.current
+      awaitingVisibility = true
       setDraftRecord(undefined)
       // This event also revokes a closing/hidden frame's authority; do not
-      // start another read until restoration or an explicit user refresh.
+      // start another read until visible, restored or explicitly refreshed.
       attempted.current = true
       setDraftNotice('默认设置需重新读取，请点击右上角刷新；未保存草稿保留。')
     }
@@ -103,11 +105,20 @@ export function RelaySystemProxyPanel({
       attempted.current = false
       setRefreshVersion((value) => value + 1)
     })
+    const visible = window.electron.ipcRenderer.on('relayWorkspaceVisible', () => {
+      if (!awaitingVisibility) return
+      awaitingVisibility = false
+      // The existing effect waits for active/idle and reads only. Dirty drafts
+      // still require explicit discard before accepting another saved revision.
+      attempted.current = false
+      setRefreshVersion((value) => value + 1)
+    })
     return () => {
       mounted.current = false
       ++generation.current
       invalidated()
       restored()
+      visible()
     }
   }, [])
   const run = async (
@@ -313,7 +324,9 @@ export function RelaySystemProxyPanel({
               : readFailed
                 ? '状态待核对'
                 : report
-                  ? labels[report.status]
+                  ? canApply && (report.status === 'pending' || report.status === 'conflict')
+                    ? '可重新启用'
+                    : labels[report.status]
                   : '状态未获取'}
           </Chip>
           <Button

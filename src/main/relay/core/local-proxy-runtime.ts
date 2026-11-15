@@ -22,6 +22,7 @@ import {
   type LocalProxyPorts
 } from '../../../shared/relay/local-proxy-ports'
 import { injectDedicatedListeners } from './dedicated-listeners'
+import { mergeDedicatedPinnedNode } from './dedicated-pinned-node'
 import { localProxyInheritedOptions, validateLocalProxySourceOptions } from './local-proxy-options'
 import {
   localProxyGeography,
@@ -42,7 +43,8 @@ export function localProxyConfiguration(
   dedicated: DedicatedListenerPlan | undefined = undefined,
   logLevel?: LocalCoreLogLevel,
   runtimeAssets: readonly RuntimeAsset[] = [],
-  ports?: LocalProxyPorts
+  ports?: LocalProxyPorts,
+  pinnedNode?: Record<string, unknown>
 ): {
   configuration: string
   ports: LocalProxyPorts
@@ -65,8 +67,9 @@ export function localProxyConfiguration(
   const input: unknown = JSON.parse(compiled.configuration)
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('配置无效。')
   const config = input as Record<string, unknown>
-  const groups: LocalProxyGroup[] = []
   const nodeNames = Array.isArray(config.proxies) ? config.proxies.map((n) => n.name as string) : []
+  mergeDedicatedPinnedNode(config, dedicated, pinnedNode)
+  const groups: LocalProxyGroup[] = []
   const providers = config['proxy-providers'] as Record<
     string,
     { payload: { name: string }[]; 'health-check'?: { url?: string } }
@@ -189,7 +192,8 @@ export async function startLocalProxyCore(
   learningContext?: SmartLearningContext,
   logLevel?: LocalCoreLogLevel,
   runtimeAssets: readonly RuntimeAsset[] = [],
-  ports?: LocalProxyPorts
+  ports?: LocalProxyPorts,
+  pinnedNode?: Record<string, unknown>
 ): Promise<RelayOwnedCore> {
   const built = localProxyConfiguration(
     source,
@@ -198,7 +202,8 @@ export async function startLocalProxyCore(
     dedicated,
     logLevel,
     runtimeAssets,
-    ports
+    ports,
+    pinnedNode
   )
   return startOwnedCore(
     resourceRoot,

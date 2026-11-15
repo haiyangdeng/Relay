@@ -148,7 +148,7 @@ export function RelayDedicatedListenersPanel({
           </div>
           <p className="relay-network-state">
             至少填写一个独立端口；空白表示关闭。计划保存后在下次核心启动时应用，并在重开 Relay
-            后沿用。所选节点缺失或端口被占用时拒绝启动，不回退直连。
+            后沿用。固定节点会单独保存，切换订阅时继续沿用；端口被占用时拒绝启动，不回退直连。
           </p>
         </>
       )}
