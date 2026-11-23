@@ -1,0 +1,638 @@
+#!/bin/sh
+# Fixed-path Installer transaction. No Python/CLT, network change, App launch,
+# process-name signal, user-data removal, or caller-selected installation UID.
+set -eu
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export PATH
+umask 077
+fail() { echo "Relay installation transaction refused: $*" >&2; exit 1; }
+present() { [ -e "$1" ] || [ -L "$1" ]; }
+absent() { if present "$1"; then fail "unexpected existing path: $1"; fi; }
+digest() { /usr/bin/shasum -a 256 "$1" | /usr/bin/awk '{print $1}'; }
+directory() (
+    [ -d "$1" ] && [ ! -L "$1" ] || fail "unsafe directory: $1"
+    [ "$(/usr/bin/stat -f '%u' "$1")" = 0 ] || fail "directory owner: $1"
+    mode=$(/usr/bin/stat -f '%p' "$1")
+    [ "$((0$mode & 06022))" = 0 ] || fail "directory permissions: $1"
+)
+regular() (
+    [ -f "$1" ] && [ ! -L "$1" ] || fail "unsafe file: $1"
+    [ "$(/usr/bin/stat -f '%u:%l' "$1")" = '0:1' ] || fail "file ownership/links: $1"
+    mode=$(/usr/bin/stat -f '%p' "$1")
+    [ "$((0$mode & 07777))" = "$((0$2))" ] || fail "file mode: $1"
+)
+pinned() { regular "$1" "$2"; [ "$(digest "$1")" = "$3" ] || fail "changed file: $1"; }
+field() { /usr/bin/plutil -extract "$2" raw -o - "$1"; }
+saved() { field "$state" "$1"; }
+save() { /usr/bin/plutil -replace "$1" -string "$2" "$state"; /bin/chmod 600 "$state"; }
+service_state() {
+    if /bin/launchctl print "system/$1" >/dev/null 2>&1; then echo active; else
+        [ "$?" = 113 ] || fail "service inventory: $1"; echo absent
+    fi
+}
+# launchd can still report a registered job after accepting bootout. Only its
+# documented missing-service status proves that the label is available again.
+wait_service_absent() (
+    attempt=0
+    while :; do
+        observed=$(service_state "$1") || exit 1
+        [ "$observed" != absent ] || exit 0
+        [ "$attempt" -lt 100 ] || fail "service still registered after bootout: $1"
+        /bin/sleep 0.25 || exit 1
+        attempt=$((attempt + 1))
+    done
+)
+stop_old_service() (
+    case "$1" in monitor) label=local.relay.network.uninstall;; proxy) label=local.relay.network.system-proxy;; *) exit 1;; esac
+    if [ "$2" = active ]; then
+        # Persist intent before delivery. A rollback must not discard the
+        # transaction while a previously active job is still unregistering.
+        save oldServiceStop "$1:issuing"
+        /bin/launchctl bootout "system/$label" || fail "bootout failed: $label"
+        save oldServiceStop "$1:accepted"
+        wait_service_absent "$label"
+        save oldServiceStop none
+    else
+        observed=$(service_state "$label") || exit 1
+        [ "$observed" = absent ] || fail "previously absent service registered: $label"
+    fi
+)
+console_user() {
+    console=$(/usr/bin/stat -f '%u' /dev/console)
+    case "$console" in ''|*[!0-9]*) fail 'invalid console user';; esac
+    [ "$console" -ge 501 ] && [ "$console" -lt 4294967295 ] || fail 'ordinary logged-in console user required'
+    account=$(/usr/bin/id -nu "$console")
+    case "$account" in ''|root|*/*) fail 'invalid console account';; esac
+    [ "$(/usr/bin/id -u "$account")" = "$console" ] || fail 'console account changed'
+}
+idle() {
+    processes=$(/bin/ps -A -o comm=) || fail 'process inventory unavailable'
+    while IFS= read -r process; do
+        case "$process" in
+            */Contents/MacOS/Relay|*/Relay.app/Contents/*|*/Relay/TunManaged/*|*/RelayTunClient|*/RelayCoreOwner|*/RelayBrowser|*/Relay-Preview/Core/*|*/Relay-Preview/CoreOwner/*|*/Relay-Preview/NativeRuntime/*|*/Relay-Preview/Variants/variants/*/darwin-*/mihomo)
+                fail 'Relay 或其核心仍在运行，请手动退出后重新安装。';;
+        esac
+    done <<EOF
+$processes
+EOF
+}
+app_identity() (
+    path=$1
+    directory "$path" || exit 1
+    [ "$(field "$path/Contents/Info.plist" CFBundleIdentifier)" = local.relay.network.preview ] || fail 'foreign App identity'
+    [ "$(field "$path/Contents/Info.plist" CFBundleExecutable)" = Relay ] || fail 'foreign App executable'
+    /usr/bin/codesign --verify --deep --strict "$path"
+)
+registered_app_at() {
+    [ -d "$1" ] && [ ! -L "$1" ] && [ "$(/usr/bin/stat -f '%d:%i' "$1")" = "$registered_app" ]
+}
+new_app_identity() (
+    # Explicit propagation is required when this probe is used by an if clause:
+    # POSIX shells suppress errexit throughout functions in conditional contexts.
+    app_identity "$app" || exit 1
+    [ "$(digest "$app/Contents/MacOS/Relay")" = "$(field "$scripts/install-plan.json" appExecutableSHA256)" ] &&
+        [ "$(digest "$app/Contents/Resources/app.asar")" = "$(field "$scripts/install-plan.json" appASARSHA256)" ] || fail 'App payload differs'
+)
+component_uid() { [ "$(field "$1" clientUID)" = "$console" ] || fail 'installed components belong to another console user'; }
+proxy_identity() (
+    base=$1; helper=$2; daemon=$3
+    directory "$base"; regular "$base/installation.json" 644
+    [ "$(field "$base/installation.json" role)" = system-proxy-v1 ] || fail 'unknown proxy role'
+    component_uid "$base/installation.json"
+    pinned "$base/RelaySystemProxyClient" 755 "$(field "$base/installation.json" client.sha256)"
+    pinned "$base/uninstall" 755 "$(field "$base/installation.json" uninstallerSHA256)"
+    pinned "$helper" 755 "$(field "$base/installation.json" helper.sha256)"
+    pinned "$daemon" 644 "$(field "$base/installation.json" daemonSHA256)"
+    for entry in "$base"/* "$base"/.[!.]* "$base"/..?*; do
+        present "$entry" || continue
+        case "${entry##*/}" in installation.json|RelaySystemProxyClient|uninstall) ;; *) fail 'unknown proxy installation content';; esac
+    done
+)
+tun_identity() (
+    base=$1
+    directory "$base"; regular "$base/installation.json" 644
+    case "$(field "$base/installation.json" role)" in core-managed-v1|core-managed-v2) ;; *) fail 'unknown TUN role';; esac
+    component_uid "$base/installation.json"
+    pinned "$base/RelayTunClient" 755 "$(field "$base/installation.json" client.sha256)"
+    pinned "$base/uninstall.py" 755 "$(field "$base/installation.json" uninstallerSHA256)"
+    regular "$base/busy.lock" 644
+    [ "$(/bin/cat "$base/busy.lock")" = 'Relay core-managed TUN v1' ] || fail 'invalid TUN lock'
+    for arch in arm64 x64; do
+        key=$arch; [ "$arch" != x64 ] || key=x86_64
+        directory "$base/Core"; directory "$base/Core/darwin-$arch"
+        pinned "$base/Core/darwin-$arch/mihomo" 4755 "$(field "$base/installation.json" "cores.$key.sha256")"
+    done
+    inventory=$(/usr/bin/find "$base" -mindepth 1 -print)
+    while IFS= read -r entry; do
+        case "${entry#"$base/"}" in installation.json|RelayTunClient|uninstall.py|busy.lock|Core|Core/darwin-arm64|Core/darwin-x64|Core/darwin-arm64/mihomo|Core/darwin-x64/mihomo) ;; *) fail 'unknown TUN installation content';; esac
+    done <<EOF
+$inventory
+EOF
+)
+monitor_identity() (
+    base=$1; daemon=$2
+    directory "$base"; regular "$base/installation.json" 644
+    component_uid "$base/installation.json"
+    absent "$base/intent.json"; absent "$base/finalization.json"
+    pinned "$base/RelayUninstallSupervisor" 755 "$(field "$base/installation.json" supervisorSHA256)"
+    pinned "$base/RelayNative" 755 "$(field "$base/installation.json" nativeSHA256)"
+    pinned "$daemon" 644 "$(field "$base/installation.json" daemonSHA256)"
+    [ "$(digest "$app/Contents/MacOS/Relay")" = "$(field "$base/installation.json" appExecutableSHA256)" ] || fail 'App does not match its registration'
+    [ "$(/usr/bin/stat -f '%i' "$app")" = "$(field "$base/installation.json" appInode)" ] || fail 'App registration changed'
+    if [ "${3:-}" = installed ]; then
+        # A mount number may change or be reused after reboot. Authenticate
+        # the original installation using its protected, persistent bookmark.
+        pinned "$scripts/RelayUninstallSupervisor" 755 "$(field "$scripts/install-plan.json" supervisorSHA256)"
+        "$scripts/RelayUninstallSupervisor" --verify-installed-identity || fail 'App bookmark or volume identity changed'
+    else
+        # This new registration was created during this running transaction.
+        [ "$(/usr/bin/stat -f '%d' "$app")" = "$(field "$base/installation.json" appDevice)" ] || fail 'New App registration changed'
+    fi
+    for entry in "$base"/* "$base"/.[!.]* "$base"/..?*; do
+        present "$entry" || continue
+        case "${entry##*/}" in installation.json|RelayUninstallSupervisor|RelayNative|ready.json) ;; *) fail 'uninstall/recovery work is still present';; esac
+    done
+)
+target() {
+    case "$1" in
+        app) echo "$app";; proxy) echo "$relay/SystemProxy";; tun) echo "$relay/TunManaged";; monitor) echo "$relay/Uninstall";;
+        proxyHelper) echo '/Library/PrivilegedHelperTools/local.relay.network.system-proxy';;
+        proxyDaemon) echo '/Library/LaunchDaemons/local.relay.network.system-proxy.plist';;
+        monitorDaemon) echo '/Library/LaunchDaemons/local.relay.network.uninstall.plist';;
+        *) fail 'unknown transaction target';;
+    esac
+}
+verify_transaction() (
+    directory "$transaction"; regular "$state" 600
+    [ "$(saved version)" = 1 ] && [ "$(saved packageSHA256)" = '@INSTALL_PLAN_SHA256@' ] || fail 'different or unknown installer transaction retained'
+    [ "$(saved clientUID)" = "$console" ] || fail 'console user changed during installation'
+    if present "$transaction/old"; then directory "$transaction/old"; else [ "$(saved phase)" = committed ] || fail 'missing transaction backup'; fi
+)
+[ "$(/usr/bin/id -u)" = 0 ] || fail 'administrator authorization required'
+action=${1:-invalid}; shift
+scripts=$(CDPATH= cd -P "$(/usr/bin/dirname "$0")" && /bin/pwd -P)
+directory "$scripts"
+pinned "$scripts/install-plan.json" 644 '@INSTALL_PLAN_SHA256@'
+relay='/Library/Application Support/Relay'
+app=/Applications/Relay.app
+transaction="$relay/InstallerTransaction"
+state="$transaction/state.plist"
+for parent in / /Library '/Library/Application Support' /Library/LaunchDaemons; do directory "$parent"; done
+helper_parent=/Library/PrivilegedHelperTools
+if [ "$action" != prepare ] || present "$helper_parent"; then directory "$helper_parent"; fi
+if present "$relay"; then directory "$relay"; fi
+console_user
+case "$action" in
+prepare)
+    [ "${2:-invalid}" = / ] && [ "${3:-invalid}" = / ] || fail 'only the running system volume is supported'
+    idle
+    if present "$transaction"; then
+        verify_transaction
+        case "$(saved phase)" in
+            committed) "$0" cleanup-committed;;
+            prepared|preparing)
+                if present "$relay/Uninstall/intent.json" || present "$relay/Uninstall/finalization.json"; then
+                    "$0" retire-backup-for-removal
+                    fail 'the registered monitor accepted removal; installation stopped'
+                fi
+                "$0" rollback-check
+                "$0" rollback-monitor
+                "$0" rollback-helper
+                "$0" rollback;;
+            *) fail 'unknown retained transaction phase';;
+        esac
+    fi
+    absent "$transaction"
+    for legacy in "$relay/Tun" /Library/PrivilegedHelperTools/local.relay.network.tun /Library/LaunchDaemons/local.relay.network.tun.plist \
+        /Library/PrivilegedHelperTools/local.relay.network.tun.uninstall \
+        /Library/PrivilegedHelperTools/local.relay.network.tun.uninstall-intent.json \
+        /Library/PrivilegedHelperTools/local.relay.network.tun.operation-lock \
+        /Library/PrivilegedHelperTools/local.relay.network.tun.uninstall-active \
+        /Library/PrivilegedHelperTools/.local.relay.network.tun.network-executor-v1-publish-*; do absent "$legacy"; done
+    upgrade=no
+    if present "$app"; then
+        # Keep a reference to the original directory across preflight and rename.
+        # Its inode cannot be reused while this shell holds it as its working directory.
+        upgrade=yes
+        cd -P "$app" || fail 'cannot acquire original App'
+        registered_app=$(/usr/bin/stat -f '%d:%i' .)
+        registered_app_at "$app" || fail 'original App changed before verification'
+        app_identity "$app"
+        proxy_identity "$relay/SystemProxy" "$(target proxyHelper)" "$(target proxyDaemon)"
+        monitor_identity "$relay/Uninstall" "$(target monitorDaemon)" installed
+        registered_app_at "$app" || fail 'original App changed during verification'
+        if present "$relay/TunManaged"; then
+            tun_identity "$relay/TunManaged"
+            # BSD flock on the inherited descriptor remains held by this shell
+            # until all old admission/executable paths leave the live namespace.
+            exec 9<"$relay/TunManaged/busy.lock"
+            /usr/bin/lockf -s -t 0 9 || fail 'TUN lifetime lock is busy; no installation changes made'
+            [ "$(/usr/bin/stat -f '%i:%u:%Lp:%l:%z' /dev/fd/9)" = "$(/usr/bin/stat -f '%i:%u:%Lp:%l:%z' "$relay/TunManaged/busy.lock")" ] || fail 'TUN lock replaced'
+            tun_identity "$relay/TunManaged"
+        fi
+    else
+        for name in proxy tun monitor proxyHelper proxyDaemon monitorDaemon; do absent "$(target "$name")"; done
+    fi
+    inventory=$(/usr/sbin/pkgutil --pkgs) || fail 'package inventory unavailable'
+    while IFS= read -r installed; do
+        case "$installed" in
+            local.relay.network.app|local.relay.network.system-proxy.v1|local.relay.network.tun.core-managed-v1|local.relay.network.tun.core-managed-v2)
+                [ "$upgrade" = yes ] || fail 'existing Relay receipt has no trusted installation';;
+            local.relay.network.tun.network-executor-v1|local.relay.network.tun.feasibility)
+                fail 'legacy TUN receipt requires its existing uninstaller';;
+        esac
+    done <<EOF
+$inventory
+EOF
+    [ "$(service_state local.relay.network.tun)" = absent ] || fail 'legacy TUN service remains'
+    proxy_state=$(service_state local.relay.network.system-proxy)
+    monitor_state=$(service_state local.relay.network.uninstall)
+    if [ "$upgrade" = no ]; then
+        [ "$proxy_state:$monitor_state" = absent:absent ] || fail 'unbound Relay service'
+    fi
+    idle
+    # A clean macOS installation may not have this shared directory yet.
+    if ! present "$helper_parent"; then
+        /bin/mkdir -m 755 "$helper_parent" || present "$helper_parent" || fail 'cannot create helper directory'
+    fi
+    directory "$helper_parent"
+    if ! present "$relay"; then /bin/mkdir -m 755 "$relay"; fi
+    /bin/mkdir -m 700 "$transaction"
+    /bin/mkdir -m 700 "$transaction/old"
+    /usr/bin/plutil -create xml1 "$state"
+    /bin/chmod 600 "$state"
+    for pair in version:1 packageSHA256:@INSTALL_PLAN_SHA256@ clientUID:"$console" phase:preparing oldServiceStop:none upgrade:"$upgrade" proxyService:"$proxy_state" monitorService:"$monitor_state"; do
+        /usr/bin/plutil -insert "${pair%%:*}" -string "${pair#*:}" "$state"
+    done
+    # Roll back any failure within preinstall. If Installer itself is terminated
+    # between phases, the fixed root-owned backup is deliberately retained.
+    trap 'code=$?; trap - EXIT; if [ "$code" != 0 ]; then "$0" rollback || true; fi; exit "$code"' EXIT
+    trap 'exit 1' HUP INT TERM
+    if [ "$upgrade" = yes ]; then
+        /usr/bin/plutil -insert old_app -string "$registered_app" "$state"
+        /usr/bin/plutil -insert oldMonitorGeneration -string "$(field "$relay/Uninstall/installation.json" generation)" "$state"
+        registered_app_at "$app" || fail 'original App changed before stopping services'
+        stop_old_service monitor "$monitor_state"
+        stop_old_service proxy "$proxy_state"
+        absent "$relay/Uninstall/intent.json"; absent "$relay/Uninstall/finalization.json"
+        idle
+        registered_app_at "$app" || fail 'original App changed before staging'
+        [ "$(/usr/bin/stat -f '%d' "$app")" = "$(/usr/bin/stat -f '%d' "$transaction")" ] || fail 'cross-volume upgrade cannot be atomic'
+        /bin/mv "$app" "$transaction/old/app"
+        if ! registered_app_at "$transaction/old/app"; then
+            # The source changed in the rename itself. Undo only that move.
+            # Target the parent with the original basename so -n never nests
+            # the bundle inside a newly occupied destination.
+            /bin/mv "$transaction/old/app" "$transaction/Relay.app"
+            /bin/mv -n "$transaction/Relay.app" "${app%/*}/"
+            fail 'staged App differs from the verified original'
+        fi
+        for name in monitor monitorDaemon proxy proxyHelper proxyDaemon tun; do
+            path=$(target "$name")
+            if present "$path"; then
+                [ "$(/usr/bin/stat -f '%d' "$path")" = "$(/usr/bin/stat -f '%d' "$transaction")" ] || fail 'cross-volume upgrade cannot be atomic'
+                /usr/bin/plutil -insert "old_$name" -string "$(/usr/bin/stat -f '%d:%i' "$path")" "$state"
+                /bin/mv "$path" "$transaction/old/$name"
+            fi
+        done
+    fi
+    idle
+    absent "$app"
+    [ "$(service_state local.relay.network.uninstall)" = absent ] || fail 'old uninstall monitor restarted'
+    save phase prepared
+    trap - EXIT
+    ;;
+allows-receipt)
+    verify_transaction
+    [ "$(saved phase)" = prepared ] && [ "$(saved upgrade)" = yes ] || fail 'no trusted upgrade'
+    case "${1:-}" in local.relay.network.app|local.relay.network.system-proxy.v1|local.relay.network.tun.core-managed-v1|local.relay.network.tun.core-managed-v2) ;; *) fail 'unrelated receipt';; esac
+    ;;
+verify)
+    verify_transaction; [ "$(saved phase)" = prepared ] || fail 'installation phase changed'
+    ;;
+publish-tun)
+    verify_transaction; [ "$(saved phase)" = prepared ] || fail 'installation phase changed'
+    new_app_identity
+    idle
+    absent "$relay/TunManaged"
+    tun="$transaction/new-tun"; absent "$tun"
+    /bin/mkdir -m 755 "$tun" "$tun/Core" "$tun/Core/darwin-arm64" "$tun/Core/darwin-x64"
+    pinned "$scripts/tun-installation.template.json" 644 "$(field "$scripts/install-plan.json" tunTemplateSHA256)"
+    for item in client uninstall arm64 x64; do
+        case "$item" in
+            client) source="$scripts/RelayTunClient"; destination="$tun/RelayTunClient"; mode=755; key=client.sha256;;
+            uninstall) source="$scripts/tun-uninstall.py"; destination="$tun/uninstall.py"; mode=755; key=uninstallerSHA256;;
+            *) source="$app/Contents/Resources/relay/core-geodata-v1/darwin-$item/mihomo"; destination="$tun/Core/darwin-$item/mihomo"; mode=4755; key=cores.$item.sha256; [ "$item" != x64 ] || key=cores.x86_64.sha256;;
+        esac
+        expected=$(field "$scripts/tun-installation.template.json" "$key")
+        pinned "$source" 755 "$expected"
+        /bin/cat "$source" > "$destination"
+        [ "$(digest "$destination")" = "$expected" ] || fail 'incomplete TUN publication'
+        /bin/chmod "$mode" "$destination"
+        pinned "$destination" "$mode" "$expected"
+    done
+    printf 'Relay core-managed TUN v1\n' > "$tun/busy.lock"
+    /bin/chmod 644 "$tun/busy.lock"
+    /usr/bin/sed "s/\"clientUID\":0/\"clientUID\":$console/" "$scripts/tun-installation.template.json" > "$tun/installation.json"
+    /bin/chmod 644 "$tun/installation.json"
+    tun_identity "$tun"
+    /usr/bin/plutil -insert newTun -string "$(/usr/bin/stat -f '%d:%i' "$tun")" "$state"
+    /bin/mv "$tun" "$relay/TunManaged"
+    ;;
+reserve-monitor)
+    verify_transaction
+    [ "$(saved phase)" = prepared ] || fail 'installation phase changed'
+    absent "$relay/Uninstall"; absent "$transaction/new-monitor"
+    /bin/mkdir -m 755 "$transaction/new-monitor"
+    /usr/bin/plutil -insert newMonitorRoot -string "$(/usr/bin/stat -f '%d:%i' "$transaction/new-monitor")" "$state"
+    /bin/mv "$transaction/new-monitor" "$relay/Uninstall"
+    ;;
+rollback-monitor)
+    verify_transaction
+    [ "$(saved phase)" != committed ] || fail 'committed installation cannot roll back'
+    monitor="$relay/Uninstall"; daemon=$(target monitorDaemon)
+    if present "$monitor"; then
+        if [ "$(saved phase)" = preparing ] && ! present "$transaction/old/monitor"; then exit 0; fi
+        [ "$(saved newMonitorRoot)" = "$(/usr/bin/stat -f '%d:%i' "$monitor")" ] || fail 'untracked uninstall monitor retained'
+        directory "$monitor"
+        absent "$monitor/intent.json"; absent "$monitor/finalization.json"
+        for entry in "$monitor"/* "$monitor"/.[!.]* "$monitor"/..?*; do
+            present "$entry" || continue
+            case "${entry##*/}" in RelayUninstallSupervisor|RelayNative|installation.json|ready.json|.install-supervisor|.install-native|.install-daemon) ;; *) fail 'unknown new monitor content';; esac
+        done
+        for item in supervisor native daemon; do
+            case "$item" in
+                supervisor) destination="$monitor/RelayUninstallSupervisor"; mode=755; key=supervisorSHA256;;
+                native) destination="$monitor/RelayNative"; mode=755; key=nativeSHA256;;
+                daemon) destination="$daemon"; mode=644; key=daemonSHA256;;
+            esac
+            staging="$monitor/.install-$item"; expected=$(field "$scripts/install-plan.json" "$key")
+            if present "$destination" && present "$staging"; then
+                [ "$(/usr/bin/stat -f '%d:%i' "$destination")" = "$(/usr/bin/stat -f '%d:%i' "$staging")" ] &&
+                    [ "$(/usr/bin/stat -f '%u:%Lp:%l' "$destination")" = "0:$mode:2" ] &&
+                    [ "$(digest "$destination")" = "$expected" ] && [ ! -L "$staging" ] || fail 'unverified staging link'
+                /bin/rm "$staging"
+            fi
+            if present "$destination"; then pinned "$destination" "$mode" "$expected"; fi
+            if present "$staging"; then regular "$staging" "$mode"; fi
+        done
+        observed=$(service_state local.relay.network.uninstall) || exit 1
+        if [ "$observed" = active ]; then
+            pinned "$daemon" 644 "$(field "$scripts/install-plan.json" daemonSHA256)"
+            /bin/launchctl bootout system/local.relay.network.uninstall
+        fi
+        wait_service_absent local.relay.network.uninstall
+        if present "$monitor/intent.json" || present "$monitor/finalization.json"; then
+            "$0" retire-backup-for-removal
+            fail 'new monitor accepted removal during rollback'
+        fi
+        for file in "$monitor/installation.json" "$monitor/ready.json"; do if present "$file"; then regular "$file" 644; fi; done
+        for file in "$monitor/RelayUninstallSupervisor" "$monitor/RelayNative" "$monitor/installation.json" "$monitor/ready.json" "$monitor/.install-supervisor" "$monitor/.install-native" "$monitor/.install-daemon" "$daemon"; do if present "$file"; then /bin/rm "$file"; fi; done
+        /bin/rmdir "$monitor"
+    fi
+    ;;
+record-monitor)
+    verify_transaction
+    monitor_identity "$relay/Uninstall" "$(target monitorDaemon)"
+    /usr/bin/plutil -insert newMonitorGeneration -string "$(field "$relay/Uninstall/installation.json" generation)" "$state"
+    ;;
+retire-backup-for-removal)
+    verify_transaction
+    # A Trash event during the new monitor's ready handshake supersedes an
+    # upgrade rollback. Its same-generation durable owner must survive, while
+    # the old private backups must not become untracked uninstall leftovers.
+    monitor="$relay/Uninstall"; daemon=$(target monitorDaemon)
+    manifest="$monitor/installation.json"
+    directory "$monitor"; regular "$manifest" 644; component_uid "$manifest"
+    generation=$(field "$manifest" generation)
+    case "$(saved phase)" in
+        prepared)
+            [ "$generation" = "$(saved newMonitorGeneration)" ] || fail 'new removal generation differs'
+            native_sha=$(field "$scripts/install-plan.json" nativeSHA256)
+            supervisor_sha=$(field "$scripts/install-plan.json" supervisorSHA256)
+            daemon_sha=$(field "$scripts/install-plan.json" daemonSHA256);;
+        preparing)
+            # Nothing may have been moved when an old monitor accepts Trash.
+            # Preserve this installation's own cleanup, even if Installer has
+            # already asked launchd to stop its previously registered service.
+            remaining=$(/bin/ls -A "$transaction/old") || fail 'old backup inventory unavailable'
+            [ "$(saved upgrade)" = yes ] && [ -z "$remaining" ] || fail 'previous installation already staged'
+            original=$(saved old_app)
+            [ "${original#*:}" = "$(field "$manifest" appInode)" ] || fail 'old removal App identity differs'
+            recorded=$(saved oldMonitorGeneration 2>/dev/null) || recorded="$generation"  # earlier v1 journal
+            [ "$generation" = "$recorded" ] || fail 'old removal generation differs'
+            native_sha=$(field "$manifest" nativeSHA256)
+            supervisor_sha=$(field "$manifest" supervisorSHA256)
+            daemon_sha=$(field "$manifest" daemonSHA256);;
+        *) fail 'removal cannot take ownership of this transaction';;
+    esac
+    proof="$monitor/intent.json"
+    if present "$monitor/finalization.json"; then proof="$monitor/finalization.json"; fi
+    regular "$proof" 644
+    [ "$(field "$proof" generation)" = "$generation" ] && [ "$(field "$proof" clientUID)" = "$console" ] || fail 'removal generation differs'
+    for name in app tun proxy proxyHelper proxyDaemon monitor monitorDaemon; do
+        backup="$transaction/old/$name"
+        if present "$backup"; then
+            [ "$(/usr/bin/stat -f '%d:%i' "$backup")" = "$(saved "old_$name")" ] || fail 'backup identity changed'
+        fi
+    done
+    pending=$(saved oldServiceStop 2>/dev/null) || pending=none
+    if [ "$(saved phase)" = preparing ] && [ "$(saved proxyService)" = active ] &&
+        ! present "$monitor/finalization.json" && present "$relay/SystemProxy/installation.json" &&
+        present "$(target proxyHelper)" && present "$(target proxyDaemon)"; then
+        case "$pending" in proxy:issuing|proxy:accepted) wait_service_absent local.relay.network.system-proxy;; esac
+        observed=$(service_state local.relay.network.system-proxy) || exit 1
+        if [ "$observed" = absent ]; then
+            proxy_identity "$relay/SystemProxy" "$(target proxyHelper)" "$(target proxyDaemon)"
+            /bin/launchctl bootstrap system "$(target proxyDaemon)"
+        fi
+    fi
+    case "$pending" in monitor:issuing|monitor:accepted) wait_service_absent local.relay.network.uninstall;; esac
+    observed=$(service_state local.relay.network.uninstall) || exit 1
+    if [ "$observed" = absent ]; then
+        pinned "$daemon" 644 "$daemon_sha"
+        pinned "$monitor/RelayUninstallSupervisor" 755 "$supervisor_sha"
+        pinned "$monitor/RelayNative" 755 "$native_sha"
+        /bin/launchctl bootstrap system "$daemon"
+    fi
+    save phase committed
+    "$0" cleanup-committed || exit 75
+    ;;
+rollback-helper)
+    verify_transaction
+    [ "$(saved phase)" != committed ] || fail 'committed installation cannot roll back'
+    proxy="$relay/SystemProxy"
+    if present "$proxy"; then
+        if [ "$(saved phase)" = preparing ] && ! present "$transaction/old/proxy"; then exit 0; fi
+        pinned "$scripts/installation.template.json" 644 "$(field "$scripts/install-plan.json" proxyTemplateSHA256)"
+        pinned "$proxy/uninstall" 755 "$(field "$scripts/installation.template.json" uninstallerSHA256)"
+        observed=$(service_state local.relay.network.system-proxy) || exit 1
+        if [ "$observed" = active ]; then
+            proxy_identity "$proxy" "$(target proxyHelper)" "$(target proxyDaemon)"
+            pinned "$(target proxyHelper)" 755 "$(field "$scripts/install-plan.json" proxyHelperSHA256)"
+            pinned "$(target proxyDaemon)" 644 "$(field "$scripts/installation.template.json" daemonSHA256)"
+            /bin/launchctl bootout system/local.relay.network.system-proxy
+            wait_service_absent local.relay.network.system-proxy
+        fi
+        "$proxy/uninstall"
+    fi
+    ;;
+rollback|rollback-check)
+    verify_transaction
+    [ "$(saved phase)" != committed ] || fail 'committed installation cannot roll back'
+    # An independently replaced bundle that could not be put back is never
+    # part of the installer payload or a disposable transaction backup.
+    absent "$transaction/Relay.app"
+    idle
+    if present "$relay/Uninstall/intent.json" || present "$relay/Uninstall/finalization.json"; then
+        [ "$action" != rollback-check ] || fail 'the registered monitor is handling a removal'
+        "$0" retire-backup-for-removal
+        fail 'the registered monitor accepted removal; installation stopped'
+    fi
+    if present "$relay/TunManaged" && saved newTun >/dev/null 2>&1; then
+        [ "$(saved newTun)" = "$(/usr/bin/stat -f '%d:%i' "$relay/TunManaged")" ] || fail 'TUN is not owned by this installation'
+        tun_identity "$relay/TunManaged"
+        exec 8<"$relay/TunManaged/busy.lock"
+        /usr/bin/lockf -s -t 0 8 || fail 'new TUN is active; rollback retained'
+        [ "$(/usr/bin/stat -f '%i:%u:%Lp:%l:%z' /dev/fd/8)" = "$(/usr/bin/stat -f '%i:%u:%Lp:%l:%z' "$relay/TunManaged/busy.lock")" ] || fail 'TUN lock replaced'
+        [ "$(field "$relay/TunManaged/installation.json" client.sha256)" = "$(field "$scripts/tun-installation.template.json" client.sha256)" ] || fail 'new TUN differs'
+        retire_tun=yes
+    else retire_tun=no
+    fi
+    retire_app=no
+    if present "$app" && { [ -d "$transaction/old/app" ] || [ "$(saved upgrade)" = no ]; }; then
+        # Installer cannot have published a payload during preinstall. Keep an
+        # externally introduced bundle and the retained backup for recovery.
+        [ "$(saved phase)" != preparing ] || fail 'App destination changed during preinstall'
+        if new_app_identity >/dev/null 2>&1; then retire_app=complete; else
+            # Installer may have been terminated halfway through its payload.
+            # Preserve that root-owned fixed destination instead of deleting an
+            # unverified partial bundle or making recovery require another tool.
+            [ "$(saved phase)" = prepared ] || fail 'incomplete App outside payload phase'
+            directory "$app"
+            if [ "$(saved upgrade)" = yes ]; then
+                [ "$(/usr/bin/stat -f '%d:%i' "$transaction/old/app")" = "$(saved old_app)" ] || fail 'old App identity changed'
+                app_identity "$transaction/old/app"
+            fi
+            if present "$app/Contents/Info.plist"; then
+                regular "$app/Contents/Info.plist" 644
+                identity=$(field "$app/Contents/Info.plist" CFBundleIdentifier 2>/dev/null) || identity=''
+                case "$identity" in ''|local.relay.network.preview) ;; *) fail 'foreign App retained; no rollback attempted';; esac
+            fi
+            retire_app=incomplete
+        fi
+    fi
+    [ "$action" != rollback-check ] || exit 0
+    if [ "$retire_tun" = yes ]; then
+        for file in installation.json RelayTunClient Core/darwin-arm64/mihomo Core/darwin-x64/mihomo uninstall.py busy.lock; do /bin/rm "$relay/TunManaged/$file"; done
+        /bin/rmdir "$relay/TunManaged/Core/darwin-arm64" "$relay/TunManaged/Core/darwin-x64" "$relay/TunManaged/Core" "$relay/TunManaged"
+    fi
+    if [ "$retire_app" = complete ]; then
+        absent "$transaction/rejected-app"
+        /bin/mv "$app" "$transaction/rejected-app"
+    elif [ "$retire_app" = incomplete ]; then
+        recovery="$relay/InstallerRecovery"
+        if ! present "$recovery"; then /bin/mkdir -m 700 "$recovery"; fi
+        directory "$recovery"
+        [ "$(/usr/bin/stat -f '%Lp' "$recovery")" = 700 ] || fail 'unsafe recovery directory'
+        generation=$(/usr/bin/uuidgen)
+        case "$generation" in ''|*[!A-Fa-f0-9-]*) fail 'invalid recovery generation';; esac
+        [ "${#generation}" = 36 ] || fail 'invalid recovery generation'
+        retained="$recovery/$generation"; absent "$retained"
+        /bin/mkdir -m 700 "$retained"
+        /bin/cp "$state" "$retained/installation-state.plist"
+        /bin/chmod 600 "$retained/installation-state.plist"
+        /bin/mv "$app" "$retained/Relay.app"
+        echo "Incomplete Installer payload retained for review at $retained; restoring the prior installation." >&2
+    fi
+    for name in app tun proxy proxyHelper proxyDaemon monitor monitorDaemon; do
+        backup="$transaction/old/$name"
+        if present "$backup"; then
+            [ "$(/usr/bin/stat -f '%d:%i' "$backup")" = "$(saved "old_$name")" ] || fail 'backup identity changed'
+            path=$(target "$name"); absent "$path"; /bin/mv "$backup" "$path"
+        fi
+    done
+    # An interrupted/failed preinstall may still have an accepted bootout
+    # in flight. Wait for it before deciding which registrations to restore.
+    pending=$(saved oldServiceStop 2>/dev/null) || pending=legacy
+    case "$pending" in
+        none) ;;
+        legacy)
+            # Earlier v1 journals have no acknowledgement field. Only the
+            # pre-rename window could have an unregister operation in flight.
+            if [ "$(saved phase)" = preparing ] && [ "$(saved upgrade)" = yes ] &&
+                saved old_app >/dev/null 2>&1 && ! saved old_monitor >/dev/null 2>&1; then
+                monitor_identity "$relay/Uninstall" "$(target monitorDaemon)" installed
+                proxy_identity "$relay/SystemProxy" "$(target proxyHelper)" "$(target proxyDaemon)"
+                for item in monitor:local.relay.network.uninstall proxy:local.relay.network.system-proxy; do
+                    name=${item%%:*}; service=${item#*:}
+                    if [ "$(saved "${name}Service")" = active ]; then
+                        observed=$(service_state "$service") || exit 1
+                        if [ "$observed" = active ]; then /bin/launchctl bootout "system/$service"; fi
+                        wait_service_absent "$service"
+                    fi
+                done
+            fi;;
+        monitor:issuing|monitor:accepted|proxy:issuing|proxy:accepted)
+            name=${pending%%:*}
+            case "$name" in monitor) service=local.relay.network.uninstall;; proxy) service=local.relay.network.system-proxy;; esac
+            if [ "${pending#*:}" = issuing ]; then
+                # Interrupted before launchd acknowledged the request. Authenticate
+                # the original files before completing this pending operation.
+                [ "$(saved phase)" = preparing ] && [ "$(saved "${name}Service")" = active ] || fail 'unexpected service stop intent'
+                if [ "$name" = monitor ]; then monitor_identity "$relay/Uninstall" "$(target monitorDaemon)" installed
+                else proxy_identity "$relay/SystemProxy" "$(target proxyHelper)" "$(target proxyDaemon)"; fi
+                observed=$(service_state "$service") || exit 1
+                if [ "$observed" = active ]; then /bin/launchctl bootout "system/$service"; fi
+                save oldServiceStop "$name:accepted"
+            fi
+            wait_service_absent "$service"
+            save oldServiceStop none;;
+        *) fail 'unknown old service stop intent';;
+    esac
+    for item in proxy:local.relay.network.system-proxy monitor:local.relay.network.uninstall; do
+        name=${item%%:*}; service=${item#*:}
+        if [ "$(saved "${name}Service")" = active ]; then
+            observed=$(service_state "$service") || exit 1
+            if [ "$observed" = absent ]; then /bin/launchctl bootstrap system "$(target "${name}Daemon")"; fi
+        fi
+    done
+    # This private transaction directory was created above and never contains
+    # paths selected by a user or profile. rm does not traverse bundle symlinks.
+    directory "$transaction"; /bin/rm -rf "$transaction"
+    ;;
+commit)
+    verify_transaction
+    [ "$(field "$relay/SystemProxy/installation.json" clientUID)" = "$console" ] &&
+        [ "$(field "$relay/TunManaged/installation.json" clientUID)" = "$console" ] &&
+        [ "$(field "$relay/Uninstall/installation.json" clientUID)" = "$console" ] || fail 'component users differ'
+    idle
+    new_app_identity
+    tun_identity "$relay/TunManaged"
+    proxy_identity "$relay/SystemProxy" "$(target proxyHelper)" "$(target proxyDaemon)"
+    monitor_identity "$relay/Uninstall" "$(target monitorDaemon)"
+    save phase committed
+    # This is the irreversible commit point. A partial backup deletion must
+    # never cause the complete replacement to be torn down or old files restored.
+    trap 'exit 75' HUP INT TERM
+    "$0" cleanup-committed || exit 75
+    ;;
+is-committed)
+    verify_transaction
+    [ "$(saved phase)" = committed ]
+    ;;
+cleanup-committed)
+    verify_transaction
+    [ "$(saved phase)" = committed ] || fail 'installation has not committed'
+    # Keep the proof outside the tree being retired so a failed removal retains
+    # an unmistakable terminal state for this package's next Installer attempt.
+    if present "$transaction/old"; then /bin/rm -rf "$transaction/old" || exit 75; fi
+    for entry in "$transaction"/* "$transaction"/.[!.]* "$transaction"/..?*; do
+        present "$entry" || continue
+        [ "$entry" = "$state" ] || fail 'unexpected committed transaction content'
+    done
+    /bin/rm "$state" || exit 75
+    /bin/rmdir "$transaction" || exit 75
+    ;;
+*) fail 'unsupported installer action';;
+esac

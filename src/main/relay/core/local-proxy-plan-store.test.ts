@@ -225,6 +225,23 @@ describe.runIf(process.getuid !== undefined)('Private dedicated node snapshot', 
     port: 1234,
     password: 'fixture-private'
   }
+  it('joins a simultaneous dashboard plan read when restoring a dedicated listener', async () => {
+    const { store } = await fixture()
+    await store.save({ document: dedicatedPlan, expectedRevision: '' })
+    const reading = store.read()
+    expect(store.isReading()).toBe(true)
+    const restoring = store.resolvePinnedNode(dedicatedPlan.dedicated, sourceProfileId, () => node)
+    await expect(reading).resolves.toMatchObject({ document: dedicatedPlan })
+    await expect(restoring).resolves.toMatchObject({ node })
+    const newer = store.save({
+      document: dedicatedPlan,
+      expectedRevision: (await store.read()).revision
+    })
+    await expect(
+      store.resolvePinnedNode(dedicatedPlan.dedicated, sourceProfileId, () => node)
+    ).rejects.toThrow('操作尚未结束')
+    await newer
+  })
   it('upgrades a legacy plan, survives a new store and never exposes node credentials or changes public revision', async () => {
     const { store, context } = await fixture()
     await store.save({ document: dedicatedPlan, expectedRevision: '' })
@@ -262,7 +279,7 @@ describe.runIf(process.getuid !== undefined)('Private dedicated node snapshot', 
       context: () => () => {},
       prepare: async () => {
         await store.resolvePinnedNode(dedicatedPlan.dedicated, sourceProfileId, () => node)
-        return { evidenceId: 'proof', canStart: true }
+        return { evidenceId: 'proof', canStart: true, hasRecord: false }
       },
       start,
       invalidate: () => {

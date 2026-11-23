@@ -22,6 +22,7 @@ import {
   type LocalProxyPorts
 } from '../../../shared/relay/local-proxy-ports'
 import { injectDedicatedListeners } from './dedicated-listeners'
+import { applySavedSelectorDefaults } from './startup-node'
 import { mergeDedicatedPinnedNode } from './dedicated-pinned-node'
 import { localProxyInheritedOptions, validateLocalProxySourceOptions } from './local-proxy-options'
 import {
@@ -44,7 +45,8 @@ export function localProxyConfiguration(
   logLevel?: LocalCoreLogLevel,
   runtimeAssets: readonly RuntimeAsset[] = [],
   ports?: LocalProxyPorts,
-  pinnedNode?: Record<string, unknown>
+  pinnedNode?: Record<string, unknown>,
+  savedSelectors?: ReadonlyMap<string, string>
 ): {
   configuration: string
   ports: LocalProxyPorts
@@ -76,6 +78,8 @@ export function localProxyConfiguration(
   >
   if (!Array.isArray(config['proxy-groups'])) throw new Error('代理组结构无效。')
   const candidates: unknown[] = config['proxy-groups']
+  if (candidates.length > 80) throw new Error('本地代理配置最多支持80个代理组。')
+  let groupBytes = 0
   for (const value of candidates) {
     if (!value || typeof value !== 'object' || Array.isArray(value))
       throw new Error('代理组结构无效。')
@@ -112,7 +116,7 @@ export function localProxyConfiguration(
     )
     const emptyFallback =
       typeof raw['empty-fallback'] === 'string' ? raw['empty-fallback'] : 'COMPATIBLE'
-    groups.push({
+    const group: LocalProxyGroup = {
       name: raw.name,
       type: raw.type as GroupType,
       dynamic,
@@ -128,13 +132,14 @@ export function localProxyConfiguration(
       emptyFallback,
       members: dynamic ? [...new Set([...members, emptyFallback])] : members,
       confirmed: false
-    })
+    }
+    // Bound the full provider expansion using the owned controller's 2 MiB budget.
+    // A large but supported subscription can have the same members in many groups.
+    groupBytes += Buffer.byteLength(JSON.stringify(group))
+    if (groupBytes > PROFILE_BYTE_LIMIT)
+      throw new Error('代理组展开超过2MiB，无法完整控制所有成员。')
+    groups.push(group)
   }
-  if (
-    groups.length > 80 ||
-    groups.reduce((sum, group) => sum + Buffer.byteLength(JSON.stringify(group)), 0) > 49152
-  )
-    throw new Error('当前本地代理组控制超过显示预算，未启动或截断可操作成员。')
   validateLocalProxySourceOptions(sourceData)
   Object.assign(config, localProxyInheritedOptions(sourceData))
   if (runtimeAssets.length) Object.assign(config, localProxyGeoControls)
@@ -176,6 +181,7 @@ export function localProxyConfiguration(
   // profile's own listeners were dropped by compileProfileRuntime; inject ours
   // here so the controlled boundary stays exact and source-independent.
   const dedicatedSummary = injectDedicatedListeners(config, dedicated)
+  if (savedSelectors) applySavedSelectorDefaults(config, savedSelectors)
   const configuration = JSON.stringify(config)
   validateLocalProxyGeoAssets(config, runtimeAssets)
   if (Buffer.byteLength(configuration) > PROFILE_BYTE_LIMIT)
@@ -193,7 +199,8 @@ export async function startLocalProxyCore(
   logLevel?: LocalCoreLogLevel,
   runtimeAssets: readonly RuntimeAsset[] = [],
   ports?: LocalProxyPorts,
-  pinnedNode?: Record<string, unknown>
+  pinnedNode?: Record<string, unknown>,
+  savedSelectors?: ReadonlyMap<string, string>
 ): Promise<RelayOwnedCore> {
   const built = localProxyConfiguration(
     source,
@@ -203,7 +210,8 @@ export async function startLocalProxyCore(
     logLevel,
     runtimeAssets,
     ports,
-    pinnedNode
+    pinnedNode,
+    savedSelectors
   )
   return startOwnedCore(
     resourceRoot,

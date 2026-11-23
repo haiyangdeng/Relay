@@ -21,6 +21,20 @@ export interface SystemProxySettings {
   serviceIDs: string[]
   pacScript: string
 }
+// macOS uses this single target for HTTP, HTTPS and (when requested) SOCKS.
+export function systemProxyInboundPort(
+  httpPort: number | undefined,
+  mixedPort: number | undefined,
+  settings: Pick<SystemProxySettings, 'mode' | 'socks'>
+): number {
+  const mixedRequired = settings.mode === 'manual' && settings.socks
+  const port = mixedRequired ? mixedPort : httpPort
+  if (!port || !Number.isInteger(port) || port < 1024 || port > 65535)
+    throw new Error(
+      mixedRequired ? '同时启用 SOCKS 需要核心开启混合端口。' : '当前核心的 HTTP 端口尚未确认。'
+    )
+  return port
+}
 export interface NativeSystemProxySettings extends Omit<SystemProxySettings, 'pacScript'> {
   pacURL?: string
 }
@@ -44,6 +58,7 @@ export interface SystemProxyReport {
     https: boolean
     socks: boolean
     pac: boolean
+    discovery?: boolean
   }[]
   canApply: boolean
   canRestore: boolean
@@ -51,14 +66,22 @@ export interface SystemProxyReport {
   recordID?: string
   quitProxyPorts?: number[]
   currentProxyPorts?: number[]
+  currentLoopbackProxyPorts?: number[]
   currentPacURLHashes?: string[]
   warnings: string[]
+}
+export interface SystemProxyState {
+  pending: boolean
+  inspecting?: boolean
+  observed: boolean
+  report?: SystemProxyReport
 }
 export interface SystemProxyPreparation {
   evidenceId: string
   action: 'apply' | 'restore'
   report: SystemProxyReport
   settings?: SystemProxySettings
+  alreadyApplied?: true
 }
 export interface SystemProxyResult {
   status: 'cancelled' | 'applied' | 'restored' | 'rolledBack' | 'failed' | 'uncertain'
@@ -137,6 +160,7 @@ export function systemProxyReport(raw: unknown): SystemProxyReport {
           'recordID',
           'quitProxyPorts',
           'currentProxyPorts',
+          'currentLoopbackProxyPorts',
           'currentPacURLHashes',
           'warnings'
         ].includes(key)
@@ -168,7 +192,11 @@ export function systemProxyReport(raw: unknown): SystemProxyReport {
     raw.services.some(
       (v) =>
         !object(v) ||
-        Object.keys(v).sort().join(',') !== 'enabled,http,https,id,name,pac,socks' ||
+        Object.keys(v)
+          .filter((key) => key !== 'discovery')
+          .sort()
+          .join(',') !== 'enabled,http,https,id,name,pac,socks' ||
+        (v.discovery !== undefined && typeof v.discovery !== 'boolean') ||
         !clean(v.id, 256) ||
         !clean(v.name, 1024) ||
         ['enabled', 'http', 'https', 'socks', 'pac'].some((key) => typeof v[key] !== 'boolean')
@@ -194,6 +222,14 @@ export function systemProxyReport(raw: unknown): SystemProxyReport {
         raw.currentProxyPorts.length > 4096 ||
         raw.currentProxyPorts.some((port) => !Number.isInteger(port) || port < 1 || port > 65535) ||
         new Set(raw.currentProxyPorts).size !== raw.currentProxyPorts.length)) ||
+    (raw.currentLoopbackProxyPorts !== undefined &&
+      (!Array.isArray(raw.currentLoopbackProxyPorts) ||
+        !Array.isArray(raw.currentProxyPorts) ||
+        raw.currentLoopbackProxyPorts.length > raw.currentProxyPorts.length ||
+        !raw.currentLoopbackProxyPorts.every(
+          (port) => Array.isArray(raw.currentProxyPorts) && raw.currentProxyPorts.includes(port)
+        ) ||
+        new Set(raw.currentLoopbackProxyPorts).size !== raw.currentLoopbackProxyPorts.length)) ||
     (raw.quitProxyPorts !== undefined &&
       (!Array.isArray(raw.quitProxyPorts) ||
         raw.quitProxyPorts.length > 4096 ||
@@ -220,6 +256,9 @@ export function systemProxyReport(raw: unknown): SystemProxyReport {
     ...(Array.isArray(raw.quitProxyPorts) ? { quitProxyPorts: [...raw.quitProxyPorts] } : {}),
     ...(Array.isArray(raw.currentProxyPorts)
       ? { currentProxyPorts: [...raw.currentProxyPorts] }
+      : {}),
+    ...(Array.isArray(raw.currentLoopbackProxyPorts)
+      ? { currentLoopbackProxyPorts: [...raw.currentLoopbackProxyPorts] }
       : {}),
     ...(Array.isArray(raw.currentPacURLHashes)
       ? { currentPacURLHashes: [...raw.currentPacURLHashes] }

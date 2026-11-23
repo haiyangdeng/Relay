@@ -59,6 +59,8 @@ func runRelaySystemProxySelfTests() -> Int32 {
             switch behavior {
             case "apply": current = target; return Proxy.ChangeResult(status: "applied", snapshot: current)
             case "unchanged": return Proxy.ChangeResult(status: "unchanged", snapshot: current)
+            case "notSubmitted": return Proxy.ChangeResult(status: "notSubmitted", snapshot: current)
+            case "otherSnapshot": return Proxy.ChangeResult(status: "notSubmitted", snapshot: target)
             case "rolledBack": return Proxy.ChangeResult(status: "rolledBack", snapshot: current)
             case "authDenied": throw Proxy.SystemFailure(stage: "authorization_create", code: -60005)
             case "lostAck": current = target; throw AssistantError("fixture acknowledgement lost")
@@ -71,6 +73,13 @@ func runRelaySystemProxySelfTests() -> Int32 {
         func input(_ action: String, _ settings: Proxy.Settings? = nil, _ revision: String? = nil) -> Proxy.Input { Proxy.Input(context: context, action: action, settings: settings, expectedRevision: revision) }
         func run(_ action: String, _ settings: Proxy.Settings? = nil, _ revision: String? = nil) throws -> Proxy.Report { try Proxy.perform(input(action, settings, revision), environment: environment) }
         let manual = Proxy.Settings(mode: "manual", host: "127.0.0.1", port: 18191, socks: false, bypass: ["localhost", "10.0.0.0/8", "*.company.local"], excludeSimple: true, serviceIDs: ["A"], pacURL: nil)
+        current = Proxy.Snapshot(location: original.location, services: [
+            Proxy.Service(id: "A", name: "Wi-Fi", enabled: true, configuration: try data(["ProxyAutoDiscoveryEnable": 1]))
+        ])
+        let discovery = try run("inspect")
+        check(discovery.services.first?.discovery == true && discovery.services.first?.pac == false && writes == 0,
+              "inspect reports automatic discovery independently of PAC for startup ownership checks")
+        current = original
         let initial = try run("inspect")
         check(initial.status == "inactive" && !fm.fileExists(atPath: context.stateRoot) && writes == 0, "inert read creates no directories or network writes")
         let plan = try run("prepare", manual)
@@ -158,6 +167,28 @@ func runRelaySystemProxySelfTests() -> Int32 {
         behavior = "rolledBack"
         let rollbackPlan = try run("prepare", manual), rollback = try run("apply", manual, rollbackPlan.revision)
         check(rollback.status == "rolledBack" && current == original, "verified backend rollback is distinguished from uncertainty")
+        behavior = "notSubmitted"
+        let coldPlan = try run("prepare", manual)
+        let cold = try run("apply", manual, coldPlan.revision)
+        check(cold.status == "rolledBack" && cold.recordID == nil && !fm.fileExists(atPath: active.path),
+              "confirmed no-write releases a new pointer only after reading original OS state")
+        behavior = "apply"
+        let ownedPlan = try run("prepare", manual), owned = try run("apply", manual, ownedPlan.revision)
+        behavior = "notSubmitted"
+        let beforeStop = current, stopPlan = try run("prepareRestore")
+        let coldStop = try run("restore", nil, stopPlan.revision), afterStop = try run("inspect")
+        check(coldStop.status == "rolledBack" && afterStop.status == "active" && afterStop.recordID == owned.recordID &&
+              afterStop.canRestore && current == beforeStop,
+              "confirmed no-write during restore preserves the active owner's exact prior phase and pointer")
+        behavior = "apply"
+        let retire = try run("prepareRestore")
+        _ = try run("restore", nil, retire.revision)
+        behavior = "otherSnapshot"
+        let mismatched = try run("prepare", manual), conflicting = try run("apply", manual, mismatched.revision)
+        check(conflicting.status == "uncertain" && conflicting.recordID != nil && fm.fileExists(atPath: active.path),
+              "a mismatched no-write snapshot keeps the recovery journal")
+        let resolve = try run("prepareRestore")
+        _ = try run("restore", nil, resolve.revision)
         behavior = "authDenied"
         let deniedPlan = try run("prepare", manual), denied = try run("apply", manual, deniedPlan.revision)
         check(denied.status == "uncertain" && denied.warnings.contains("系统代理阶段 authorization_create 失败，状态码 -60005。") && current == original, "authorization failure reports bounded stage and OS status without claiming application")
@@ -194,6 +225,7 @@ func runRelaySystemProxySelfTests() -> Int32 {
         rejects("retire refuses a missing revision") { _ = try run("retireDetached") }
         otherConfigurations = [["__SCOPED__": ["en8": ["HTTPEnable": 1, "HTTPProxy": "localhost", "HTTPPort": 18191]]]]
         let scoped = try run("inspect")
+        check(scoped.currentLoopbackProxyPorts == [7890, 18191], "a conflicting service retains the scoped local session listener")
         check(scoped.revision == detached.revision && !scoped.canRetireDetached, "inspect withdraws retirement eligibility when a scoped reference appears")
         rejects("retire rereads scoped references even when the current location revision is unchanged") {
             _ = try run("retireDetached", nil, detached.revision)
@@ -216,7 +248,15 @@ func runRelaySystemProxySelfTests() -> Int32 {
         let mixedPAC = try run("inspect")
         check(mixedPAC.currentProxyPorts == [18191, 19000] && mixedPAC.currentPacURLHashes == [NetworkConfiguration.digest(Data("http://127.0.0.1:19000/proxy.pac".utf8))], "an unrelated PAC cannot hide a known manual core endpoint")
         otherConfigurations = [["ProxyAutoConfigEnable": 1, "ProxyAutoConfigURLString": "http://localhost:18192/alias.pac"]]
-        check((try run("inspect")).currentProxyPorts == [18191, 18192], "PAC loopback hostname aliases retain their explicit listener port")
+        let aliasedPAC = try run("inspect")
+        check(aliasedPAC.currentProxyPorts == [18191, 18192] && aliasedPAC.currentLoopbackProxyPorts == [18191, 18192], "PAC loopback hostname aliases retain their explicit listener port")
+        otherConfigurations = [
+            ["HTTPEnable": 1, "HTTPProxy": "remote.invalid", "HTTPPort": 17890],
+            ["__SCOPED__": ["en8": ["SOCKSEnable": 1, "SOCKSProxy": "::1", "SOCKSPort": 17891]]],
+            ["ProxyAutoConfigEnable": 1, "ProxyAutoConfigURLString": "http://remote.invalid:18192/other.pac"]
+        ]
+        let scopedEndpoints = try run("inspect")
+        check(scopedEndpoints.currentProxyPorts == [17890, 17891, 18191, 18192] && scopedEndpoints.currentLoopbackProxyPorts == [17891, 18191], "an external manual or PAC URL on a matching port cannot claim a local TUN listener")
         otherConfigurations = []
         let originalManual = Proxy.Snapshot(location: original.location, services: [
             Proxy.Service(id: "A", name: "Wi-Fi", enabled: true, configuration: external)

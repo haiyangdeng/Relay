@@ -5,6 +5,7 @@ import { DEFAULT_MIHOMO_TUN_CONFIG, getDefaultMihomoTunDevice } from '../../../s
 import { ProfileStore } from '../profiles/store'
 import { profileHash } from '../profiles/source'
 import { ResourceStore } from '../resources/store'
+import { tunLocalPlanProjection } from '../tun/local-plan-projection'
 import type { DefaultGeoResourceBinding, RuntimeAsset } from './bindings'
 import { ConfigurationEditStore } from './edit-store'
 import { createConfigurationEditService } from './edit-service'
@@ -48,7 +49,8 @@ async function fixture(configuration: Record<string, unknown> = source) {
     editor = createConfigurationEditService({
       profiles,
       store,
-      prepare: (request, recheck, enableTun) => complete.prepare(request, recheck, enableTun)
+      prepare: (request, recheck, enableTun, transform) =>
+        complete.prepare(request, recheck, enableTun, transform)
     })
   return {
     profiles,
@@ -67,6 +69,139 @@ afterEach(async () => {
 })
 
 describe('TUN preparation from the selected saved profile', () => {
+  it.each([
+    { name: 'HTTP only', httpPort: 17890 },
+    { name: 'SOCKS only', socksPort: 17891 },
+    { name: 'HTTP and SOCKS', httpPort: 17890, socksPort: 17891 },
+    { name: 'no', httpPort: undefined, socksPort: undefined }
+  ])(
+    'binds and checks the actual handoff projection with $name dedicated listeners',
+    async (ports) => {
+      const ordinary = { name: 'Ordinary', type: 'http', server: 'ordinary.invalid', port: 443 },
+        pinned = { name: 'Fixed AI', type: 'http', server: 'fixed.invalid', port: 443, tls: true },
+        { editor, complete, selection, profiles, store, check } = await fixture({
+          proxies: [ordinary],
+          'proxy-groups': [{ name: 'Choice', type: 'select', 'include-all-proxies': true }],
+          rules: ['MATCH,Choice'],
+          dns: { enable: true, nameserver: ['1.1.1.1'] },
+          tun: { enable: false, stack: 'mixed' }
+        }),
+        original = await profiles.read(selection),
+        initialEdits = await store.read(),
+        dedicated =
+          ports.httpPort || ports.socksPort
+            ? {
+                route: pinned.name,
+                ...(ports.httpPort ? { httpPort: ports.httpPort } : {}),
+                ...(ports.socksPort ? { socksPort: ports.socksPort } : {})
+              }
+            : undefined,
+        members = ['DIRECT', ordinary.name, ...(dedicated ? [pinned.name] : []), 'Choice'],
+        recheck = vi.fn(async () => {}),
+        prepared = await editor.prepareForTun(selection, {
+          transform: (configuration) =>
+            tunLocalPlanProjection(
+              configuration,
+              {
+                httpPort: 7892,
+                resolverMode: 'profile',
+                ports: { http: 7892, socks: 7891, mixed: 7890, redir: 0 },
+                dedicated
+              },
+              dedicated ? pinned : undefined,
+              [
+                { name: 'Choice', type: 'select', now: ordinary.name, confirmed: true },
+                { name: 'GLOBAL', type: 'select', now: ordinary.name, confirmed: true, members }
+              ]
+            ),
+          recheck
+        })
+      // This is the real editor -> complete.prepare -> bindRuntimeResources path.
+      // A projection unit test alone misses the stricter HTTP inbound schema.
+      expect(prepared.readyForParserCheck).toBe(true)
+      expect((await complete.check({ evidenceId: prepared.evidenceId })).status).toBe('passed')
+      expect(check).toHaveBeenCalledOnce()
+      const checked = await complete.takeChecked({ evidenceId: prepared.evidenceId }),
+        configuration = JSON.parse(checked.configuration)
+      expect(configuration).toMatchObject({
+        port: 7892,
+        'socks-port': 7891,
+        'mixed-port': 7890,
+        tun: { enable: true, stack: 'mixed' },
+        proxies: [ordinary, ...(dedicated ? [pinned] : [])],
+        'proxy-groups': [
+          {
+            name: 'Choice',
+            'default-selected': ordinary.name,
+            ...(dedicated ? { 'exclude-filter': '(?-imsx:\\AFixed AI\\z)' } : {})
+          },
+          { name: 'GLOBAL', type: 'select', proxies: members, 'default-selected': ordinary.name }
+        ]
+      })
+      expect(configuration.listeners).toEqual([
+        ...(ports.httpPort
+          ? [
+              {
+                name: 'relay-ai-http',
+                type: 'http',
+                port: ports.httpPort,
+                listen: '127.0.0.1',
+                proxy: pinned.name
+              }
+            ]
+          : []),
+        ...(ports.socksPort
+          ? [
+              {
+                name: 'relay-ai-socks',
+                type: 'socks',
+                port: ports.socksPort,
+                listen: '127.0.0.1',
+                proxy: pinned.name,
+                udp: false
+              }
+            ]
+          : [])
+      ])
+      expect(await profiles.read(selection)).toEqual(original)
+      expect(await store.read()).toEqual(initialEdits)
+      await checked.recheck()
+      expect(recheck).toHaveBeenCalled()
+    }
+  )
+
+  it('applies listener projection after effective script output exactly once and rechecks the plan', async () => {
+    const { editor, complete, selection, script } = await fixture()
+    await editor.save({
+      globalOverrides: [{ id: 'script', kind: 'js', content: 'main' }],
+      profileOverrides: [],
+      controlled: {}
+    })
+    script.mockImplementation(async (_script, configuration) => ({
+      configuration: { ...configuration, mode: 'global', port: 19000 },
+      logs: []
+    }))
+    const transform = vi.fn((configuration: Record<string, unknown>) => {
+      expect(configuration.mode).toBe('global')
+      expect(configuration.port).toBe(19000)
+      expect(configuration.tun).toMatchObject({ enable: true })
+      return { port: 7892, 'mixed-port': 7890 }
+    })
+    const recheck = vi.fn(async () => {})
+    const plan = await editor.prepareForTun(selection, { transform, recheck })
+    expect((await complete.check({ evidenceId: plan.evidenceId })).status).toBe('passed')
+    const checked = await complete.takeChecked({ evidenceId: plan.evidenceId })
+    expect(JSON.parse(checked.configuration)).toMatchObject({
+      port: 7892,
+      'mixed-port': 7890,
+      mode: 'global'
+    })
+    expect(script).toHaveBeenCalledOnce()
+    expect(transform).toHaveBeenCalledOnce()
+    recheck.mockRejectedValue(new Error('listener plan changed'))
+    await expect(checked.recheck()).rejects.toThrow()
+  })
+
   it('prepares complete TUN defaults without saving edits or changing source bytes', async () => {
     const { profiles, store, selection, editor, complete } = await fixture(),
       original = await profiles.read(selection),

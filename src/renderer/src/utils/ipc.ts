@@ -1,4 +1,5 @@
 import { TitleBarOverlayOptions } from 'electron'
+import type { RelayProxyPageOwner } from '../../../shared/relay/local-proxy'
 import type {
   TrafficUsageAggregate,
   TrafficUsageBreakdownQuery,
@@ -24,17 +25,27 @@ interface IpcApi {
   // Mihomo API
   mihomoVersion: () => Promise<IMihomoVersion>
   mihomoCloseConnection: (id: string) => Promise<void>
-  mihomoCloseAllConnections: (group?: string) => Promise<void>
+  mihomoCloseAllConnections: (
+    group?: string | Pick<RelayProxyPageOwner, 'instanceId' | 'configurationRevision'>
+  ) => Promise<void>
   mihomoRules: () => Promise<IMihomoRulesInfo>
   mihomoRulesDisable: (rules: Record<string, boolean>) => Promise<void>
   mihomoProxies: () => Promise<IMihomoProxies>
-  mihomoGroups: (includeHidden?: boolean) => Promise<IMihomoMixedGroup[]>
+  relayProxyPageOwner: () => Promise<RelayProxyPageOwner | undefined>
+  mihomoGroups: (
+    includeHidden?: boolean,
+    owner?: RelayProxyPageOwner
+  ) => Promise<IMihomoMixedGroup[]>
   mihomoProxyProviders: () => Promise<IMihomoProxyProviders>
   mihomoUpdateProxyProviders: (name: string) => Promise<void>
   mihomoRuleProviders: () => Promise<IMihomoRuleProviders>
   mihomoUpdateRuleProviders: (name: string) => Promise<void>
-  mihomoChangeProxy: (group: string, proxy: string) => Promise<IMihomoProxy>
-  mihomoUnfixedProxy: (group: string) => Promise<IMihomoProxy>
+  mihomoChangeProxy: (
+    group: string,
+    proxy: string,
+    owner?: RelayProxyPageOwner
+  ) => Promise<IMihomoProxy>
+  mihomoUnfixedProxy: (group: string, owner?: RelayProxyPageOwner) => Promise<IMihomoProxy>
   mihomoUpgradeGeo: () => Promise<void>
   mihomoUpgrade: () => Promise<void>
   mihomoUpgradeUI: () => Promise<void>
@@ -290,6 +301,7 @@ export const {
   mihomoRulesDisable,
   mihomoProxies,
   mihomoGroups,
+  relayProxyPageOwner,
   mihomoProxyProviders,
   mihomoUpdateProxyProviders,
   mihomoRuleProviders,

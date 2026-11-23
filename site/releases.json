@@ -1,12 +1,41 @@
 {
   "schemaVersion": 1,
   "repositoryUrl": "https://github.com/haiyangdeng/Relay",
-  "currentVersion": "1.0.0",
+  "currentVersion": "1.0.0-build.23",
   "releases": [
+    {
+      "version": "1.0.0-build.23",
+      "status": "published",
+      "publishedAt": "2026-11-23",
+      "minimumOS": "macOS 13 或更高版本",
+      "notes": [
+        "Apple Silicon 构建 23 集成 TUN，修复首次开启系统代理及关闭 TUN 后恢复普通代理的问题。",
+        "选中配置或节点即应用，测速只检查当前代理组。",
+        "Intel 继续提供 11 月 13 日的构建 2。两种安装包首次使用都需要导入自己的配置。"
+      ],
+      "assets": [
+        {
+          "arch": "arm64",
+          "label": "Apple Silicon",
+          "filename": "Relay-1.0.0-macOS-arm64.pkg",
+          "url": "https://github.com/haiyangdeng/Relay/releases/download/v1.0.0-build.23/Relay-1.0.0-macOS-arm64.pkg",
+          "sha256": "91c58934b7370525401d7dbbe330a8c90d48ff9dfdd523a5239c08719f6039ec",
+          "buildVersion": "23"
+        },
+        {
+          "arch": "x64",
+          "label": "Intel",
+          "filename": "Relay-1.0.0-macOS-x64.pkg",
+          "url": "https://github.com/haiyangdeng/Relay/releases/download/v1.0.0-build.23/Relay-1.0.0-macOS-x64.pkg",
+          "sha256": "d823c737a7db9026cda5afca7a790adfed3d1ea4dc1448a31a8b8d2c13777c0a",
+          "buildVersion": "2"
+        }
+      ]
+    },
     {
       "version": "1.0.0",
       "status": "published",
-      "publishedAt": "2026-11-13T03:07:21Z",
+      "publishedAt": "2026-11-13T03:29:56Z",
       "minimumOS": "macOS 13 或更高版本",
       "notes": [
         "代理工作区：订阅与本地配置、代理组、节点、规则、连接和日志。",

@@ -31,6 +31,7 @@ enum RelaySystemProxy {
         let https: Bool
         let socks: Bool
         let pac: Bool
+        let discovery: Bool
     }
     struct Report: Encodable {
         let status: String
@@ -43,6 +44,7 @@ enum RelaySystemProxy {
         let recordID: String?
         let quitProxyPorts: [Int]?
         let currentProxyPorts: [Int]?
+        let currentLoopbackProxyPorts: [Int]?
         let currentPacURLHashes: [String]?
         let warnings: [String]
     }
@@ -196,9 +198,20 @@ enum RelaySystemProxy {
     private static func restorable(_ current: Snapshot, _ stored: Stored?) throws -> Bool {
         try restorationTarget(current, stored) != nil
     }
+    // These are the local addresses accepted by the managed loopback listeners.
+    private static func isLoopbackProxyHost(_ raw: String) -> Bool {
+        let host = raw.hasPrefix("[") && raw.hasSuffix("]") ? String(raw.dropFirst().dropLast()) : raw
+        if ["localhost", "localhost.", "127.0.0.1"].contains(host.lowercased()) { return true }
+        guard host.contains(":"), !host.utf8.contains(0) else { return false }
+        var v6 = in6_addr()
+        guard inet_pton(AF_INET6, host, &v6) == 1 else { return false }
+        let bytes = withUnsafeBytes(of: &v6) { Array($0) }
+        return bytes == Array(repeating: 0, count: 15) + [1] ||
+            bytes == Array(repeating: 0, count: 10) + [255, 255, 127, 0, 0, 1]
+    }
     // Positive proof for a settled manual transaction only. A PAC, discovery,
     // malformed or uncertain configuration can hide endpoints we cannot verify.
-    private static func manualPorts(_ configuration: [String: Any], allowAutomatic: Bool = false) throws -> Set<Int> {
+    private static func manualPorts(_ configuration: [String: Any], allowAutomatic: Bool = false, loopbackOnly: Bool = false) throws -> Set<Int> {
         func enabled(_ key: String) throws -> Bool {
             guard let value = configuration[key] else { return false }
             guard let number = value as? NSNumber, number == 0 || number == 1 else {
@@ -217,18 +230,18 @@ enum RelaySystemProxy {
                   let port = configuration[prefix + "Port"] as? Int, (1...65535).contains(port) else {
                 throw AssistantError("代理端点不可确认。")
             }
-            ports.insert(port)
+            if !loopbackOnly || isLoopbackProxyHost(host) { ports.insert(port) }
         }
         // SystemConfiguration places interface/service/domain overrides in
         // nested dictionaries/arrays. Check these as well as the global values.
         func collect(_ value: Any) throws {
-            if let nested = value as? [String: Any] { ports.formUnion(try manualPorts(nested, allowAutomatic: allowAutomatic)) }
+            if let nested = value as? [String: Any] { ports.formUnion(try manualPorts(nested, allowAutomatic: allowAutomatic, loopbackOnly: loopbackOnly)) }
             else if let list = value as? [Any] { for item in list { try collect(item) } }
         }
         for value in configuration.values { try collect(value) }
         return ports
     }
-    private static func pacReferences(_ configuration: [String: Any]) throws -> (hashes: Set<String>, ports: Set<Int>) {
+    private static func pacReferences(_ configuration: [String: Any], loopbackOnly: Bool = false) throws -> (hashes: Set<String>, ports: Set<Int>) {
         var hashes: Set<String> = [], ports: Set<Int> = []
         if let raw = configuration["ProxyAutoConfigEnable"] {
             guard let enabled = raw as? NSNumber, enabled == 0 || enabled == 1 else { throw AssistantError("自动代理启用状态不可确认。") }
@@ -238,16 +251,16 @@ enum RelaySystemProxy {
                 // Report equality evidence without exposing private PAC URLs.
                 hashes.insert(NetworkConfiguration.digest(Data(rawURL.utf8)))
                 if ["http", "https"].contains(scheme) {
-                    guard url.host != nil else { throw AssistantError("自动代理主机不可确认。") }
+                    guard let host = url.host else { throw AssistantError("自动代理主机不可确认。") }
                     let port = url.port ?? (scheme == "https" ? 443 : 80)
                     guard (1...65535).contains(port) else { throw AssistantError("自动代理端口不可确认。") }
-                    ports.insert(port)
+                    if !loopbackOnly || isLoopbackProxyHost(host) { ports.insert(port) }
                 }
             }
         }
         func collect(_ value: Any) throws {
             if let nested = value as? [String: Any] {
-                let references = try pacReferences(nested)
+                let references = try pacReferences(nested, loopbackOnly: loopbackOnly)
                 hashes.formUnion(references.hashes); ports.formUnion(references.ports)
             } else if let list = value as? [Any] { for item in list { try collect(item) } }
         }
@@ -303,27 +316,29 @@ enum RelaySystemProxy {
         } else {
             detachedPorts = nil
         }
-        var currentPorts: [Int]?, currentPacHashes: [String]?
+        var currentPorts: [Int]?, currentLoopbackPorts: [Int]?, currentPacHashes: [String]?
         if let readProxyConfigurations {
             do {
                 let values = try readProxyConfigurations()
                 guard !values.isEmpty else { throw AssistantError("系统代理引用范围不可确认。") }
-                var ports: Set<Int> = [], hashes: Set<String> = []
+                var ports: Set<Int> = [], localPorts: Set<Int> = [], hashes: Set<String> = []
                 for value in values {
                     ports.formUnion(try manualPorts(value, allowAutomatic: true))
                     let pac = try pacReferences(value)
                     ports.formUnion(pac.ports); hashes.formUnion(pac.hashes)
+                    localPorts.formUnion(try manualPorts(value, allowAutomatic: true, loopbackOnly: true))
+                    localPorts.formUnion(try pacReferences(value, loopbackOnly: true).ports)
                 }
-                currentPorts = ports.sorted(); currentPacHashes = hashes.sorted()
+                currentPorts = ports.sorted(); currentLoopbackPorts = localPorts.sorted(); currentPacHashes = hashes.sorted()
             } catch { currentPorts = nil; currentPacHashes = nil }
         }
         return Report(status: status, revision: try combined(current, stored), location: current.location,
             services: try current.services.map { service in
                 let value = try dictionary(service.configuration)
                 func enabled(_ key: String) -> Bool { (value[key] as? NSNumber)?.intValue == 1 }
-                return ServiceInfo(id: service.id, name: service.name, enabled: service.enabled, http: enabled("HTTPEnable"), https: enabled("HTTPSEnable"), socks: enabled("SOCKSEnable"), pac: enabled("ProxyAutoConfigEnable"))
+                return ServiceInfo(id: service.id, name: service.name, enabled: service.enabled, http: enabled("HTTPEnable"), https: enabled("HTTPSEnable"), socks: enabled("SOCKSEnable"), pac: enabled("ProxyAutoConfigEnable"), discovery: enabled("ProxyAutoDiscoveryEnable"))
             }, canApply: apply, canRestore: canRestore, canRetireDetached: detachedPorts != nil,
-            recordID: stored?.record.id, quitProxyPorts: status == "conflict" ? detachedPorts : nil, currentProxyPorts: currentPorts, currentPacURLHashes: currentPacHashes,
+            recordID: stored?.record.id, quitProxyPorts: status == "conflict" ? detachedPorts : nil, currentProxyPorts: currentPorts, currentLoopbackProxyPorts: currentLoopbackPorts, currentPacURLHashes: currentPacHashes,
             warnings: warnings + ["只改写所选服务的代理协议，不改写DNS／TUN或调用核心启停。系统应用配置期间新连接可能短暂失败；偏好已写入不等于实际流量与禁止直连已验证。"])
     }
     static func perform(_ input: Input, environment: Environment = .live) throws -> Report {
@@ -393,6 +408,11 @@ enum RelaySystemProxy {
                         try FileManager.default.removeItem(at: root.appendingPathComponent("active.json")); try RelayCoreRecovery.sync(root)
                         return try report(restored.snapshot, nil, "restored")
                     }
+                    if restored.status == "notSubmitted", try same(restored.snapshot, before), try same(environment.read(), before),
+                       try load(root)?.record.id == stored.record.id {
+                        try phase(stored.record.id, stored.phase)
+                        return try report(before, load(root), "rolledBack", warnings: restored.warnings)
+                    }
                 } catch { failureWarnings = [(error as? SystemFailure)?.message ?? "系统代理恢复后端结果未确认。"] }
                 try phase(stored.record.id, "uncertain")
                 return try report(environment.read(), load(root), "uncertain", warnings: failureWarnings + ["恢复结果未确认，保留原始证据；不重试、不清空系统代理或停止核心。"])
@@ -409,7 +429,8 @@ enum RelaySystemProxy {
                     try phase(record.id, "applied")
                     return try report(changed.snapshot, load(root), "applied")
                 }
-                if ["rolledBack", "unchanged"].contains(changed.status), try same(changed.snapshot, before), try same(environment.read(), before) {
+                if ["rolledBack", "unchanged", "notSubmitted"].contains(changed.status), try same(changed.snapshot, before),
+                   try same(environment.read(), before), try load(root)?.record.id == record.id {
                     try phase(record.id, "rolledBack")
                     if let old = stored {
                         let bytes = try data(root.appendingPathComponent(old.record.id + "/record.json"))!

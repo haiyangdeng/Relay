@@ -402,6 +402,136 @@ describe('TUN main-only persistent native control channel', () => {
     expect(f.write).toHaveBeenCalledTimes(3)
   })
 
+  const releasedReply = (id = 3) => ({
+    version: 1,
+    id,
+    action: 'disposeReleased',
+    ...binding,
+    closed: true,
+    restorationVerified: false,
+    reason: 'external-protection-changed',
+    stateDisposition: 'retained-evidence'
+  })
+
+  it('releases stopped managed resources without claiming network restoration and waits for IO exit', async () => {
+    const f = fixture(false, 'core-managed', () => 'c'.repeat(64))
+    await f.ready()
+    await expect(f.channel.disposeReleased?.()).rejects.toThrow()
+    const stopped = f.channel.stopCore()
+    f.send(f.reply(2, 'stopCore', 'coreStopped'))
+    await stopped
+    let completed = false
+    const closing = f.channel.disposeReleased?.().then(() => {
+      completed = true
+    })
+    expect(JSON.parse(f.write.mock.calls[2][0])).toEqual({
+      version: 1,
+      id: 3,
+      action: 'disposeReleased',
+      ...binding
+    })
+    f.send(releasedReply())
+    await Promise.resolve()
+    expect(completed).toBe(false)
+    expect(f.end).toHaveBeenCalledOnce()
+    f.gone()
+    await closing
+    expect(f.channel.smartStateDisposition()).toBe('retained-evidence')
+    expect(f.uncertain).not.toHaveBeenCalled()
+  })
+
+  it('allows resource-only release after a bound normal-disposal refusal', async () => {
+    const f = fixture(false, 'core-managed')
+    await f.ready()
+    const stopped = f.channel.stopCore()
+    f.send(f.reply(2, 'stopCore', 'coreStopped'))
+    await stopped
+    const verified = f.channel.verifyRestored()
+    f.send(f.reply(3, 'verifyRestored', 'restored'))
+    await verified
+    const closed = f.channel.dispose(),
+      rejected = expect(closed).rejects.toThrow()
+    f.send({ ...f.reply(4, 'dispose'), closed: false })
+    await rejected
+    const released = f.channel.disposeReleased?.()
+    f.send(releasedReply(5))
+    await Promise.resolve()
+    f.gone()
+    await released
+    expect(f.write).toHaveBeenCalledTimes(5)
+  })
+
+  it('does not expose resource-only disposal to descriptor hosts', async () => {
+    const f = fixture()
+    await f.ready()
+    expect(f.channel.disposeReleased).toBeUndefined()
+  })
+
+  it.each([
+    { restorationVerified: true },
+    { reason: 'restored' },
+    { stateDisposition: 'removed' },
+    { sessionId: '00000000-0000-0000-0000-000000000000' },
+    { unknown: true }
+  ])('rejects invalid resource release proof %j', async (change) => {
+    const f = fixture(false, 'core-managed')
+    await f.ready()
+    const stopped = f.channel.stopCore()
+    f.send(f.reply(2, 'stopCore', 'coreStopped'))
+    await stopped
+    const closing = f.channel.disposeReleased?.()
+    const rejected = expect(closing).rejects.toThrow()
+    f.send({ ...releasedReply(), ...change })
+    await rejected
+    expect(f.end).not.toHaveBeenCalled()
+  })
+
+  it('allows normal restoration after a bound denial of resource-only release', async () => {
+    const f = fixture(false, 'core-managed')
+    await f.ready()
+    const stopped = f.channel.stopCore()
+    f.send(f.reply(2, 'stopCore', 'coreStopped'))
+    await stopped
+    const denied = f.channel.disposeReleased?.(),
+      rejected = expect(denied).rejects.toThrow()
+    f.send({ version: 1, id: 3, action: 'disposeReleased', ...binding, closed: false })
+    await rejected
+    await expect(f.channel.dispose()).rejects.toThrow()
+    await expect(f.channel.startCore()).rejects.toThrow()
+    const verified = f.channel.verifyRestored()
+    f.send(f.reply(4, 'verifyRestored', 'restored'))
+    await verified
+    const retry = f.channel.dispose()
+    f.send(f.reply(5, 'dispose'))
+    await Promise.resolve()
+    f.gone()
+    await retry
+    expect(f.write).toHaveBeenCalledTimes(5)
+  })
+
+  it.each(['acknowledged', 'late'] as const)(
+    'retains %s resource release evidence without replaying terminal work',
+    async (timing) => {
+      vi.useFakeTimers()
+      const f = fixture(false, 'core-managed')
+      await f.ready()
+      const stopped = f.channel.stopCore()
+      f.send(f.reply(2, 'stopCore', 'coreStopped'))
+      await stopped
+      const closing = f.channel.disposeReleased?.(),
+        rejected = expect(closing).rejects.toThrow()
+      if (timing === 'acknowledged') f.send(releasedReply())
+      await vi.advanceTimersByTimeAsync(1001)
+      await rejected
+      await expect(f.channel.dispose()).rejects.toThrow()
+      if (timing === 'late') f.send(releasedReply())
+      f.gone()
+      await f.channel.disposeReleased?.()
+      expect(f.channel.smartStateDisposition()).toBe('retained-evidence')
+      expect(f.write).toHaveBeenCalledTimes(3)
+    }
+  )
+
   it('settles failures even if a UI uncertainty callback throws', async () => {
     vi.useFakeTimers()
     for (const mode of ['timeout', 'malformed'] as const) {

@@ -114,6 +114,114 @@ function fixture() {
   }
 }
 describe('Confirmed system proxy lifecycle with retained PAC and restoration evidence', () => {
+  it.each(['manual', 'pac'] as const)(
+    'recognizes only a verified enable for the same %s target and native record',
+    async (mode) => {
+      const f = fixture()
+      f.adapters.confirm.mockResolvedValue(true)
+      const requested = { ...settings, mode }
+      const first = await f.service.prepare(requested)
+      expect(first.alreadyApplied).toBeUndefined()
+      expect((await f.service.execute({ evidenceId: first.evidenceId })).status).toBe('applied')
+      f.set({ status: 'active' })
+
+      const otherProcess = createSystemProxyService(f.adapters)
+      expect((await otherProcess.prepare(requested)).alreadyApplied).toBeUndefined()
+      const same = await f.service.prepare(requested)
+      expect(same.alreadyApplied).toBe(true)
+      expect(
+        (await f.service.prepare({ ...requested, port: requested.port + 1 })).alreadyApplied
+      ).toBeUndefined()
+      f.set({ revision: 'e'.repeat(64) })
+      expect((await f.service.prepare(requested)).alreadyApplied).toBeUndefined()
+      f.set({ revision: 'b'.repeat(64), recordID: '00000000-0000-0000-0000-000000000002' })
+      expect((await f.service.prepare(requested)).alreadyApplied).toBeUndefined()
+      expect(f.adapters.native.mock.calls.filter(([action]) => action === 'apply')).toHaveLength(1)
+    }
+  )
+  it.each(['active', 'pending', 'conflict', 'uncertain'] as const)(
+    'preserves the current session listener on a fresh scoped local dependency with status %s',
+    async (status) => {
+      const f = fixture()
+      f.set({
+        status,
+        recordID: '00000000-0000-0000-0000-000000000001',
+        currentProxyPorts: [17891, 8888],
+        currentLoopbackProxyPorts: [17891]
+      })
+      expect(await f.service.needsCoreForHandoff([7890, 17891])).toBe(true)
+      expect(f.adapters.native.mock.calls.map(([action]) => action)).toEqual(['inspect'])
+    }
+  )
+  it('distinguishes a detached transaction, an unrelated proxy and incomplete scope evidence', async () => {
+    const f = fixture()
+    f.set({ currentProxyPorts: [7890], currentLoopbackProxyPorts: [7890] })
+    expect(await f.service.needsCoreForHandoff([7890])).toBe(false)
+    f.set({
+      status: 'pending',
+      recordID: '00000000-0000-0000-0000-000000000001',
+      currentProxyPorts: [8888],
+      currentLoopbackProxyPorts: [],
+      canRetireDetached: true
+    })
+    expect(await f.service.needsCoreForHandoff([7890])).toBe(false)
+    f.set({ status: 'conflict', canRetireDetached: false, currentProxyPorts: [7890] })
+    await expect(f.service.needsCoreForHandoff([7890])).rejects.toThrow('依赖未确认')
+    f.set({ currentLoopbackProxyPorts: undefined })
+    await expect(f.service.needsCoreForHandoff([7890])).rejects.toThrow('依赖未确认')
+    f.set({ status: 'uncertain', currentProxyPorts: undefined })
+    await expect(f.service.needsCoreForHandoff([7890])).rejects.toThrow('状态未确认')
+    expect(f.adapters.native.mock.calls.every(([action]) => action === 'inspect')).toBe(true)
+  })
+  it('requires a fresh observation after an earlier active receipt', async () => {
+    const f = fixture()
+    f.set({
+      status: 'active',
+      recordID: '00000000-0000-0000-0000-000000000001',
+      currentProxyPorts: [7890],
+      currentLoopbackProxyPorts: [7890]
+    })
+    await f.service.inspect()
+    f.adapters.native.mockRejectedValueOnce(new Error('read unavailable'))
+    await expect(f.service.needsCoreForHandoff([7890])).rejects.toThrow('状态未确认')
+    expect(f.service.state().report?.status).toBe('uncertain')
+  })
+  it.each(['hash', 'local-alias'] as const)(
+    'recognizes a retained PAC by %s after an external edit without releasing it',
+    async (source) => {
+      const f = fixture()
+      f.adapters.confirm.mockResolvedValue(true)
+      const plan = await f.service.prepare(settings)
+      expect((await f.service.execute({ evidenceId: plan.evidenceId })).status).toBe('applied')
+      f.set({
+        status: 'conflict',
+        currentProxyPorts: source === 'local-alias' ? [18192] : [],
+        currentLoopbackProxyPorts: source === 'local-alias' ? [18192] : [],
+        currentPacURLHashes:
+          source === 'hash' ? [createHash('sha256').update(f.pac.url).digest('hex')] : []
+      })
+      expect(await f.service.needsCoreForHandoff([18191])).toBe(true)
+      expect(f.close).not.toHaveBeenCalled()
+    }
+  )
+  it('rejects local port evidence outside the effective port set', () => {
+    const f = fixture()
+    for (const currentLoopbackProxyPorts of [[7890, 7890], [17891], ['7890']])
+      expect(() =>
+        systemProxyReport({ ...f.current(), currentProxyPorts: [7890], currentLoopbackProxyPorts })
+      ).toThrow()
+  })
+  it('distinguishes an in-flight status read from a pending mutation for sidebar clicks', async () => {
+    const f = fixture()
+    const inspection = f.service.inspect()
+    expect(f.service.state()).toMatchObject({ pending: true, inspecting: true })
+    await inspection
+    expect(f.service.state()).toMatchObject({ pending: false, inspecting: false })
+    const preparation = f.service.prepare(settings)
+    expect(f.service.state()).toMatchObject({ pending: true, inspecting: false })
+    const plan = await preparation
+    f.service.cancel({ evidenceId: plan.evidenceId })
+  })
   it('does not treat readable ports as proof that an uncertain transaction is settled', async () => {
     const f = fixture()
     f.set({

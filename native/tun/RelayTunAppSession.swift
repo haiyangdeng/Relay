@@ -17,7 +17,9 @@ final class RelayTunAppSession: NSObject, RelayTunCoreObservationChannel {
     private var managedCore: RelayTunManagedCore?
     // Dispatch callbacks deliberately retain this owner weakly. The actual
     // session must retain its read capability beyond ClientMain's last use.
+    private var proxyGroupsChannel: RelayTunRuntimeCapture.Channel?
     private var runtimeCaptureChannel: RelayTunRuntimeCapture.Channel?
+    private let proxyGroupsIOQueue = DispatchQueue(label: "local.relay.tun.proxy-groups.io")
     private let runtimeTrafficIOQueue = DispatchQueue(label: "local.relay.tun.runtime-traffic.io")
     private let runtimeTrafficAuthority = RelayTunRuntimeCapture.TrafficAuthority()
     private var smartStateChannel: RelayTunSmartStateChannel?
@@ -41,6 +43,7 @@ final class RelayTunAppSession: NSObject, RelayTunCoreObservationChannel {
     private var providerOperationDraining = false
     private var providerDrainWaiters = [() -> Void]()
     private let providerDrainGroup = DispatchGroup()
+    private let releaseDrainGroup = DispatchGroup()
     private let providerProbeQueue = DispatchQueue(label: "local.relay.tun.provider-probe")
     private var receipt: RelayTunAcquiredReceipt?
     private var heldDelivery: FileHandle?
@@ -68,9 +71,9 @@ final class RelayTunAppSession: NSObject, RelayTunCoreObservationChannel {
         super.init()
     }
     func startRuntimeCapture(_ channel: RelayTunRuntimeCapture.Channel) throws {
-        guard runtimeCaptureChannel == nil, bundle.coreManaged, let revision = bundle.installationRevision else { throw Failure.state }
+        guard (channel.proxyGroupsEnabled ? proxyGroupsChannel : runtimeCaptureChannel) == nil, bundle.coreManaged, let revision = bundle.installationRevision else { throw Failure.state }
         let clientSHA256 = try runtimeCapabilityIdentity(revision: revision)
-        runtimeCaptureChannel = channel
+        if channel.proxyGroupsEnabled { proxyGroupsChannel = channel } else { runtimeCaptureChannel = channel }
         channel.start(binding: bundle.binding.json, clientSHA256: clientSHA256, installationRevision: revision,
                       traffic: { [weak self] context, reply in
             guard let self else { reply(.unavailable); return }
@@ -78,6 +81,9 @@ final class RelayTunAppSession: NSObject, RelayTunCoreObservationChannel {
         }, connections: { [weak self] context, reply in
             guard let self else { reply(.unavailable); return }
             self.readRuntimeTraffic(context: context, connections: true, reply: reply)
+        }, proxies: { [weak self] action, context, reply in
+            guard let self else { reply(.unavailable); return }
+            self.readRuntimeTraffic(context: context, proxies: action, reply: reply)
         }) { [weak self] deadline, reply in
             guard let self else { reply(.unavailable); return }
             self.captureRuntime(deadline: deadline, reply: reply)
@@ -687,8 +693,58 @@ final class RelayTunAppSession: NSObject, RelayTunCoreObservationChannel {
         }
         return disposition
     }
+    /// Revoke admission, drain inherited pipes and bounded worker IO, then
+    /// enqueue behind their owner callbacks. This path never writes networking.
+    private func afterReleasedWorkersDrain(_ work: @escaping (Result<Void, Error>) -> Void) {
+        releaseDrainGroup.enter()
+        suspend()
+        bundle.smartStateHandoff?.beginDisposal(cleanupNonce: nil)
+        stateLock.lock()
+        let groups = proxyGroupsChannel, capture = runtimeCaptureChannel, rules = runtimeRulesChannel, resources = runtimeResourcesChannel
+        let providers = runtimeRuleProvidersChannel, state = smartStateChannel, tools = smartToolsChannel
+        stateLock.unlock()
+        recoveryStage = "release-owned.channels"
+        let drained = [groups?.invalidateAndDrain(), capture?.invalidateAndDrain(), rules?.invalidateAndDrain(), resources?.invalidateAndDrain(),
+                       providers?.invalidateAndDrain(), state?.invalidateAndDrain(), tools?.invalidateAndDrain()]
+            .allSatisfy { $0 != false }
+        proxyGroupsIOQueue.sync {}; runtimeTrafficIOQueue.sync {}; smartToolsIOQueue.sync {}; smartStateIOQueue.sync {}
+        providerProbeQueue.sync {}; revokeQueue.sync {}
+        mutationQueue.async { [self] in
+            defer { releaseDrainGroup.leave() }
+            guard drained, !providerOperationDraining, resourceController?.isBusy != true,
+                  ruleProviderController?.isBusy != true, bundle.smartStateHandoff?.workerPending != true else {
+                work(.failure(Failure.unverified)); return
+            }
+            work(.success(()))
+        }
+    }
+    private func finalizeReleasedResources() throws {
+        recoveryStage = "release-owned.session"
+        guard bundle.coreManaged, !disposed, let managedCore,
+              currentHost() == nil, helperSession() == nil, heldDelivery == nil, core == nil else { throw Failure.state }
+        _ = try cleanupProviderProbes()
+        recoveryStage = "release-owned.core"
+        try managedCore.disposeReleased { try bundle.recordReleasedResources() }
+        // The core is reaped and its routes/DNS/device match the original
+        // network digest. The external proxy change is deliberately unverified.
+        restored = false; coreState = "stopped"; device = "absent"; network = "unknown"
+        currentClient()?.invalidate(); markDisposed()
+    }
+    private func failControlRecovery() {
+        reportRecoveryFailure()
+        try? bundle.recordControlRecovery(restored: false, failureStage: recoveryFailureCode)
+        let message = Array("Relay owned-session control-loss recovery remains unverified; ownership is retained.\n".utf8)
+        _ = message.withUnsafeBytes { Darwin.write(STDERR_FILENO, $0.baseAddress, $0.count) }
+    }
+    private func exitAfterControlRecovery() {
+        #if RELAY_TUN_APP_SESSION_TESTS
+        if testDriver != nil { return }
+        #endif
+        Darwin.exit(0)
+    }
     private func revokeRuntimeTraffic() { runtimeTrafficAuthority.revoke() }
     private func readRuntimeTraffic(context: RelayTunRuntimeCapture.TrafficContext, connections: Bool = false,
+                                   proxies: RelayTunRuntimeCapture.ProxyAction? = nil,
                                    reply: @escaping (RelayTunRuntimeCapture.TrafficResult) -> Void) {
         // Bind at FD admission, before owner-queue wait. An old queued read
         // cannot acquire the epoch created by a resource/rule change.
@@ -702,14 +758,15 @@ final class RelayTunAppSession: NSObject, RelayTunCoreObservationChannel {
                 guard authorized(), initialized, !disposed, phase == "active", let core = managedCore else {
                     reply(.unavailable); return
                 }
-                let lease = try core.trafficLease(connections: connections)
+                let lease = try core.trafficLease(connections: connections, proxies: proxies)
                 guard lease.configurationRevision == bundle.binding.runtimeConfigurationSHA256 else { throw Failure.binding }
                 try context.bindOwner {
                     try authority.check(stamp); try lease.assertOwner(); try authority.check(stamp)
                 }
                 try context.bindPublication { check in try lease.verifyPublication(check) }
                 try context.check()
-                runtimeTrafficIOQueue.async {
+                let io = proxies == nil ? runtimeTrafficIOQueue : proxyGroupsIOQueue
+                io.async {
                     do {
                         let raw = try lease.read(context.deadline, context.check)
                         try context.check(); reply(.sampled(raw))
@@ -1106,15 +1163,16 @@ final class RelayTunAppSession: NSObject, RelayTunCoreObservationChannel {
               RelayTunStrictJSON.integer(raw["version"]) == 1,
               let id = RelayTunStrictJSON.integer(raw["id"]), id > 0,
               let action = raw["action"] as? String,
-              ["initialize", "acquire", "startCore", "activate", "inspect", "inspectWorkDirectory", "revokeActivation", "stopCore", "release", "verifyRestored", "dispose"].contains(action),
+              ["initialize", "acquire", "startCore", "activate", "inspect", "inspectWorkDirectory", "revokeActivation", "stopCore", "release", "verifyRestored", "dispose", "disposeReleased"].contains(action),
+              action != "disposeReleased" || bundle.coreManaged,
               raw["sessionId"] as? String == bundle.binding.sessionId,
               raw["evidenceSHA256"] as? String == bundle.binding.evidenceSHA256,
               raw["runtimeConfigurationSHA256"] as? String == bundle.binding.runtimeConfigurationSHA256 else { throw Failure.invalid }
         seenLock.lock()
         guard identifiers.count < 4096, identifiers.insert(id).inserted, !closing else { seenLock.unlock(); throw Failure.invalid }
-        if action == "dispose" { closing = true }
+        if action == "dispose" || action == "disposeReleased" { closing = true }
         seenLock.unlock()
-        if ["stopCore", "release", "dispose"].contains(action) {
+        if ["stopCore", "release", "dispose", "disposeReleased"].contains(action) {
             revokeRuntimeTraffic(); revokeSmartTools()
         }
         if action == "revokeActivation" {
@@ -1147,6 +1205,24 @@ final class RelayTunAppSession: NSObject, RelayTunCoreObservationChannel {
         }
         mutationQueue.async { [self] in
             afterProviderDrain { [self] in
+            if action == "disposeReleased" {
+                afterReleasedWorkersDrain { [self] result in
+                    var response = bundle.binding.json
+                    response["version"] = 1; response["id"] = id; response["action"] = action
+                    do {
+                        try result.get(); try finalizeReleasedResources()
+                        response["closed"] = true; response["restorationVerified"] = false
+                        response["reason"] = "external-protection-changed"
+                        response["stateDisposition"] = "retained-evidence"
+                    } catch {
+                        reportRecoveryFailure()
+                        seenLock.lock(); closing = false; seenLock.unlock()
+                        response["closed"] = false
+                    }
+                    output(response)
+                }
+                return
+            }
             do {
                 if action == "dispose" {
                     recoveryStage = "session.dispose"
@@ -1174,7 +1250,7 @@ final class RelayTunAppSession: NSObject, RelayTunCoreObservationChannel {
                     }
                 }
             } catch {
-                if ["stopCore", "release", "verifyRestored", "dispose"].contains(action) { reportRecoveryFailure() }
+                if ["stopCore", "release", "verifyRestored", "dispose", "disposeReleased"].contains(action) { reportRecoveryFailure() }
                 if action == "dispose" {
                     seenLock.lock(); closing = false; seenLock.unlock()
                     var response = bundle.binding.json
@@ -1190,7 +1266,7 @@ final class RelayTunAppSession: NSObject, RelayTunCoreObservationChannel {
         output(["version": 1, "id": id, "action": action, "observation": observation()])
     }
     private func reportRecoveryFailure() {
-        let coreStage = ["session.stopCore", "session.release.core", "session.verifyRestored.core", "dispose.core"].contains(recoveryStage)
+        let coreStage = ["session.stopCore", "session.release.core", "session.verifyRestored.core", "dispose.core", "release-owned.core"].contains(recoveryStage)
         let code = (coreStage ? managedCore?.recoveryFailureCode : nil) ?? recoveryStage
         recoveryFailureCode = code
         let message = Array(("RELAY_TUN_RECOVERY_FAILURE " + code + "\n").utf8)
@@ -1232,15 +1308,15 @@ final class RelayTunAppSession: NSObject, RelayTunCoreObservationChannel {
                 recoveryStage = "dispose.record"
                 try bundle.recordControlRecovery(restored: true)
                 markDisposed()
-                #if RELAY_TUN_APP_SESSION_TESTS
-                if testDriver != nil { return }
-                #endif
-                Darwin.exit(0)
+                exitAfterControlRecovery()
             } catch {
-                reportRecoveryFailure()
-                try? bundle.recordControlRecovery(restored: false, failureStage: recoveryFailureCode)
-                let message = Array("Relay owned-session control-loss recovery remains unverified; ownership is retained.\n".utf8)
-                _ = message.withUnsafeBytes { Darwin.write(STDERR_FILENO, $0.baseAddress, $0.count) }
+                if bundle.coreManaged, managedCore?.recoveryFailureCode == "restore.protection" {
+                    afterReleasedWorkersDrain { [self] result in
+                        do {
+                            try result.get(); try finalizeReleasedResources(); exitAfterControlRecovery()
+                        } catch { failControlRecovery() }
+                    }
+                } else { failControlRecovery() }
             }
             }
         }
@@ -1248,6 +1324,8 @@ final class RelayTunAppSession: NSObject, RelayTunCoreObservationChannel {
     func waitForDisposal() {
         mutationQueue.sync { }
         providerDrainGroup.wait()
+        mutationQueue.sync { }
+        releaseDrainGroup.wait()
         mutationQueue.sync { }
         revokeQueue.sync { }
     }

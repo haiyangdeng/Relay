@@ -41,6 +41,7 @@ interface Props {
   currentSelection?: string | null
   activeProfileId?: string
   busy: boolean
+  selectionBusy?: boolean
   onBusy(value: boolean): void
   onRefresh(): Promise<void>
   onChoose(profile: RelayStoredProfile): void | Promise<void>
@@ -54,6 +55,7 @@ export function RelaySubscriptionsDashboard({
   currentSelection,
   activeProfileId,
   busy,
+  selectionBusy = busy,
   onBusy,
   onRefresh,
   onChoose,
@@ -93,7 +95,7 @@ export function RelaySubscriptionsDashboard({
     if (mounted.current && at === generation.current) setSources(value)
   }
   const refresh = async (): Promise<void> => {
-    if (operating.current || busy) return
+    if (operating.current || selectionBusy) return
     operating.current = true
     onBusy(true)
     setLoading(true)
@@ -118,11 +120,11 @@ export function RelaySubscriptionsDashboard({
       readAttempted.current = false
       return
     }
-    if (!busy && !readAttempted.current) {
+    if (!selectionBusy && !readAttempted.current) {
       readAttempted.current = true
       void refreshRef.current()
     }
-  }, [active, busy])
+  }, [active, selectionBusy])
 
   const resultNotice = (result: SubscriptionSourceResult, registered: boolean): string => {
     if (result.status === 'saved') return '订阅已保存。点击卡片即可使用。'
@@ -216,7 +218,7 @@ export function RelaySubscriptionsDashboard({
     }
   }
   const choose = async (profile: RelayStoredProfile): Promise<void> => {
-    if (operating.current || busy || loading) return
+    if (operating.current || selectionBusy || loading) return
     operating.current = true
     setChoosing(profile.id)
     try {
@@ -230,6 +232,7 @@ export function RelaySubscriptionsDashboard({
     }
   }
   const locked = busy || pending || loading || !!choosing
+  const selectionLocked = selectionBusy || pending || loading || !!choosing
   const importLocal = async (): Promise<void> => {
     if (operating.current || locked) return
     operating.current = true
@@ -329,7 +332,7 @@ export function RelaySubscriptionsDashboard({
           aria-label={`使用${source ? '订阅' : '配置'} ${info.name}`}
           aria-pressed={selected || running}
           title={running ? '正在使用' : selected ? '已选中，点击运行此配置' : '点击使用此配置'}
-          disabled={locked || unavailable || running}
+          disabled={selectionLocked || unavailable || running}
           onClick={() => {
             if (profile) void choose(profile)
           }}
@@ -404,7 +407,7 @@ export function RelaySubscriptionsDashboard({
           <Button
             size="sm"
             variant="flat"
-            isDisabled={locked || unavailable}
+            isDisabled={selectionLocked || unavailable}
             onPress={() => {
               if (profile) onBrowse(profile)
             }}
@@ -511,7 +514,7 @@ export function RelaySubscriptionsDashboard({
           variant="flat"
           aria-label="刷新订阅与配置"
           title="刷新列表"
-          isDisabled={locked}
+          isDisabled={selectionLocked}
           onPress={() => void refresh()}
         >
           <IoMdRefresh />
@@ -522,7 +525,7 @@ export function RelaySubscriptionsDashboard({
           variant="flat"
           aria-label="高级订阅管理"
           title="高级管理"
-          isDisabled={locked}
+          isDisabled={selectionLocked}
           onPress={onAdvanced}
         >
           <FiSettings />

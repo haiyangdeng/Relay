@@ -6,7 +6,7 @@
     <meta name="theme-color" content="#0b1221" />
     <meta
       name="description"
-      content="Relay 是面向 macOS 的网络工作台。管理 Mihomo 代理、订阅与分流，为 Claude 和 Codex 配置专用连接。下载 V1.0.0，支持 Apple Silicon 与 Intel。"
+      content="Relay 是面向 macOS 的网络工作台。管理 Mihomo 代理、订阅与分流，为 Claude 和 Codex 配置专用连接。Apple Silicon 构建 23 集成 TUN，Intel 提供构建 2。安装后导入自己的配置即可使用。"
     />
     <title>Relay V1.0.0 — macOS 代理与 AI 客户端工作区</title>
     <link rel="canonical" href="https://haiyangdeng.github.io/Relay/" />
@@ -118,7 +118,7 @@
           <span class="release-pill">V1.0.0</span>
           <p>
             准备好下一段连接。<span id="release-strip-note"
-              >Apple Silicon 与 Intel，选择适合你的安装包。</span
+              >Apple Silicon 构建 23 · Intel 构建 2</span
             >
           </p>
         </div>
@@ -323,7 +323,7 @@
           <div class="version-picker">
             <label for="release-version">版本</label
             ><select id="release-version">
-              <option value="1.0.0">V1.0.0</option>
+              <option value="1.0.0-build.23">V1.0.0 · 2026-11-23</option>
             </select>
           </div>
         </div>
@@ -368,15 +368,16 @@
         </div>
         <div class="installation-note">
           <p>
-            <strong>安装与兼容性</strong> · 安装包包含
-            App、系统代理组件和自动卸载组件，安装管理员组件时需要 macOS
-            授权。安装器会拒绝覆盖已有应用或组件。
+            <strong>首次使用</strong> · 安装时需要 macOS 管理员授权。Relay
+            初始配置为空，请在「订阅管理」导入自己的 YAML 或订阅。
           </p>
           <p>
-            虚拟网卡（TUN）需额外的匹配组件；当前下载不包含面向任意用户的通用 TUN
-            安装包。拖入废纸篓的自动卸载逻辑已实现，本轮完整系统卸载尚未实机验收。
+            Apple Silicon 构建 23 已集成 TUN，可与系统代理同时开启。构建 2
+            安装包提供系统代理和自动卸载组件，不含通用 TUN 组件。
           </p>
-          <a href="https://github.com/haiyangdeng/Relay/releases/tag/v1.0.0"
+          <a
+            id="release-notes-link"
+            href="https://github.com/haiyangdeng/Relay/releases/tag/v1.0.0-build.23"
             >阅读完整版本说明与已知边界 ↗</a
           >
         </div>
@@ -390,8 +391,19 @@
         </details>
         <noscript
           ><p class="scope-note">
-            <a href="https://github.com/haiyangdeng/Relay/releases/tag/v1.0.0"
-              >无需 JavaScript，也可前往 GitHub Release 下载安装包与 SHA256SUMS。</a
+            <a
+              href="https://github.com/haiyangdeng/Relay/releases/download/v1.0.0-build.23/Relay-1.0.0-macOS-arm64.pkg"
+              >下载 Apple Silicon 构建 23</a
+            >
+            ·
+            <a
+              href="https://github.com/haiyangdeng/Relay/releases/download/v1.0.0-build.23/Relay-1.0.0-macOS-x64.pkg"
+              >下载 Intel 构建 2</a
+            >
+            ·
+            <a
+              href="https://github.com/haiyangdeng/Relay/releases/download/v1.0.0-build.23/SHA256SUMS"
+              >SHA256SUMS</a
             >
           </p></noscript
         >
@@ -441,7 +453,7 @@
             <p>
               此版本安装的独立卸载组件会监测 Relay.app 进入废纸篓，按顺序恢复 Relay
               管理的配置、停止并移除其组件、清理专属数据与登录项，最后移除自身。卸载会删除 Relay
-              的专属数据，请先保留需要的配置备份。无法确认归属或恢复失败时保留记录；本轮完整系统卸载尚未实机验收。
+              的专属数据，请先保留需要的配置备份。无法确认归属或恢复失败时会保留恢复记录。
             </p>
           </details>
           <details>

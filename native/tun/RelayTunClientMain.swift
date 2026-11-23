@@ -1,10 +1,34 @@
 import Foundation
 import Darwin
 
+enum RelayTunClientOutput {
+    enum Failure: Error { case invalid, unavailable, expired }
+    static func write(_ bytes: Data, to output: Int32, timeoutMS: UInt64 = 1000) throws {
+        guard bytes.count <= 32768, timeoutMS > 0, timeoutMS <= 1000 else { throw Failure.invalid }
+        let flags = fcntl(output, F_GETFL)
+        guard flags >= 0, fcntl(output, F_SETFL, flags | O_NONBLOCK) == 0 else { throw Failure.unavailable }
+        defer { _ = fcntl(output, F_SETFL, flags) }
+        let deadline = DispatchTime.now().uptimeNanoseconds + timeoutMS * 1_000_000
+        try bytes.withUnsafeBytes { raw in
+            var offset = 0
+            while offset < raw.count {
+                guard DispatchTime.now().uptimeNanoseconds < deadline else { throw Failure.expired }
+                let count = Darwin.write(output, raw.baseAddress!.advanced(by: offset), raw.count - offset)
+                if count > 0 { offset += count; continue }
+                if count < 0, errno == EINTR { continue }
+                guard count < 0, errno == EAGAIN || errno == EWOULDBLOCK else { throw Failure.unavailable }
+                var item = pollfd(fd: output, events: Int16(POLLOUT), revents: 0)
+                let polled = poll(&item, 1, 10)
+                guard polled >= 0 || errno == EINTR,
+                      item.revents & Int16(POLLERR | POLLHUP | POLLNVAL) == 0 else { throw Failure.unavailable }
+            }
+        }
+    }
+}
+
 @main struct RelayTunClientMain {
     private static func warning(_ message: String) {
-        let bytes = Array(message.utf8)
-        _ = bytes.withUnsafeBytes { Darwin.write(STDERR_FILENO, $0.baseAddress, $0.count) }
+        try? RelayTunClientOutput.write(Data(message.utf8), to: STDERR_FILENO, timeoutMS: 100)
     }
     private static func prepareRulesDescriptors(_ descriptors: [Int32] = [5, 6]) -> Bool {
         // This is called only for the positively pinned new launch argv.
@@ -18,7 +42,9 @@ import Darwin
         return true
     }
     static func main() {
-        let arguments = Array(CommandLine.arguments.dropFirst())
+        let rawArguments = Array(CommandLine.arguments.dropFirst())
+        let proxyGroups = rawArguments.count == 2 && rawArguments.last == "--proxy-groups-v1"
+        let arguments = proxyGroups ? Array(rawArguments.dropLast()) : rawArguments
         guard getuid() > 0, getuid() == geteuid(), getgid() == getegid(),
               let physical = realpath(CommandLine.arguments[0], nil) else { exit(77) }
         let executable = String(cString: physical); free(physical)
@@ -47,15 +73,18 @@ import Darwin
         let smartToolsDescriptorsReady = smartToolsLaunch && prepareRulesDescriptors([9, 10])
         let resourcesDescriptorsReady = resourcesLaunch && prepareRulesDescriptors([7, 8])
         let providersDescriptorsReady = providersLaunch && prepareRulesDescriptors([9, 10])
+        guard !proxyGroups || (managed && captureLaunch) else { exit(77) }
+        let groupChannel = proxyGroups ? RelayTunRuntimeCapture.Channel(input: 11, output: 12, proxyGroups: true) : nil
         let runtimeCapture = captureLaunch ? RelayTunRuntimeCapture.Channel(telemetry: telemetryLaunch, history: historyLaunch) : nil
         if arguments != ["--tun-session"] && arguments != ["--managed-session"] && !captureLaunch {
             do {
                 if arguments == ["--status"] {
-                    print(String(decoding: try JSONEncoder().encode(RelayTunAppSession.status()), as: UTF8.self)); return
+                    var bytes = try JSONEncoder().encode(RelayTunAppSession.status()); bytes.append(10)
+                    try RelayTunClientOutput.write(bytes, to: STDOUT_FILENO); return
                 }
                 let report = try managed ? RelayTunAppSession.managedInspect(executionV2: executionInspect) : RelayTunAppSession.inspect()
-                let bytes = try JSONSerialization.data(withJSONObject: report, options: [.sortedKeys, .withoutEscapingSlashes])
-                FileHandle.standardOutput.write(bytes); FileHandle.standardOutput.write(Data([10]))
+                var bytes = try JSONSerialization.data(withJSONObject: report, options: [.sortedKeys, .withoutEscapingSlashes]); bytes.append(10)
+                try RelayTunClientOutput.write(bytes, to: STDOUT_FILENO)
             } catch {
                 warning("Relay TUN inspection was not verified. No system changes were requested.\n"); exit(1)
             }
@@ -94,6 +123,7 @@ import Darwin
                             // Optional read trust/FD errors never escape into
                             // the original control EOF/recovery catch below.
                             if let runtimeCapture { try? created.startRuntimeCapture(runtimeCapture) }
+                            if let groupChannel { try? created.startRuntimeCapture(groupChannel) }
                             if rulesDescriptorsReady { try? created.startRuntimeRules() }
                             if resourcesDescriptorsReady { try? created.startRuntimeResources() }
                             if providersDescriptorsReady { try? created.startRuntimeRuleProviders() }

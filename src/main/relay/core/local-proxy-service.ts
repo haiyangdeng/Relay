@@ -1,3 +1,4 @@
+import { restoreSavedSelectors } from './startup-node'
 import { randomUUID } from 'crypto'
 import {
   smartToolsRequest,
@@ -109,14 +110,17 @@ export function createLocalProxyService(adapters: {
     logLevel?: LocalCoreLogLevel,
     runtimeAssets?: readonly RuntimeAsset[],
     ports?: LocalProxyPorts,
-    pinnedNode?: Record<string, unknown>
+    pinnedNode?: Record<string, unknown>,
+    selectors?: ReadonlyMap<string, string>
   ): Promise<RelayOwnedCore>
-  confirmStart(preparation: LocalProxyPreparation): Promise<boolean>
+  confirmStart(preparation: LocalProxyPreparation, assertContext?: () => void): Promise<boolean>
   confirmStop(state: LocalProxyState, reason: 'stop' | 'quit'): Promise<boolean>
   confirmTest?(group: string, member: string, origin: string): Promise<boolean>
   confirmMode?(previous: RelayCoreMode, next: RelayCoreMode): Promise<boolean>
   confirmRule?(report: LocalProxyRuleConfirmation): Promise<boolean>
   confirmReload?(preparation: LocalReloadPreparation): Promise<boolean>
+  rememberSelector?(profileId: string, group: string, member?: string): Promise<void>
+  readSelectors?(profileId: string): Promise<Map<string, string>>
   beforeRuntimeMutation?(): Promise<void>
   onRuntimeChanging?(): void
   onRuntimeChanged?(): void
@@ -198,6 +202,7 @@ export function createLocalProxyService(adapters: {
         revision: string
         pinnedNodeRevision?: string
         configuration: string
+        selectors: Map<string, string>
         built: ReturnType<typeof localProxyConfiguration>
         at: number
         generation: number
@@ -206,6 +211,8 @@ export function createLocalProxyService(adapters: {
   const now = adapters.now ?? Date.now,
     waiters: (() => void)[] = []
   const owned = (): boolean => !!session || !!lease || !!cleanup
+  const readSelectors = (profileId: string): Promise<Map<string, string>> =>
+    adapters.readSelectors?.(profileId) ?? Promise.resolve(new Map())
   const learningWarnings = (): string[] =>
     retainedLearningEvidence
       ? [
@@ -801,6 +808,7 @@ export function createLocalProxyService(adapters: {
             '本次热载不能更换已固定的地理数据库；请明确停止本次 Relay 代理后重新启动。'
           )
         previous.mode = mode
+        const selectors = await readSelectors(stored.profile.id)
         const built = localProxyConfiguration(
             stored.text,
             selected.httpPort,
@@ -809,7 +817,8 @@ export function createLocalProxyService(adapters: {
             logLevel,
             stored.runtimeAssets,
             selected.ports,
-            pin?.node
+            pin?.node,
+            selectors
           ),
           candidate: Record<string, unknown> = JSON.parse(built.configuration)
         candidate.mode = mode
@@ -835,6 +844,7 @@ export function createLocalProxyService(adapters: {
           revision: stored.revision,
           pinnedNodeRevision: pin?.revision,
           configuration,
+          selectors,
           built,
           at: now(),
           generation: actionGeneration
@@ -881,10 +891,13 @@ export function createLocalProxyService(adapters: {
             ? await adapters.resolvePinnedNode?.(stored, current.built.dedicated)
             : undefined,
           config = await session.read('configs')
+        const selectors = await readSelectors(stored.profile.id)
         const previous: Record<string, unknown> = JSON.parse(runtimeConfiguration ?? '{}')
         previous.mode = validateCoreMode(config.mode)
         if (
           !fresh() ||
+          selectors.size !== current.selectors.size ||
+          [...selectors].some(([group, member]) => current.selectors.get(group) !== member) ||
           stored.revision !== current.revision ||
           pin?.revision !== current.pinnedNodeRevision ||
           !compatibleLocalProxyGeoAssets(runtimeAssets, stored.runtimeAssets) ||
@@ -940,12 +953,29 @@ export function createLocalProxyService(adapters: {
             .filter((asset) => !(runtimeAssets ?? []).some((pinned) => pinned.path === asset.path))
             .map((asset) => ({ ...asset, bytes: Buffer.from(asset.bytes) }))
         ]
+        const profileChanged = activeProfileId !== stored.profile.id
         activeProfileId = stored.profile.id
         profileName = stored.profile.name
         resolution = current.built.resolution
         definitions = structuredClone(current.built.groups)
         groups = structuredClone(definitions)
         groups = await liveGroups()
+        if (profileChanged && selectors.size) {
+          const assertOwner = (): void => {
+            if (
+              closing ||
+              stoppingRequest ||
+              generation !== current.generation ||
+              instanceId !== current.report.instanceId ||
+              session?.state() !== 'running'
+            )
+              throw new Error('恢复节点选择时本次核心已变化。')
+          }
+          assertOwner()
+          await restoreSavedSelectors(session, groups, selectors, assertOwner)
+          groups = await liveGroups()
+          assertOwner()
+        }
         observedMode = validateCoreMode(config.mode)
         warnings = [
           '本次自有核心热载已确认，实例及监听端口保持；旧配置与候选证据留在本次私有工作目录。没有停止、重启或操作其他Clash。'
@@ -1064,9 +1094,10 @@ export function createLocalProxyService(adapters: {
         const pin = input.dedicated
           ? await adapters.resolvePinnedNode?.(stored, input.dedicated)
           : undefined
-        const [snapshot, resource] = await Promise.all([
+        const [snapshot, resource, selectors] = await Promise.all([
           adapters.inspect(),
-          adapters.resources(input.lifetime, stored.runtimeAssets)
+          adapters.resources(input.lifetime, stored.runtimeAssets),
+          readSelectors(stored.profile.id)
         ])
         const built = localProxyConfiguration(
           stored.text,
@@ -1076,12 +1107,13 @@ export function createLocalProxyService(adapters: {
           input.logLevel,
           stored.runtimeAssets,
           preparedPorts,
-          pin?.node
+          pin?.node,
+          selectors
         )
         if (input.lifetime === 'persistent') {
           if (input.resolverMode !== 'off' || input.dedicated || stored.runtimeAssets?.length)
             throw new Error('持久普通代理不接入DNS或专用监听。')
-          persistentCoreConfiguration(stored.text, input.httpPort)
+          persistentCoreConfiguration(stored.text, input.httpPort, selectors)
         }
         const dedicatedPorts =
           input.dedicated === undefined
@@ -1089,18 +1121,24 @@ export function createLocalProxyService(adapters: {
             : [input.dedicated.httpPort, input.dedicated.socksPort].filter(
                 (value): value is number => value !== undefined
               )
-        const available =
-          snapshot.lease === 'missing' &&
-          (
-            await Promise.all([
-              ...[...enabledLocalProxyPorts(built.ports), ...dedicatedPorts].map((value) =>
-                adapters.portAvailable(value)
-              ),
-              ...udpPorts(built.ports).map((value) =>
-                (adapters.portAvailableUDP ?? probeLocalUdpPort)(value)
-              )
-            ])
-          ).every(Boolean)
+        const sockets = [
+          ...[...enabledLocalProxyPorts(built.ports), ...dedicatedPorts].map((port) => ({
+            protocol: 'TCP',
+            port,
+            probe: adapters.portAvailable
+          })),
+          ...udpPorts(built.ports).map((port) => ({
+            protocol: 'UDP',
+            port,
+            probe: adapters.portAvailableUDP ?? probeLocalUdpPort
+          }))
+        ]
+        const free =
+          snapshot.lease === 'missing'
+            ? await Promise.all(sockets.map((socket) => socket.probe(socket.port)))
+            : []
+        const unavailable = sockets.filter((_, index) => !free[index])
+        const available = snapshot.lease === 'missing' && !unavailable.length
         if (generation !== current || closing) throw new Error()
         hasRecord = snapshot.lease !== 'missing'
         phase = hasRecord || !available ? 'blocked' : 'idle'
@@ -1118,7 +1156,9 @@ export function createLocalProxyService(adapters: {
                     ]
                   : [])
               ]
-            : ['指定端口不可用，不停止占用进程、不改用其他端口。']
+            : [
+                `普通代理监听端口不可用：${unavailable.map((s) => `${s.protocol} ${s.port}`).join('、')}。请检查端口占用。`
+              ]
         const report: LocalProxyPreparation = {
           evidenceId: randomUUID(),
           profile: stored.profile,
@@ -1463,6 +1503,8 @@ export function createLocalProxyService(adapters: {
                 ? (await session.group('GLOBAL')).now
                 : groups.find((value) => value.name === input.group)?.now
             if (selected !== input.member) throw new Error()
+            if (activeProfileId)
+              await adapters.rememberSelector?.(activeProfileId, input.group, input.member)
           }
           if (input.action === 'delay') {
             const group = groups.find((g) => g.name === input.group)
@@ -1507,6 +1549,7 @@ export function createLocalProxyService(adapters: {
             await session.automatic(group.name)
             groups = await liveGroups()
             if (groups.find((g) => g.name === group.name)?.fixed !== '') throw new Error()
+            if (activeProfileId) await adapters.rememberSelector?.(activeProfileId, input.group)
           }
           warnings = [
             '当前成员、选择与健康记录来自本次私有接口；负载均衡没有单一当前节点。空成员回退仍遵循原配置，不代表禁止直连。'
@@ -1546,8 +1589,12 @@ export function createLocalProxyService(adapters: {
       if (owned() || !fresh() || !current) throw new Error('请重新准备，或先结束现有实例。')
       begin()
       abortStart = false
+      let startupStep = '复核配置和核心资源'
       try {
-        if (!(await adapters.confirmStart(structuredClone(current.report))) || abortStart) {
+        if (
+          !(await adapters.confirmStart(structuredClone(current.report), assertContext)) ||
+          abortStart
+        ) {
           instanceId = undefined
           return result('cancelled')
         }
@@ -1569,6 +1616,7 @@ export function createLocalProxyService(adapters: {
           !fresh()
         )
           throw new Error('固定核心资源已变化，请重新准备。')
+        const selectors = await readSelectors(stored.profile.id)
         const built = localProxyConfiguration(
           stored.text,
           current.report.httpPort,
@@ -1577,7 +1625,8 @@ export function createLocalProxyService(adapters: {
           current.report.logLevel,
           stored.runtimeAssets,
           current.report.ports,
-          pin?.node
+          pin?.node,
+          selectors
         )
         if (profileHash(built.configuration) !== current.report.runtimeSHA256) throw new Error()
         assertContext?.()
@@ -1592,7 +1641,7 @@ export function createLocalProxyService(adapters: {
         if (lifetime === 'persistent') {
           if (!localProxyPortsCompatible(built.ports, localProxyPortsFor(current.report.httpPort)))
             throw new Error('持久普通代理仅支持普通 HTTP 端口。')
-          persistentCoreConfiguration(stored.text, current.report.httpPort)
+          persistentCoreConfiguration(stored.text, current.report.httpPort, selectors)
         }
         httpPort = current.report.httpPort
         ports = built.ports
@@ -1605,6 +1654,7 @@ export function createLocalProxyService(adapters: {
         }))
         resolution = built.resolution
         dedicated = built.dedicated
+        startupStep = '登记普通代理会话'
         lease = await adapters.acquire(
           {
             kind: 'localProxy',
@@ -1630,6 +1680,7 @@ export function createLocalProxyService(adapters: {
         groups = structuredClone(definitions)
         if (abortStart) return await finish(false)
         assertContext?.()
+        startupStep = '校验配置并启动普通代理核心'
         session = await adapters.start(
           stored.text,
           httpPort,
@@ -1651,11 +1702,13 @@ export function createLocalProxyService(adapters: {
           logLevel,
           stored.runtimeAssets,
           ports,
-          pin?.node
+          pin?.node,
+          selectors
         )
         cleanup ??= () => session?.stop() ?? Promise.resolve()
         assertContext?.()
         livePid = session.pid
+        startupStep = '核对核心运行配置与监听端口'
         const config = await session.read('configs'),
           tun = config.tun
         if (
@@ -1670,8 +1723,20 @@ export function createLocalProxyService(adapters: {
           (tun as Record<string, unknown>).enable !== false
         )
           throw new Error()
+        startupStep = '读取代理组'
         groups = await liveGroups()
         observedMode = validateCoreMode(config.mode)
+        if (selectors.size) {
+          const currentStart = (): void => {
+            assertContext?.()
+            if (closing || stoppingRequest || abortStart) throw new Error('启动已取消。')
+          }
+          startupStep = '恢复所选节点'
+          await restoreSavedSelectors(session, groups, selectors, currentStart)
+          groups = await liveGroups()
+          currentStart()
+        }
+        startupStep = '登记已运行的核心'
         await lease.update('running', session.pid)
         assertContext?.()
         if (abortStart) return await finish(false)
@@ -1698,10 +1763,7 @@ export function createLocalProxyService(adapters: {
           }
         }
         phase = hasRecord ? 'blocked' : 'failed'
-        warnings = [
-          '启动未完成，请重新准备；没有抢占端口、自动重启或接管其他核心。',
-          ...learningWarnings()
-        ]
+        warnings = [`普通代理启动失败，未完成「${startupStep}」。`, ...learningWarnings()]
         return result('failed')
       } finally {
         end()

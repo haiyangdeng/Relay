@@ -22,7 +22,7 @@ import {
 
 export interface ShellActionAdapters {
   assertAvailable(): void
-  assertIdle(action: RelayShellAction, tunSessionId?: string): void
+  assertIdle(action: RelayShellAction, tunSessionId?: string): void | Promise<void>
   showWindow(): void
   showFloatingWindow(): Promise<void>
   quit(): void
@@ -36,7 +36,6 @@ export interface ShellActionAdapters {
     mode(instanceId: string, mode: 'rule' | 'global' | 'direct'): Promise<void>
   }
   systemProxy: {
-    state(): { pending: boolean }
     inspect(): Promise<SystemProxyReport>
     prepareApply(report: SystemProxyReport): Promise<SystemProxyPreparation>
     prepareRestore(): Promise<SystemProxyPreparation>
@@ -59,21 +58,20 @@ export type ShellActionOutcome = 'performed' | 'restored' | 'cancelled'
 // channel, native path, arbitrary PID or optimistic checkbox grants execution.
 export function createShellActions(adapters: ShellActionAdapters) {
   let pending = false
-  const restoreSystemProxy = async (): Promise<ShellActionOutcome> => {
+  const toggleSystemProxy = async (enabled?: boolean): Promise<ShellActionOutcome> => {
     adapters.showWindow()
-    if (adapters.systemProxy.state().pending) throw new Error('系统代理操作尚未结束。')
-    adapters.assertIdle('triggerSysProxy')
     const observed = systemProxyReport(await adapters.systemProxy.inspect())
     adapters.assertAvailable()
-    adapters.assertIdle('triggerSysProxy')
+    await adapters.assertIdle('triggerSysProxy')
     if (!observed.recordID) {
       if (!['inactive', 'restored'].includes(observed.status))
         throw new Error('系统代理状态未确认，请在工作区核对。')
+      if (enabled === false) return 'restored'
       const plan = await adapters.systemProxy.prepareApply(observed)
       const request = { evidenceId: plan.evidenceId }
       try {
         adapters.assertAvailable()
-        adapters.assertIdle('triggerSysProxy')
+        await adapters.assertIdle('triggerSysProxy')
         const prepared = systemProxyReport(plan.report)
         if (
           plan.action !== 'apply' ||
@@ -96,11 +94,13 @@ export function createShellActions(adapters: ShellActionAdapters) {
     }
     if (!observed.canRestore || ['pending', 'conflict', 'uncertain'].includes(observed.status))
       throw new Error('本次系统代理恢复未确认，请在工作区核对。')
+    if (enabled === true && ['active', 'applied'].includes(observed.status)) return 'performed'
+    if (enabled === true) throw new Error('现有系统代理记录需要核对。')
     const plan = await adapters.systemProxy.prepareRestore()
     const request = { evidenceId: plan.evidenceId }
     try {
       adapters.assertAvailable()
-      adapters.assertIdle('triggerSysProxy')
+      await adapters.assertIdle('triggerSysProxy')
       const prepared = systemProxyReport(plan.report)
       if (
         plan.action !== 'restore' ||
@@ -126,7 +126,7 @@ export function createShellActions(adapters: ShellActionAdapters) {
     const before = tunSessionState(adapters.tun.state())
     if (before.pending || before.phase === 'uncertain')
       throw new Error('本次TUN操作或恢复尚未确认。')
-    adapters.assertIdle('triggerTun', before.owned ? before.sessionId : undefined)
+    await adapters.assertIdle('triggerTun', before.owned ? before.sessionId : undefined)
     const observed = tunSessionState(await adapters.tun.inspect())
     adapters.assertAvailable()
     if (
@@ -137,7 +137,7 @@ export function createShellActions(adapters: ShellActionAdapters) {
     )
       throw new Error('本次TUN会话已变化，请在工作区核对。')
     if (!observed.owned) {
-      adapters.assertIdle('triggerTun')
+      await adapters.assertIdle('triggerTun')
       const fresh = tunSessionState(adapters.tun.state())
       if (
         fresh.pending ||
@@ -151,7 +151,7 @@ export function createShellActions(adapters: ShellActionAdapters) {
       try {
         const prepared = tunSessionPreparation(plan)
         adapters.assertAvailable()
-        adapters.assertIdle('triggerTun')
+        await adapters.assertIdle('triggerTun')
         const current = tunSessionState(adapters.tun.state())
         if (
           !prepared.readyForConfirmation ||
@@ -182,9 +182,10 @@ export function createShellActions(adapters: ShellActionAdapters) {
       current.traffic !== 'forwarding'
     )
       throw new Error('本次TUN会话已变化，请在工作区核对。')
-    adapters.assertIdle('triggerTun', observed.sessionId)
+    await adapters.assertIdle('triggerTun', observed.sessionId)
     const result = tunSessionResult(await adapters.tun.stop({ sessionId: observed.sessionId }))
     if (result.status === 'cancelled') return 'cancelled'
+    if (result.status === 'released') return 'performed'
     if (result.status !== 'restored') throw new Error('TUN停用或恢复未确认；没有自动重试。')
     return 'restored'
   }
@@ -216,7 +217,11 @@ export function createShellActions(adapters: ShellActionAdapters) {
             adapters.quit()
             return 'performed'
           case 'triggerSysProxy':
-            return await restoreSystemProxy()
+            return await toggleSystemProxy(
+              typeof request === 'object' && request.action === 'triggerSysProxy'
+                ? request.enabled
+                : undefined
+            )
           case 'triggerTun':
             return await stopTun()
           case 'copyEnv':
@@ -231,13 +236,13 @@ export function createShellActions(adapters: ShellActionAdapters) {
                 throw new Error('本次自有HTTP监听未确认。')
               if (!state.httpPort) throw new Error('本次HTTP端口未确认。')
               const format =
-                typeof request === 'string'
-                  ? (adapters.environmentFormat?.() ?? 'default')
-                  : request.format
+                typeof request === 'object' && request.action === 'copyEnv'
+                  ? request.format
+                  : (adapters.environmentFormat?.() ?? 'default')
               adapters.copy(shellProxyEnvironment(state.httpPort, format))
               return 'performed'
             }
-            adapters.assertIdle(action)
+            await adapters.assertIdle(action)
             const modes = { ruleMode: 'rule', globalMode: 'global', directMode: 'direct' } as const
             await adapters.local.mode(state.instanceId, modes[action])
             adapters.notify()

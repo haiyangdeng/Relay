@@ -13,9 +13,9 @@ enum RelayTunRuntimeRuleProviderProbe {
     static let coreVersion = "relay-geodata-v1p1-3f27"
     static var corePin: (sha256: String, bytes: Int) {
         #if arch(arm64)
-        return ("e9327b2ce0e5c4405ce2640145339be9e315943bdeb63ffee4b3f4fe18bee419", 65185184)
+        return ("a7dcd3ffe59be033ed1b4000a4ae90acdf2ab41450536e02445692ea124195c2", 79861968)
         #else
-        return ("1d110d7f958abd22ec011ac466f7451bf22101f8b6338a26a3e9fedcbd62ae26", 70035456)
+        return ("bd9f2b38256b05b643f6a33273669b4df2c2b32b5a25db0b8db41a0a0199bc3b", 85466544)
         #endif
     }
     static let maximumDeclaredRules = Model.maximumDeclaredRules

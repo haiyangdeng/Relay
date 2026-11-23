@@ -13,7 +13,7 @@ export function watchRendererStartup(
   window: StartupWindow,
   callbacks: {
     ready(): void
-    failed(reason: RendererFailure): void
+    failed(reason: RendererFailure): void | (() => void)
     timeoutMs?: number
   }
 ): { firstContent: Promise<boolean>; loadFailed(): void; hasFailed(): boolean } {
@@ -30,6 +30,7 @@ export function watchRendererStartup(
   let documentUnavailable = false
   let navigationCount = 0
   let timeout: ReturnType<typeof setTimeout> | undefined
+  let dismissFailure: (() => void) | undefined
   const settle = (ready: boolean): void => {
     if (settled) return
     settled = true
@@ -43,7 +44,8 @@ export function watchRendererStartup(
     documentFailed = true
     clearTimeout(timeout)
     settle(false)
-    callbacks.failed(reason)
+    dismissFailure?.()
+    dismissFailure = callbacks.failed(reason) || undefined
   }
   const ready = (event: { sender?: unknown; senderFrame?: unknown }, channel: string): void => {
     if (
@@ -57,6 +59,8 @@ export function watchRendererStartup(
     if (event.sender !== contents || event.senderFrame !== contents.mainFrame) return
     documentReady = true
     documentFailed = false
+    dismissFailure?.()
+    dismissFailure = undefined
     clearTimeout(timeout)
     settle(true)
     callbacks.ready()
@@ -83,6 +87,8 @@ export function watchRendererStartup(
   const close = (): void => {
     closed = true
     clearTimeout(timeout)
+    dismissFailure?.()
+    dismissFailure = undefined
     settle(false)
     contents.removeListener('ipc-message', ready)
     contents.removeListener('preload-error', preloadFailed)

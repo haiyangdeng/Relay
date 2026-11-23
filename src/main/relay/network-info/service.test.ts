@@ -99,14 +99,17 @@ describe('independent static group delay configuration', () => {
     expect(configuration.rules).toEqual([`MATCH,${isolatedProbeGroup}`])
   })
 
-  it('skips built-ins in nested groups and measures each real node only once', () => {
+  it('keeps an unselected child group as one unavailable row and still measures direct nodes', () => {
     const built = compile(
       profile(
         ['nested', 'node', 'DIRECT'],
         [{ name: 'nested', type: 'url-test', proxies: ['node', ...builtins] }]
       )
     )
-    expect(built.nodes).toEqual(['node'])
+    expect(built.nodes).toEqual(['nested', 'node'])
+    expect(built.runnableNodes).toEqual(['node'])
+    expect(built.failures.get('nested')).toContain('选中路径未确认')
+    expect([...built.delayTargets]).toEqual([['node', 'node']])
   })
 
   it('projects synthetic GLOBAL to all saved static nodes without admitting built-ins or providers', () => {
@@ -121,7 +124,9 @@ describe('independent static group delay configuration', () => {
     })
     expect(isolatedProbeTargets(text).groups).toEqual(['GLOBAL', 'PROXY', 'nested'])
     const built = isolatedProbeConfiguration(text, { kind: 'groupDelay', target: 'GLOBAL' }, 49152)
-    expect(built.nodes).toEqual(['node'])
+    expect(built.nodes).toEqual(['node', 'PROXY', 'nested'])
+    expect(built.runnableNodes).toEqual(['node'])
+    expect([...built.failures.keys()].sort()).toEqual(['PROXY', 'nested'])
     expect(JSON.parse(built.configuration)['proxy-groups']).toEqual([
       { name: isolatedProbeGroup, type: 'select', proxies: ['REJECT'] }
     ])
@@ -178,11 +183,10 @@ describe('explicit delay snapshots', () => {
       { kind: 'groupDelay', target: 'GLOBAL', delay },
       49152
     )
-    expect(new Set(built.nodes)).toEqual(new Set(['node', 'PROXY', 'GLOBAL', 'DIRECT', 'REJECT']))
+    expect(new Set(built.nodes)).toEqual(new Set(['node', 'PROXY', 'DIRECT', 'REJECT']))
     expect(Object.fromEntries(built.delayTargets)).toEqual({
       node: 'node',
       PROXY: 'node',
-      GLOBAL: 'node',
       DIRECT: 'DIRECT',
       REJECT: 'REJECT'
     })
@@ -191,6 +195,30 @@ describe('explicit delay snapshots', () => {
       'unified-delay': true,
       'proxy-groups': [{ name: isolatedProbeGroup, type: 'select', proxies: ['REJECT'] }]
     })
+  })
+  it('allows a member snapshot to narrow this group and rejects a node belonging only to another group', () => {
+    const saved = JSON.parse(text)
+    saved.proxies.push({ name: 'other-node', type: 'socks5', server: '93.184.216.35', port: 1080 })
+    saved['proxy-groups'].push({ name: 'other', type: 'select', proxies: ['other-node'] })
+    const compile = (members: string[]) =>
+      isolatedProbeConfiguration(
+        JSON.stringify(saved),
+        { kind: 'groupDelay', target: 'PROXY', delay: { ...delay, members } },
+        49152
+      )
+    expect(compile(['node']).nodes).toEqual(['node'])
+    expect(() => compile(['node', 'other-node'])).toThrow('组成员已变化')
+  })
+  it('preserves the source validation for an explicitly named GLOBAL group', () => {
+    const invalid = JSON.parse(text)
+    invalid['proxy-groups'].push({ name: 'GLOBAL', type: 'select', proxies: ['node'] })
+    expect(() =>
+      isolatedProbeConfiguration(
+        JSON.stringify(invalid),
+        { kind: 'groupDelay', target: 'GLOBAL', delay },
+        49152
+      )
+    ).toThrow('保存配置')
   })
   it('admits explicit DIRECT-only delay without exposing a direct HTTP proxy or requiring a proxy node', () => {
     const built = isolatedProbeConfiguration(
@@ -244,7 +272,7 @@ describe('independent delay boundaries', () => {
       49152
     )
     expect(built.runnableNodes).toContain('node')
-    expect(built.failures.get('DYNAMIC')).toContain('动态代理组')
+    expect(built.failures.get('DYNAMIC')).toMatch(/动态/u)
     expect(JSON.parse(built.configuration)['proxy-providers']).toEqual({})
   })
   it.each([undefined, false, true])(

@@ -843,6 +843,9 @@ export function createElectronShellHost(adapters: {
                   ? `${labels[action]}（状态未获取）`
                   : labels[action],
               type: 'checkbox',
+              ...(action === 'triggerSysProxy'
+                ? { click: () => run({ action, enabled: checked !== true }) }
+                : {}),
               checked: checked === true
             }
           }

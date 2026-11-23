@@ -7,7 +7,10 @@ import Darwin
 
 struct RelaySystemProxyHelperRequest: Codable {
     static let maximumBytes = 2 * 1024 * 1024
+    static let connectionWindow: TimeInterval = 60
+    static let writeWindow: TimeInterval = 8
     enum Operation: String, Codable { case status, change }
+    enum Receiver { case localClient, daemon }
     let version: Int
     let operation: Operation
     let nonce: String
@@ -15,11 +18,14 @@ struct RelaySystemProxyHelperRequest: Codable {
     let expected: RelaySystemProxyBackend.Snapshot?
     let target: RelaySystemProxyBackend.Snapshot?
     static func make(_ expected: RelaySystemProxyBackend.Snapshot?, _ target: RelaySystemProxyBackend.Snapshot?) -> Self {
-        Self(version: 1, operation: expected == nil ? .status : .change, nonce: UUID().uuidString.lowercased(), deadline: ProcessInfo.processInfo.systemUptime + 8, expected: expected, target: target)
+        Self(version: 1, operation: expected == nil ? .status : .change, nonce: UUID().uuidString.lowercased(), deadline: ProcessInfo.processInfo.systemUptime + connectionWindow, expected: expected, target: target)
     }
-    func validate(now: TimeInterval) throws {
+    func validate(now: TimeInterval, receiver: Receiver = .daemon) throws {
+        // The local change envelope includes time to establish a connection.
+        // Only a read-only handshake may carry that entire budget to the daemon.
+        let maximum = receiver == .daemon && operation == .change ? Self.writeWindow : Self.connectionWindow
         guard version == 1, UUID(uuidString: nonce)?.uuidString.lowercased() == nonce,
-              now.isFinite, deadline.isFinite, deadline >= now, deadline - now <= 10 else { throw RelaySystemProxyHelperFailure.request }
+              now.isFinite, deadline.isFinite, deadline >= now, deadline <= now + maximum else { throw RelaySystemProxyHelperFailure.request }
         switch operation {
         case .status: guard expected == nil, target == nil else { throw RelaySystemProxyHelperFailure.request }
         case .change:
@@ -29,11 +35,16 @@ struct RelaySystemProxyHelperRequest: Codable {
             _ = try RelaySystemProxyBackend.changedServiceIDs(expected, target)
         }
     }
-    static func parse(_ data: Data, now: TimeInterval) throws -> Self {
+    static func parse(_ data: Data, now: TimeInterval, receiver: Receiver = .daemon) throws -> Self {
         guard !data.isEmpty, data.count <= maximumBytes else { throw RelaySystemProxyHelperFailure.request }
         let value = try JSONDecoder().decode(Self.self, from: data)
-        try value.validate(now: now)
+        do { try value.validate(now: now, receiver: receiver) }
+        catch { throw receiver == .localClient ? value.failureBeforeWrite(error) : error }
         return value
+    }
+    func failureBeforeWrite(_ error: Error) -> Error {
+        guard operation == .change, UUID(uuidString: nonce)?.uuidString.lowercased() == nonce else { return error }
+        return RelaySystemProxyHelperClient.NotSubmitted(nonce: nonce)
     }
 }
 
@@ -114,13 +125,28 @@ final class RelaySystemProxyHelperListener: NSObject, NSXPCListenerDelegate {
     }
 }
 
+/// A connection accepts a read-only status and at most its corresponding change.
+enum RelaySystemProxyHelperAdmission {
+    case fresh, checking, ready(String, TimeInterval), used
+
+    mutating func admit(_ request: RelaySystemProxyHelperRequest) -> Bool {
+        switch (self, request.operation) {
+        case (.fresh, .status): self = .checking
+        case let (.ready(nonce, deadline), .change) where nonce == request.nonce && request.deadline <= deadline:
+            self = .used
+        default: return false
+        }
+        return true
+    }
+}
+
 private final class RelaySystemProxyHelperHandler: NSObject, RelaySystemProxyPrivilegedProtocol {
     private weak var connection: NSXPCConnection?
     private let trust: RelaySystemProxyHelperTrust
     private let queue: DispatchQueue
     private let lock = NSLock()
     private var live = true
-    private var used = false
+    private var admission = RelaySystemProxyHelperAdmission.fresh
     private let lifetime: RelaySystemProxyHelperLifetime
     init(connection: NSXPCConnection, trust: RelaySystemProxyHelperTrust, queue: DispatchQueue, lifetime: RelaySystemProxyHelperLifetime) {
         self.connection = connection; self.trust = trust; self.queue = queue; self.lifetime = lifetime
@@ -134,17 +160,20 @@ private final class RelaySystemProxyHelperHandler: NSObject, RelaySystemProxyPri
         return live && ProcessInfo.processInfo.systemUptime <= deadline && connection?.effectiveUserIdentifier == trust.manifest.clientUID && getuid() == 0 && geteuid() == 0
     }
     func transact(_ data: NSData, withReply reply: @escaping (NSData) -> Void) {
-        lock.lock(); let admitted = live && !used; used = true; lock.unlock()
-        guard admitted, data.length > 0, data.length <= RelaySystemProxyHelperRequest.maximumBytes else { reply(NSData()); connection?.invalidate(); return }
+        guard data.length > 0, data.length <= RelaySystemProxyHelperRequest.maximumBytes else { reply(NSData()); connection?.invalidate(); return }
         do {
             let request = try RelaySystemProxyHelperRequest.parse(data as Data, now: ProcessInfo.processInfo.systemUptime)
-            guard lifetime.acquire() else { reply(NSData()); connection?.invalidate(); return }
+            lock.lock(); let admitted = live && admission.admit(request); lock.unlock()
+            guard admitted, lifetime.acquire() else { reply(NSData()); connection?.invalidate(); return }
             queue.async { [self] in
                 defer { lifetime.release() }
                 let response: RelaySystemProxyHelperReply
                 do {
                     guard authorized(until: request.deadline), try RelaySystemProxyHelperTrust.load().revision == trust.revision else { throw RelaySystemProxyHelperFailure.peer }
                     let result = try request.operation == .change ? RelaySystemProxyBackend.changeSystemRoot(request.expected!, request.target!, requestIsValid: { [self] in authorized(until: request.deadline) }) : nil
+                    if request.operation == .status {
+                        lock.lock(); admission = .ready(request.nonce, request.deadline); lock.unlock()
+                    }
                     response = RelaySystemProxyHelperReply(version: 1, nonce: request.nonce, revision: trust.revision, clientUID: trust.manifest.clientUID, result: result, error: nil)
                 } catch {
                     response = RelaySystemProxyHelperReply(version: 1, nonce: request.nonce, revision: trust.revision, clientUID: trust.manifest.clientUID, result: nil, error: "管理员组件未确认系统代理事务，请刷新状态后检查。")
@@ -157,22 +186,75 @@ private final class RelaySystemProxyHelperHandler: NSObject, RelaySystemProxyPri
 }
 
 enum RelaySystemProxyHelperClient {
+    enum TransportFailure: Error { case interrupted }
+    // Only the signed local CLI emits this nonce-bound exit receipt. It is
+    // never accepted as a reply from a daemon or inferred from an XPC error.
+    struct NotSubmitted: Error {
+        let nonce: String
+        static let exitStatus: Int32 = 75
+    }
+
     static func transact(_ request: RelaySystemProxyHelperRequest) throws -> RelaySystemProxyHelperReply {
-        let trust = try RelaySystemProxyHelperTrust.load()
-        guard getuid() == trust.manifest.clientUID, geteuid() == getuid() else { throw RelaySystemProxyHelperFailure.peer }
-        try request.validate(now: ProcessInfo.processInfo.systemUptime)
-        let connection = NSXPCConnection(machServiceName: RelaySystemProxyHelperPaths.service, options: .privileged)
-        connection.setCodeSigningRequirement(trust.manifest.helper.requirement)
-        connection.remoteObjectInterface = NSXPCInterface(with: RelaySystemProxyPrivilegedProtocol.self)
-        connection.activate()
-        defer { connection.invalidate() }
+        let trust: RelaySystemProxyHelperTrust
+        do {
+            trust = try RelaySystemProxyHelperTrust.load()
+            guard getuid() == trust.manifest.clientUID, geteuid() == getuid() else { throw RelaySystemProxyHelperFailure.peer }
+        } catch { throw request.failureBeforeWrite(error) }
+        return try transact(request, now: { ProcessInfo.processInfo.systemUptime }, connect: {
+            let connection = NSXPCConnection(machServiceName: RelaySystemProxyHelperPaths.service, options: .privileged)
+            connection.setCodeSigningRequirement(trust.manifest.helper.requirement)
+            connection.remoteObjectInterface = NSXPCInterface(with: RelaySystemProxyPrivilegedProtocol.self)
+            connection.activate()
+            return connection
+        }, close: { $0.invalidate() }, send: { try exchange($0, $1, trust: trust) })
+    }
+
+    static func transact<Connection>(_ request: RelaySystemProxyHelperRequest, now: () -> TimeInterval,
+        connect: () -> Connection, close: (Connection) -> Void,
+        send: (Connection, RelaySystemProxyHelperRequest) throws -> RelaySystemProxyHelperReply) throws -> RelaySystemProxyHelperReply {
+        let status = RelaySystemProxyHelperRequest(version: request.version, operation: .status, nonce: request.nonce,
+            deadline: request.deadline, expected: nil, target: nil)
+        var submitted = false
+        do {
+            for attempt in 0...1 {
+                try request.validate(now: now(), receiver: .localClient)
+                let connection = connect()
+                defer { close(connection) }
+                let acknowledgement: RelaySystemProxyHelperReply
+                do { acknowledgement = try send(connection, status) }
+                catch TransportFailure.interrupted where attempt == 0 { continue }
+                if request.operation == .status { return acknowledgement }
+                guard acknowledgement.error == nil else { throw RelaySystemProxyHelperFailure.reply }
+                let started = now()
+                guard started < request.deadline else { throw RelaySystemProxyHelperFailure.request }
+                let change = RelaySystemProxyHelperRequest(version: request.version, operation: .change, nonce: request.nonce,
+                    deadline: min(request.deadline, started + RelaySystemProxyHelperRequest.writeWindow),
+                    expected: request.expected, target: request.target)
+                try change.validate(now: started)
+                // From this point on any failure is an unknown write outcome.
+                submitted = true
+                return try send(connection, change)
+            }
+            throw RelaySystemProxyHelperFailure.unavailable
+        } catch {
+            throw submitted ? error : request.failureBeforeWrite(error)
+        }
+    }
+
+    private static func exchange(_ connection: NSXPCConnection, _ request: RelaySystemProxyHelperRequest,
+        trust: RelaySystemProxyHelperTrust) throws -> RelaySystemProxyHelperReply {
         let condition = NSCondition()
         var outcome: Result<RelaySystemProxyHelperReply, Error>?
         func finish(_ value: Result<RelaySystemProxyHelperReply, Error>) {
             condition.lock(); defer { condition.unlock() }
             if outcome == nil { outcome = value; condition.broadcast() }
         }
-        let proxy = connection.remoteObjectProxyWithErrorHandler { _ in finish(.failure(RelaySystemProxyHelperFailure.unavailable)) }
+        let proxy = connection.remoteObjectProxyWithErrorHandler { error in
+            let failure = error as NSError
+            if failure.domain == NSCocoaErrorDomain && failure.code == CocoaError.Code.xpcConnectionInterrupted.rawValue {
+                finish(.failure(TransportFailure.interrupted))
+            } else { finish(.failure(RelaySystemProxyHelperFailure.unavailable)) }
+        }
         guard let remote = proxy as? RelaySystemProxyPrivilegedProtocol else { throw RelaySystemProxyHelperFailure.unavailable }
         let bytes = try JSONEncoder().encode(request)
         guard bytes.count <= RelaySystemProxyHelperRequest.maximumBytes else { throw RelaySystemProxyHelperFailure.request }
@@ -186,7 +268,9 @@ enum RelaySystemProxyHelperClient {
             } catch { finish(.failure(error)) }
         }
         condition.lock()
-        let timeout = Date().addingTimeInterval(12)
+        // A submitted write can finish commit/readback after its admission deadline.
+        let grace: TimeInterval = request.operation == .change ? 4 : 0
+        let timeout = Date().addingTimeInterval(request.deadline + grace - ProcessInfo.processInfo.systemUptime)
         while outcome == nil {
             if !condition.wait(until: timeout) { break }
         }

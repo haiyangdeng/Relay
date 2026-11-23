@@ -5,20 +5,36 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { SIMPLE_MODULES } from '../../../../shared/simple-config'
 import type { RelayStatus } from '../../../../shared/relay/protocol'
 import { relayDefaultSidebarLayout } from '../../../../shared/relay/ui-preferences'
+import OutboundModeSwitcher from '../sider/outbound-mode-switcher'
 import {
   RELAY_PREVIEW_ONLY,
   RelayPreviewControls,
   RelayPreviewPage,
   RelayProxyRecoveryNotice
 } from './preview-controls'
+import type { SidebarStatus } from './use-sidebar-status'
 
 const fixture = vi.hoisted(() => ({
   appConfig: undefined as Partial<IAppConfig> | undefined,
+  sidebar: {} as SidebarStatus,
+  sidebarNotice: '',
+  mode: undefined as OutboundMode | undefined,
   proxyStatus: undefined as RelayStatus['systemProxyStatus'],
   getAppConfig: vi.fn(),
   patchAppConfig: vi.fn(),
   mutateAppConfig: vi.fn()
 }))
+vi.mock('./use-sidebar-status', async (original) => {
+  const actual = await original<typeof import('./use-sidebar-status')>()
+  return {
+    ...actual,
+    useSidebarStatus: () => ({
+      ...actual.useSidebarStatus(),
+      status: fixture.sidebar,
+      notice: fixture.sidebarNotice
+    })
+  }
+})
 vi.mock('swr', () => ({ default: () => ({ data: { systemProxyStatus: fixture.proxyStatus } }) }))
 
 vi.mock('@renderer/hooks/use-app-config', () => ({
@@ -27,6 +43,10 @@ vi.mock('@renderer/hooks/use-app-config', () => ({
 vi.mock('@renderer/hooks/use-profile-config', () => ({
   useProfileConfig: () => ({ profileConfig: { items: [], current: null } })
 }))
+vi.mock('@renderer/hooks/use-controled-mihomo-config', () => ({
+  useControledMihomoConfig: () => ({ controledMihomoConfig: { mode: fixture.mode } })
+}))
+vi.mock('@renderer/hooks/use-groups', () => ({ useGroups: () => ({ mutate: vi.fn() }) }))
 vi.mock('@renderer/utils/sider', () => vi.importActual('../../utils/sider'))
 vi.mock('@renderer/utils/ipc', () => ({
   getAppConfig: fixture.getAppConfig,
@@ -44,10 +64,42 @@ vi.mock('react-router-dom', async (importOriginal) => ({
 beforeEach(() => {
   vi.clearAllMocks()
   fixture.appConfig = { rememberSelectedSiderCard: false, lastSelectedSiderCard: 'proxy' }
+  fixture.sidebar = {}
+  fixture.sidebarNotice = ''
+  fixture.mode = undefined
   fixture.proxyStatus = undefined
 })
 
 describe('Preview sidebar boundary', () => {
+  it.each([false, true])(
+    'preserves the mode bar footprint while waiting for the core in iconOnly=%s',
+    (iconOnly) => {
+      const render = () => renderToStaticMarkup(createElement(OutboundModeSwitcher, { iconOnly }))
+      const loading = render()
+      fixture.mode = 'global'
+      const running = render()
+      for (const markup of [loading, running]) {
+        expect(markup).toContain(`aria-orientation="${iconOnly ? 'vertical' : 'horizontal'}"`)
+        expect(
+          [...markup.matchAll(/<button\b[^>]*data-key="([^"]+)"[^>]*>/g)].map(([, key]) => key)
+        ).toEqual(['rule', 'global', 'direct'])
+      }
+      // The same list uses the same spacing, direction and dimensions during hydration.
+      const listClasses = (html: string) =>
+        html
+          .match(/<[^>]*data-slot="tabList"[^>]*>/)?.[0]
+          .match(/class="([^"]*)"/)?.[1]
+          .split(/\s+/)
+          .filter((name) => !/opacity|pointer-events|cursor/.test(name))
+      expect(listClasses(loading)).toBeDefined()
+      expect(listClasses(loading)).toEqual(listClasses(running))
+      expect(loading.match(/aria-disabled="true"/g)).toHaveLength(3)
+      expect(loading).not.toContain('aria-selected="true"')
+      expect(running).not.toContain('aria-disabled="true"')
+      expect(running).toMatch(/<button\b[^>]*data-key="global"[^>]*aria-selected="true"/)
+    }
+  )
+
   it('disables every legacy live control before safe workspace links are ready', () => {
     expect(RELAY_PREVIEW_ONLY).toBe(true)
     for (const props of [{}, { iconOnly: true }, { iconOnly: true, expanded: true }]) {
@@ -78,6 +130,14 @@ describe('Preview sidebar boundary', () => {
       expect(markup.match(/aria-roledescription="sortable"/g)).toHaveLength(15)
       expect(markup).toContain('href="#/relay?panel=desktop-login"')
       expect(markup).toContain('href="#/relay?panel=guard"')
+      for (const label of ['systemProxy', 'tun']) {
+        const quick = markup.match(
+          new RegExp(`<button\\b[^>]*aria-label="sider.cards.${label}快捷开关"[^>]*>`)
+        )?.[0]
+        expect(quick).toBeDefined()
+        expect(quick).toContain('role="switch"')
+        expect(quick).not.toMatch(/\bdisabled=/)
+      }
       expect(markup).not.toContain('开发中')
       expect(markup.match(/<button[^>]+disabled=""/g)).toHaveLength(3)
       expect(markup).not.toContain('aria-checked="true"')
@@ -86,6 +146,68 @@ describe('Preview sidebar boundary', () => {
     expect(fixture.patchAppConfig).not.toHaveBeenCalled()
     expect(fixture.mutateAppConfig).not.toHaveBeenCalled()
   })
+
+  it.each([true, false])(
+    'keeps navigation independent of the system switch and busy state in compact=%s',
+    (iconOnly) => {
+      // The cached report can have no services even when a new inspect will find them.
+      const report = {
+        status: 'uncertain' as const,
+        canApply: false,
+        canRestore: false,
+        services: [],
+        revision: 'a'.repeat(64),
+        location: '',
+        warnings: []
+      }
+      for (const writing of [false, true]) {
+        fixture.sidebar = { system: report, systemObserved: true, systemWriting: writing }
+        const markup = renderToStaticMarkup(
+          createElement(
+            MemoryRouter,
+            null,
+            createElement(RelayPreviewControls, { clashViewsReady: true, iconOnly })
+          )
+        )
+        const body = markup.match(/<button\b[^>]*data-card="sysproxy"[^>]*>/)?.[0]
+        expect(body).toBeDefined()
+        expect(body).not.toContain('aria-pressed')
+        expect(body).not.toMatch(/\bdisabled=""/)
+        const toggle = markup.match(
+          /<button\b[^>]*aria-label="sider.cards.systemProxy快捷开关"[^>]*>/
+        )?.[0]
+        expect(toggle).toBeDefined()
+        expect(toggle).toContain('role="switch"')
+        expect(/\bdisabled=""/.test(toggle ?? '')).toBe(writing)
+      }
+    }
+  )
+
+  it.each([true, false])(
+    'keeps a new sidebar notice below both network switches in compact=%s',
+    (iconOnly) => {
+      const render = () =>
+        renderToStaticMarkup(
+          createElement(
+            MemoryRouter,
+            null,
+            createElement(RelayPreviewControls, { clashViewsReady: true, iconOnly })
+          )
+        )
+      const before = render()
+      fixture.sidebarNotice = 'Network status changed'
+      const after = render()
+      const location = after.indexOf(fixture.sidebarNotice)
+      expect(location).toBeGreaterThan(-1)
+      for (const label of ['systemProxy', 'tun']) {
+        const control = `aria-label="sider.cards.${label}快捷开关"`
+        expect(before).toContain(control)
+        const position = after.indexOf(control)
+        expect(position).toBeGreaterThan(-1)
+        expect(position).toBeLessThan(location)
+      }
+    }
+  )
 
   it('applies hidden and large card preferences without giving compact navigation a second column', () => {
     fixture.appConfig = {

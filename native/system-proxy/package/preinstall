@@ -9,7 +9,16 @@ absent "$helper"
 absent "$daemon"
 service_absent
 inventory=$(/usr/sbin/pkgutil --pkgs) || fail 'package inventory unavailable'
-while IFS= read -r installed; do [ "$installed" != "$receipt" ] || fail 'existing package receipt; uninstall the existing component first'; done <<EOF
+while IFS= read -r installed; do
+    if [ "$installed" = "$receipt" ]; then
+        # Only the integrated package's pinned, root-owned transaction can
+        # admit a receipt whose verified old component has already been backed up.
+        scripts=$(CDPATH= cd -P "$(/usr/bin/dirname "$0")" && /bin/pwd -P)
+        directory "$scripts"
+        regular "$scripts/install-transaction" 755
+        "$scripts/install-transaction" allows-receipt "$receipt" || fail 'existing package receipt; uninstall the existing component first'
+    fi
+done <<EOF
 $inventory
 EOF
 scripts=$(CDPATH= cd -P "$(/usr/bin/dirname "$0")" && /bin/pwd -P) || fail 'package scripts unavailable'

@@ -17,6 +17,15 @@ spec.loader.exec_module(build)
 
 
 class PublicBuildTests(unittest.TestCase):
+    def test_core_rejects_build_without_mixed_and_gvisor_stacks(self):
+        complete = 'build\t-tags=relay_local_geodata,with_gvisor\ndep\tgithub.com/metacubex/gvisor\tv0.0.0-fixed\n'
+        for metadata in [complete.replace(',with_gvisor', ''), complete.split('dep')[0], '']:
+            with patch.object(build, 'output', return_value=metadata):
+                with self.assertRaisesRegex(RuntimeError, 'Mixed/gVisor'):
+                    build.verify_core_tun_stacks(Path('fixture-core'))
+        with patch.object(build, 'output', return_value=complete):
+            build.verify_core_tun_stacks(Path('fixture-core'))
+
     def test_both_app_architectures_use_noindex_staging(self):
         for arch, directory in [('arm64', 'mac-arm64'), ('x64', 'mac')]:
             self.assertEqual(build.app_path(arch), build.ROOT / 'release/apps.noindex' / directory / 'Relay.app')
@@ -34,7 +43,8 @@ class PublicBuildTests(unittest.TestCase):
                     self.assertEqual(verify.call_count, 2)
                     self.assertEqual(run.call_args.args, ('python3', 'scripts/relay/build-integrated-installer.py',
                         '--app', root / 'release/apps.noindex' / directory / 'Relay.app',
-                        '--helper-build', work / 'system-proxy-helper', '--output', work / ('installer-' + arch)))
+                        '--helper-build', work / 'system-proxy-helper', '--tun-build', work / 'tun-helper',
+                        '--output', work / ('installer-' + arch)))
 
     def test_all_dry_runs_are_read_only_and_fixed_version(self):
         before = [p.exists() for p in [build.WORK, build.RESOURCE, build.ROOT / 'release']]
@@ -67,16 +77,20 @@ class PublicBuildTests(unittest.TestCase):
             fixture = root / 'pins.swift'
             fixture.write_text('arm=' + 'a' * 64 + ':501 x64=' + 'b' * 64 + ':502')
             for name in ['mihomo-geodata-v1/LICENSE.upstream', 'mihomo-geodata-v1/patches/0001-local-geodata-v1.patch',
-                         'mihomo-provider-file-v1/patches/0001-serialize-local-file-updates.patch', 'SOURCE.md']:
+                         'mihomo-provider-file-v1/patches/0001-serialize-local-file-updates.patch',
+                         'mihomo-tun-handoff/patches/0003-darwin-tun-handoff.patch', 'SOURCE.md']:
                 path = root / 'core-extensions' / name
                 path.parent.mkdir(parents=True, exist_ok=True); path.write_text(name)
             def fake_run(*args, **kwargs):
                 if args[:2] == ('go', 'build'):
+                    self.assertEqual(args[args.index('-tags') + 1], 'relay_local_geodata,with_gvisor')
                     path = Path(args[args.index('-o') + 1])
                     cpu = 16777228 if kwargs['env']['GOARCH'] == 'arm64' else 16777223
                     path.write_bytes((0xfeedfacf).to_bytes(4, 'little') + cpu.to_bytes(4, 'little') + b'signed-fixture')
-            with patch.multiple(build, ROOT=root, WORK=work, RESOURCE=resource, NATIVE_PINS=['pins.swift']), patch.object(build, 'run', side_effect=fake_run):
-                build.compile_core(source, {'overlays': {}}, {'overlays': {}})
+            with patch.multiple(build, ROOT=root, WORK=work, RESOURCE=resource, NATIVE_PINS=['pins.swift']), patch.object(build, 'run', side_effect=fake_run), \
+                    patch.object(build, 'verify_core_tun_stacks') as verify:
+                build.compile_core(source, {'overlays': {}}, {'overlays': {}}, {'overlays': {}})
+                self.assertEqual(verify.call_count, 2)
             new = json.loads(manifest_path.read_text())
             for arch in ['arm64', 'x64']:
                 binary = resource / 'core-geodata-v1' / ('darwin-' + arch) / 'mihomo'
@@ -85,6 +99,7 @@ class PublicBuildTests(unittest.TestCase):
                 self.assertIn(new['assets'][arch]['sha256'], fixture.read_text())
                 self.assertNotIn(old['assets'][arch]['sha256'], fixture.read_text())
             self.assertTrue((resource / 'core-geodata-v1/0002-serialize-local-file-updates.patch').is_file())
+            self.assertTrue((resource / 'core-geodata-v1/0003-darwin-tun-handoff.patch').is_file())
 
     def test_fresh_tun_client_rebases_all_admitted_capabilities(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -94,7 +109,7 @@ class PublicBuildTests(unittest.TestCase):
             cores = {'arm64': {'sha256': 'c' * 64}, 'x64': {'sha256': 'd' * 64}}
             core.write_text(json.dumps({'assets': cores}))
             filenames = ['execution-client.json', 'runtime-smart-tools-client.json', 'runtime-telemetry-client.json',
-                         'runtime-capture-client.json', 'runtime-rules-client.json', 'runtime-resources-client.json',
+                         'proxy-groups-client.json', 'runtime-capture-client.json', 'runtime-rules-client.json', 'runtime-resources-client.json',
                          'runtime-rule-providers-client.json', 'runtime-work-directory-client.json', 'runtime-history-client.json']
             for name in filenames:
                 (directory / name).write_text(json.dumps({'version': 1, 'clientSHA256': None if name == 'runtime-history-client.json' else 'a' * 64}))

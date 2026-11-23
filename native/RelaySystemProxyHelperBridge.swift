@@ -35,7 +35,13 @@ enum RelaySystemProxyHelperBridge {
             guard received.count <= RelaySystemProxyHelperRequest.maximumBytes else { process.terminate(); process.waitUntilExit(); throw RelaySystemProxyHelperFailure.reply }
         }
         process.waitUntilExit()
-        guard process.terminationReason == .exit, process.terminationStatus == 0, try RelaySystemProxyHelperTrust.load().revision == trust.revision else { throw RelaySystemProxyHelperFailure.unavailable }
+        guard process.terminationReason == .exit, try RelaySystemProxyHelperTrust.load().revision == trust.revision else { throw RelaySystemProxyHelperFailure.unavailable }
+        if process.terminationStatus == RelaySystemProxyHelperClient.NotSubmitted.exitStatus {
+            guard received == Data(request.nonce.utf8) else { throw RelaySystemProxyHelperFailure.reply }
+            return RelaySystemProxyBackend.ChangeResult(status: "notSubmitted", snapshot: try RelaySystemProxyBackend.readSystem(),
+                warnings: ["管理员组件连接未就绪，本次未提交系统代理修改。"])
+        }
+        guard process.terminationStatus == 0 else { throw RelaySystemProxyHelperFailure.unavailable }
         let response = try JSONDecoder().decode(RelaySystemProxyHelperReply.self, from: received)
         try response.validate(request: request, trust: trust)
         guard response.error == nil, let result = response.result else { throw RelaySystemProxyHelperFailure.reply }

@@ -3,6 +3,7 @@ import type { RelayStoredProfile } from '../../../../shared/relay/profiles'
 import type { LocalProxyPreparation, LocalProxyState } from '../../../../shared/relay/local-proxy'
 import {
   activateCachedProfile,
+  chooseActiveTunProfile,
   relayProxyCanPrepare,
   relayProxyMatchesProfile,
   relayProxyRunning,
@@ -81,6 +82,42 @@ function ipc(
 }
 
 describe('cached proxy activation', () => {
+  it('selects the pinned profile on a managed TUN and confirms the new forwarding owner', async () => {
+    const owner = { kind: 'tun-managed', instanceId: 'before', profileId: 'old' }
+    const active = { ...owner, instanceId: 'after', profileId: profile.id }
+    const invoke = vi
+      .fn()
+      .mockResolvedValueOnce(owner)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce({ current: profile.id })
+      .mockResolvedValueOnce(active)
+    expect(await chooseActiveTunProfile(profile, invoke, owner.instanceId)).toEqual(active)
+    expect(invoke.mock.calls).toEqual([
+      ['relayProxyPageOwner'],
+      ['changeCurrentProfile', { id: profile.id, sha256: profile.sha256 }],
+      ['getProfileConfig'],
+      ['relayProxyPageOwner']
+    ])
+  })
+  it('refuses a changed managed owner or a selection that never reached the TUN core', async () => {
+    const ordinary = vi.fn().mockResolvedValue({ kind: 'ordinary' })
+    await expect(chooseActiveTunProfile(profile, ordinary)).resolves.toBeUndefined()
+    await expect(chooseActiveTunProfile(profile, ordinary, 'expected')).rejects.toThrow(
+      '会话已变化'
+    )
+    expect(ordinary.mock.calls).toEqual([['relayProxyPageOwner'], ['relayProxyPageOwner']])
+    const before = { kind: 'tun-managed', instanceId: 'expected', profileId: 'old' }
+    const failed = vi
+      .fn()
+      .mockResolvedValueOnce(before)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce({ current: profile.id })
+      .mockResolvedValueOnce(before)
+    await expect(chooseActiveTunProfile(profile, failed, 'expected')).rejects.toThrow(
+      '运行配置未确认'
+    )
+    expect(failed).toHaveBeenCalledTimes(4)
+  })
   it('stops before preparation when selection was cancelled or not read back', async () => {
     const invoke = ipc({ selected: 'previous' })
     await expect(startCachedProxy(profile, 18191, invoke)).rejects.toThrow('配置未选用')
@@ -98,7 +135,11 @@ describe('cached proxy activation', () => {
     { hasRecord: true },
     { phase: 'unknown' as const, hasRecord: true },
     { phase: 'starting' as const },
-    { phase: 'blocked' as const },
+    { phase: 'blocked' as const, hasRecord: true },
+    { phase: 'blocked' as const, owned: true },
+    { phase: 'blocked' as const, pending: true },
+    { phase: 'blocked' as const, uncertain: true },
+    { phase: 'blocked' as const, traffic: 'listening' as const },
     { traffic: 'unconfirmed' as const }
   ])('never starts an occupied or uncertain service %j', async (patch) => {
     const invoke = ipc({ state: idle(patch) })
@@ -111,6 +152,27 @@ describe('cached proxy activation', () => {
     expect(relayProxyCanPrepare(idle({ phase: 'unknown' }))).toBe(true)
     await expect(startCachedProxy(profile, 18191, invoke)).rejects.toThrow('尚未就绪')
     expect(invoke.mock.calls.map(([channel]) => channel)).not.toContain('relayLocalProxyAction')
+  })
+
+  it('rechecks a previous port conflict on each explicit attempt and starts only with fresh permission', async () => {
+    const blocked = idle({ phase: 'blocked' })
+    const occupied = ipc({ state: blocked, canStart: false })
+    await expect(startCachedProxy(profile, 18191, occupied)).rejects.toThrow('尚未就绪')
+    expect(occupied).toHaveBeenCalledWith(
+      'relayLocalProxyPrepare',
+      expect.objectContaining({ httpPort: 18191 })
+    )
+    expect(occupied.mock.calls.map(([channel]) => channel)).not.toContain('relayLocalProxyAction')
+
+    const released = ipc({ state: blocked, canStart: true })
+    await expect(activateCachedProfile(profile, 18191, released)).resolves.toMatchObject({
+      owned: true,
+      profileId: profile.id
+    })
+    expect(released).toHaveBeenCalledWith('relayLocalProxyAction', {
+      action: 'start',
+      evidenceId: preparation.evidenceId
+    })
   })
 
   it('pins id, digest, and port and invokes only existing explicit IPC commands', async () => {

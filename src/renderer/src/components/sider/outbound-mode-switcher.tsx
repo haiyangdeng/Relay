@@ -18,13 +18,14 @@ const OutboundModeSwitcher: React.FC<Props> = ({ iconOnly, expanded = false }: P
   const { disableAnimations = false } = appConfig || {}
   const { mode } = controledMihomoConfig || {}
 
-  const onChangeMode = async (mode: OutboundMode): Promise<void> => {
-    await patchControledMihomoConfig({ mode })
+  const onChangeMode = async (next: OutboundMode): Promise<void> => {
+    if (!mode || mode === next) return
+    await patchControledMihomoConfig({ mode: next })
     // Relay applies one confirmed transaction to its owned core. Connection
     // closure is a separate scoped action, not an implicit second mutation.
     mutateGroups()
   }
-  if (!mode) return null
+  // Keep the rail geometry stable as the owned core publishes its first mode.
   if (iconOnly) {
     return (
       <Tabs
@@ -33,16 +34,18 @@ const OutboundModeSwitcher: React.FC<Props> = ({ iconOnly, expanded = false }: P
         aria-label={t('sider.cards.outbound.title')}
         disableAnimation={disableAnimations}
         color="primary"
-        selectedKey={mode}
+        isDisabled={!mode}
+        selectedKey={mode ?? ''}
         classNames={{
           base: 'w-full',
           tabWrapper: 'w-full',
           tabList: 'bg-content1 shadow-medium outbound-mode-card w-full',
-          tab: `justify-start px-0 ${disableAnimations ? 'relay-mode-static-tab' : ''}`,
+          tab: `justify-start px-0 ${disableAnimations && mode ? 'relay-mode-static-tab' : ''}`,
           tabContent: 'w-full',
           // Follow the rail width directly; animate only movement between modes.
-          cursor:
-            'relay-mode-cursor right-1 !w-auto data-[animated=true]:transition-[top,height] motion-reduce:transition-none'
+          cursor: mode
+            ? 'relay-mode-cursor right-1 !w-auto data-[animated=true]:transition-[top,height] motion-reduce:transition-none'
+            : 'invisible'
         }}
         onSelectionChange={(key: Key) => onChangeMode(key as OutboundMode)}
       >
@@ -70,11 +73,12 @@ const OutboundModeSwitcher: React.FC<Props> = ({ iconOnly, expanded = false }: P
       aria-label={t('sider.cards.outbound.title')}
       disableAnimation={disableAnimations}
       color="primary"
-      selectedKey={mode}
+      isDisabled={!mode}
+      selectedKey={mode ?? ''}
       classNames={{
         tabList: 'bg-content1 shadow-medium outbound-mode-card',
-        tab: disableAnimations ? 'relay-mode-static-tab' : '',
-        cursor: 'relay-mode-cursor'
+        tab: disableAnimations && mode ? 'relay-mode-static-tab' : '',
+        cursor: mode ? 'relay-mode-cursor' : 'invisible'
       }}
       onSelectionChange={(key: Key) => onChangeMode(key as OutboundMode)}
     >

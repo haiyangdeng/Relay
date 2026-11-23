@@ -386,6 +386,7 @@ enum RelayTunRuntimeRules {
         private let clientSHA256: String, installationRevision: String
         private let queue = DispatchQueue(label: "local.relay.tun.runtime-rules.pipe")
         private let source: DispatchSourceRead
+        private let cancellation = DispatchGroup()
         private var buffer = Data(), started = false, closed = false
         private var pending: Int?, timer: DispatchSourceTimer?, lastID = 0
         /// Only a positively pinned future launch argv may instantiate FD5/6.
@@ -411,7 +412,10 @@ enum RelayTunRuntimeRules {
             self.clientSHA256 = clientSHA256; self.installationRevision = installationRevision
             controller = Controller(binding: binding, driver: driver)
             source = DispatchSource.makeReadSource(fileDescriptor: input, queue: queue)
-            source.setCancelHandler { [input, output] in Darwin.close(input); Darwin.close(output) }
+            cancellation.enter()
+            source.setCancelHandler { [input, output, cancellation] in
+                Darwin.close(input); Darwin.close(output); cancellation.leave()
+            }
         }
         deinit { controller.close(); source.cancel(); if !started { source.resume() } }
         func start() {
@@ -431,6 +435,12 @@ enum RelayTunRuntimeRules {
         func invalidate() {
             controller.close()
             queue.async { [weak self] in self?.close() }
+        }
+        /// Called only by the session owner, never by this pipe queue.
+        func invalidateAndDrain() -> Bool {
+            invalidate()
+            queue.sync { if !started { started = true; source.resume() } }
+            return cancellation.wait(timeout: .now() + 2) == .success
         }
         private func close() {
             guard !closed else { return }; closed = true; controller.close()

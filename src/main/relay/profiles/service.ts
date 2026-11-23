@@ -52,6 +52,7 @@ export function createProfileService(adapters: {
   let generatedEpoch = 0
   let busy = false
   let listing = false
+  let readingDetails = false
   let proof:
     | {
         report: RelayProfilePreparation
@@ -201,6 +202,7 @@ export function createProfileService(adapters: {
   return {
     isBusy: (): boolean => busy,
     isListing: (): boolean => listing,
+    isReading: (): boolean => listing || readingDetails,
     whenIdle: (): Promise<void> =>
       busy ? new Promise((resolve) => waiters.push(resolve)) : Promise.resolve(),
     clear(): void {
@@ -292,6 +294,7 @@ export function createProfileService(adapters: {
       if (busy) throw new Error('请先完成或取消本次配置操作。')
       if (!adapters.read) throw new Error('节点编辑尚未接通。')
       busy = true
+      readingDetails = true
       try {
         const source = await adapters.read(selection)
         const parsed = analyzeProfile(source.text)
@@ -307,6 +310,7 @@ export function createProfileService(adapters: {
       } catch {
         throw new Error('未能读取节点草稿，来源可能已变化或超过500个节点。')
       } finally {
+        readingDetails = false
         end()
       }
     },
@@ -315,6 +319,7 @@ export function createProfileService(adapters: {
       if (busy) throw new Error('请先完成或取消本次配置操作。')
       if (!adapters.read) throw new Error('代理组编辑尚未接通。')
       busy = true
+      readingDetails = true
       try {
         const source = await adapters.read(selection),
           data = analyzeProfile(source.text).data
@@ -341,6 +346,7 @@ export function createProfileService(adapters: {
       } catch {
         throw new Error('未能读取代理组草稿，来源可能已变化或超过500个组。')
       } finally {
+        readingDetails = false
         end()
       }
     },
@@ -349,6 +355,7 @@ export function createProfileService(adapters: {
       if (busy) throw new Error('请先完成或取消本次配置操作。')
       if (!adapters.read) throw new Error('规则编辑尚未接通。')
       busy = true
+      readingDetails = true
       try {
         const source = await adapters.read(selection),
           data = analyzeProfile(source.text).data
@@ -378,6 +385,7 @@ export function createProfileService(adapters: {
       } catch {
         throw new Error('未能读取规则草稿，来源可能已变化或超过10000条规则。')
       } finally {
+        readingDetails = false
         end()
       }
     },
@@ -386,6 +394,7 @@ export function createProfileService(adapters: {
       if (busy) throw new Error('请先完成或取消本次配置操作。')
       if (!adapters.read) throw new Error('规则提供者编辑尚未接通。')
       busy = true
+      readingDetails = true
       try {
         const source = await adapters.read(selection),
           data = analyzeProfile(source.text).data
@@ -406,6 +415,7 @@ export function createProfileService(adapters: {
       } catch {
         throw new Error('未能读取规则提供者，来源可能已变化或超过200项。')
       } finally {
+        readingDetails = false
         end()
       }
     },

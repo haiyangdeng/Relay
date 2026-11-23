@@ -17,7 +17,6 @@ function fixture() {
       selection: selected,
       revision: 'b'.repeat(64)
     })),
-    defaults: vi.fn(async () => [selected]),
     save: vi.fn(async () => ({ selection: selected, revision: 'd'.repeat(64) }))
   }
   // Only the revision is consumed by this service; the real store validates the body.
@@ -80,56 +79,30 @@ describe('Startup selection preserves validated source identity without activati
     ])
       expect(() => validateCoreSelectionSnapshot(raw)).toThrow()
   })
-  it('keeps a valid remembered choice without reading defaults or writing preferences', async () => {
+  it('fills only an empty selection when a first TUN click races another choice', async () => {
     const f = fixture()
-    expect(await f.service.resolveStartup(() => {})).toEqual(selected)
-    expect(f.adapters.defaults).not.toHaveBeenCalled()
-    expect(f.adapters.save).not.toHaveBeenCalled()
-  })
-  it('exposes the same verified fallback read-only, then remembers it against the original revision for startup', async () => {
-    const f = fixture()
-    f.adapters.read.mockResolvedValue({ revision: 'b'.repeat(64) })
-    expect(await f.service.readPreferred()).toEqual(selected)
-    expect(f.adapters.save).not.toHaveBeenCalled()
-    expect(await f.service.resolveStartup(() => {})).toEqual(selected)
-    expect(f.adapters.save).toHaveBeenCalledExactlyOnceWith(selected, 'b'.repeat(64))
-  })
-  it('skips an unavailable saved source and an unreadable first candidate, without retrying either', async () => {
-    const f = fixture(),
-      next = { ...selected, id: '00000000-0000-0000-0000-000000000002' }
-    f.adapters.defaults.mockResolvedValue([selected, next])
-    f.adapters.profiles.read
-      .mockRejectedValueOnce(Error('removed'))
-      .mockRejectedValueOnce(Error('invalid'))
-    f.adapters.save.mockResolvedValue({ selection: next, revision: 'd'.repeat(64) })
-    expect(await f.service.resolveStartup(() => {})).toEqual(next)
-    expect(f.adapters.save).toHaveBeenCalledExactlyOnceWith(next, 'b'.repeat(64))
-  })
-  it('does not turn native preference errors, empty inventory or a superseded default into a startup', async () => {
-    const f = fixture()
-    f.adapters.read.mockRejectedValueOnce(Error('unsafe preference file'))
-    await expect(f.service.resolveStartup(() => {})).rejects.toThrow('unsafe preference')
-    expect(f.adapters.defaults).not.toHaveBeenCalled()
-    f.adapters.read.mockResolvedValue({ revision: 'b'.repeat(64) })
-    f.adapters.defaults.mockResolvedValueOnce([])
-    expect(await f.service.resolveStartup(() => {})).toBeUndefined()
-    let current = true
-    f.adapters.defaults.mockImplementationOnce(async () => {
-      current = false
-      return [selected]
-    })
     await expect(
-      f.service.resolveStartup(() => {
-        if (!current) throw Error('superseded')
-      })
-    ).rejects.toThrow('superseded')
+      f.service.remember({ ...selected, sha256: 'c'.repeat(64) }, () => {})
+    ).rejects.toThrow()
+    expect(f.adapters.save).not.toHaveBeenCalled()
+    await f.service.remember(selected, () => {})
+    expect(f.adapters.save).not.toHaveBeenCalled()
+    f.adapters.read.mockResolvedValue({ revision: 'b'.repeat(64) })
+    await f.service.remember(selected, () => {})
+    expect(f.adapters.save).toHaveBeenCalledExactlyOnceWith(selected, 'b'.repeat(64))
+  })
+  it('offers only a still available saved selection without writing a preference', async () => {
+    const f = fixture()
+    expect(await f.service.readPreferred()).toEqual(selected)
+    f.adapters.profiles.read.mockRejectedValueOnce(Error('removed'))
+    expect(await f.service.readPreferred()).toBeUndefined()
+    f.adapters.read.mockResolvedValue({ revision: 'b'.repeat(64) })
+    expect(await f.service.readPreferred()).toBeUndefined()
     expect(f.adapters.save).not.toHaveBeenCalled()
   })
-  it('does not overwrite a competing preference revision or retry a rejected fallback save', async () => {
+  it('preserves errors reading the native preference', async () => {
     const f = fixture()
-    f.adapters.read.mockResolvedValue({ revision: 'b'.repeat(64) })
-    f.adapters.save.mockRejectedValueOnce(Error('revision changed'))
-    await expect(f.service.resolveStartup(() => {})).rejects.toThrow('revision changed')
-    expect(f.adapters.save).toHaveBeenCalledExactlyOnceWith(selected, 'b'.repeat(64))
+    f.adapters.read.mockRejectedValueOnce(Error('unsafe preference'))
+    await expect(f.service.readPreferred()).rejects.toThrow('unsafe preference')
   })
 })

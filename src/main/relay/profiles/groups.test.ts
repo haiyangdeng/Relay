@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { canSelectCachedGroupMember } from '../../../shared/relay/profiles'
 import { localProxyConfiguration } from '../core/local-proxy-runtime'
 import { compileProfileRuntime } from './runtime'
 
@@ -7,6 +8,32 @@ const base = { proxies: [node], rules: ['MATCH,Group'] }
 const build = (group: Record<string, unknown>) =>
   compileProfileRuntime(JSON.stringify({ ...base, 'proxy-groups': [{ name: 'Group', ...group }] }))
 describe('Pinned dynamic groups and provider compilation boundary', () => {
+  it('allows only known declared members in unambiguous selectable offline groups', () => {
+    const group = (name: string, type: string) => ({
+      name,
+      type,
+      proxies: ['A', 'provider-only', name]
+    })
+    const snapshot = {
+      targets: ['A', 'B', 'select'],
+      groups: [
+        ...['select', 'url-test', 'fallback', 'smart', 'load-balance'].map((type) =>
+          group(type, type)
+        ),
+        { ...group('filtered', 'select'), 'exclude-filter': 'A' },
+        group('duplicate', 'select'),
+        group('duplicate', 'select'),
+        { name: 'external', type: 'select', use: ['provider'] }
+      ]
+    }
+    for (const type of ['select', 'url-test', 'fallback', 'smart'])
+      expect(canSelectCachedGroupMember(snapshot, type, 'A')).toBe(true)
+    for (const name of ['load-balance', 'filtered', 'duplicate', 'external', 'missing'])
+      expect(canSelectCachedGroupMember(snapshot, name, 'A')).toBe(false)
+    for (const name of ['B', 'provider-only', 'select'])
+      expect(canSelectCachedGroupMember(snapshot, 'select', name)).toBe(false)
+    expect(canSelectCachedGroupMember({ ...snapshot, targets: ['B'] }, 'select', 'A')).toBe(false)
+  })
   it('retains controlled Smart settings and replaces implicit model updates with fixed local controls', () => {
     const result = build({
       type: 'smart',

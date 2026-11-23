@@ -1,5 +1,12 @@
 # 版本记录
 
+## 1.0.0 · Apple Silicon 构建 23 — 2026-11-23
+
+- 导入配置后可直接点击左侧系统代理开关。修复普通代理组和 GLOBAL 记住同一节点时首次启动失败的问题。
+- 选中配置或节点即应用，代理组按钮仅对本组测速。TUN 与系统代理可同时工作，关闭 TUN 后保留原系统代理状态。
+- Apple Silicon 安装包已集成 TUN。Intel 下载继续提供 11 月 13 日的构建 2，文件和校验值均沿用原版。
+- Apple Silicon macOS 虚拟机完成两轮全新安装、首次点击系统代理或 TUN、网络连通性及恢复验证。[发行说明](https://github.com/haiyangdeng/Relay/releases/tag/v1.0.0-build.23)
+
 ## 1.0.0 — 2026-11-13
 
 首个 GitHub 发行版本，内部构建号 2。

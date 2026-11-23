@@ -21,6 +21,53 @@ const asset = (path: string): RuntimeAsset => {
   return { path, bytes, sha256: resourceHash(bytes) }
 }
 describe('HTTP runtime local Geo resources', () => {
+  it.each(['rule', 'global'])(
+    'accepts the generated GLOBAL with remembered members before forwarding in %s mode',
+    (mode) => {
+      const assets = [asset('GeoSite.dat'), asset('Country.mmdb')]
+      const saved = new Map([
+        ['G', 'A'],
+        ['GLOBAL', 'A']
+      ])
+      const built = localProxyConfiguration(
+        JSON.stringify({ ...source, mode }),
+        7892,
+        'off',
+        { httpPort: 17891, socksPort: 17890, route: 'A' },
+        undefined,
+        assets,
+        { http: 7892, socks: 7891, mixed: 7890, redir: 0 },
+        undefined,
+        saved
+      )
+      const validate = (body: string) =>
+        ownedCoreConfiguration(body, 'localProxy', undefined, undefined, assets)
+      const output = JSON.parse(built.configuration)
+      const groups = output['proxy-groups']
+      const global = groups.at(-1)
+      expect(global).toEqual({
+        name: 'GLOBAL',
+        type: 'select',
+        proxies: ['DIRECT', 'REJECT', 'A', 'G'],
+        'default-selected': 'A'
+      })
+      expect(validate(built.configuration).parsed).toEqual(output)
+      expect(
+        compileProfileRuntime(built.configuration, { geoip: true, geosite: true }).configuration
+      ).toBeUndefined()
+      for (const altered of [
+        { ...global, proxies: ['DIRECT', 'A'] },
+        { ...global, 'default-selected': 'missing' },
+        { ...global, filter: 'A' },
+        { ...global, use: ['external'] },
+        { ...global, type: 'url-test' }
+      ]) {
+        expect(() =>
+          validate(JSON.stringify({ ...output, 'proxy-groups': [groups[0], altered] }))
+        ).toThrow()
+      }
+    }
+  )
   it.each([
     { dat: false, ports: { http: 18191, socks: 18192, mixed: 0, redir: 0 } },
     { dat: true, ports: { http: 18191, socks: 18192, mixed: 0, redir: 0 } },

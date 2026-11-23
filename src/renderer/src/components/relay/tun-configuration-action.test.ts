@@ -1,5 +1,5 @@
 import { expect, it, vi } from 'vitest'
-import { prepareCurrentTunConfiguration } from './tun-configuration-action'
+import { prepareCurrentTunConfiguration, readTunProfileId } from './tun-configuration-action'
 
 const id = '11111111-1111-4111-8111-111111111111'
 const sha256 = 'a'.repeat(64)
@@ -27,7 +27,7 @@ it('uses the selected stored profile and parser evidence without saving settings
   expect(await prepareCurrentTunConfiguration(id, f)).toBe('prepared')
   expect(f.invoke.mock.calls).toEqual([
     ['relayProfileList'],
-    ['relayTunConfigurationPrepare', { id, sha256 }],
+    ['relayTunConfigurationPrepare', { intent: 'enable', profile: { id, sha256 } }],
     ['relayCompleteConfigurationCheck', { evidenceId: 'prepared' }]
   ])
 })
@@ -71,4 +71,24 @@ it('does not run a parser with missing resources or accept a rejected or differe
     )
     await expect(prepareCurrentTunConfiguration(id, f)).rejects.toThrow('检查未通过')
   }
+})
+
+it('chooses the saved profile or first imported fallback with a cold renderer, without writes', async () => {
+  const items = [{ id: 'first' }, { id: 'saved' }]
+  expect(
+    await readTunProfileId(vi.fn().mockResolvedValue({ current: 'pending-item', items }))
+  ).toBe('pending-item')
+  expect(await readTunProfileId(vi.fn().mockResolvedValue({ current: 'saved', items }))).toBe(
+    'saved'
+  )
+  const fallback = vi
+    .fn()
+    .mockResolvedValueOnce({ items })
+    .mockResolvedValueOnce({ profiles: items })
+  expect(await readTunProfileId(fallback)).toBe('first')
+  await expect(
+    readTunProfileId(
+      vi.fn().mockResolvedValueOnce({ items: [] }).mockResolvedValueOnce({ profiles: [] })
+    )
+  ).rejects.toThrow('请先导入')
 })

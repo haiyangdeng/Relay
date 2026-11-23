@@ -153,6 +153,20 @@ describe('Ordinary Clash channels routed to the owned service', () => {
     })
     expect(f.local.action).not.toHaveBeenCalled()
   })
+  it('reads a choice imported after the first empty window without restarting or selecting another profile', async () => {
+    const f = fixture()
+    const selection = { id: f.profile.id, sha256: f.profile.sha256 }
+    const readSelection = vi.fn<() => Promise<typeof selection | undefined>>()
+    readSelection.mockResolvedValueOnce(undefined).mockResolvedValue(selection)
+    const backend = createClashBackend({ ...f, readSelection })
+    expect(await backend.invoke('getProfileConfig', [])).toMatchObject({ current: undefined })
+    expect(await backend.invoke('getProfileConfig', [])).toMatchObject({ current: selection.id })
+    expect(await backend.invoke('getCurrentProfileItem', [])).toMatchObject({ id: selection.id })
+    expect(readSelection).toHaveBeenCalledTimes(2)
+    readSelection.mockResolvedValue(undefined)
+    expect(await backend.invoke('getProfileConfig', [true])).toMatchObject({ current: undefined })
+    expect(f.local.action).not.toHaveBeenCalled()
+  })
   it('binds the workspace selection and read-only original to the exact held profile digest', async () => {
     const f = fixture()
     const expected = { id: f.profile.id, sha256: f.profile.sha256 }

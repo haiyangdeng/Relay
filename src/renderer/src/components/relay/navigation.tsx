@@ -1,6 +1,6 @@
 import { Switch } from '@heroui/react'
 import { calcTraffic } from '@renderer/utils/calc'
-import { useEffect, useId, useRef, useState } from 'react'
+import { Fragment, useSyncExternalStore, useEffect, useId, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { isRelayNavigationActive, relayNavigationTarget } from '@renderer/utils/relay-workspace'
@@ -42,10 +42,16 @@ import {
   IoArrowDownOutline
 } from 'react-icons/io5'
 import { DEFAULT_SIDER_ORDER } from '../../../../shared/appConfig'
+import { ordinaryRecoveryNotice } from '../../../../shared/relay/tun'
 import { relayDefaultSidebarLayout } from '../../../../shared/relay/ui-preferences'
+import {
+  activeTunSwitch,
+  tunSwitchProgress,
+  tunStoppingNotice,
+  type TunSwitchBinding
+} from './tun-controller'
 import { useSidebarStatus, type SidebarStatus, type SidebarSwitch } from './use-sidebar-status'
-import { canPrepareSystemProxy, selectedSystemProxyServices } from './system-proxy-actions'
-import { relayProxyCanPrepare, relayProxyRunning } from './proxy-library-actions'
+import { RelayCoreStatus } from './core-presentation'
 import './navigation.css'
 
 type TrafficPoint = { upload: number; download: number }
@@ -118,6 +124,10 @@ function NavigationItem({
   wide,
   profileName,
   status,
+  closingTun,
+  switchingSystem,
+  startingTun,
+  panelSwitch,
   pending,
   change,
   refresh,
@@ -129,6 +139,10 @@ function NavigationItem({
   wide: boolean
   profileName?: string
   status: SidebarStatus
+  closingTun: boolean
+  panelSwitch?: TunSwitchBinding
+  startingTun: boolean
+  switchingSystem: boolean
   pending: boolean
   change(kind: SidebarSwitch, enabled: boolean): Promise<void>
   refresh(): Promise<void>
@@ -145,7 +159,7 @@ function NavigationItem({
   const label = t(SIDER_CARD_LABELS[id])
   const Icon = cardIcons[id]
   const managed = status.system?.status === 'active' || status.system?.status === 'applied'
-  const systemUnobserved = status.systemObserved === false
+  const systemUnobserved = !status.systemObserved
   const tunEnabled =
     status.tun?.session.phase === 'active' && status.tun.session.traffic === 'forwarding'
   const toggles: Partial<
@@ -153,31 +167,20 @@ function NavigationItem({
   > = {
     sysproxy: {
       checked: managed,
-      disabled:
-        status.systemPending !== false ||
-        (managed
-          ? !status.system?.canRestore
-          : (!relayProxyRunning(status.local) && !relayProxyCanPrepare(status.local)) ||
-            (!systemUnobserved &&
-              (!canPrepareSystemProxy(status.system) ||
-                !status.system ||
-                selectedSystemProxyServices(status.system).length === 0))),
+      // A click joins any read-only inspection and checks a fresh native report.
+      disabled: status.systemWriting === true,
       title: systemUnobserved ? '状态未获取；点击检查并启用系统代理' : '系统代理（使用已保存设置）'
     },
     tun: {
-      checked: tunEnabled,
-      disabled:
-        !status.tun ||
-        !status.local ||
-        status.tun.session.pending ||
-        status.tun.session.phase === 'uncertain' ||
-        (tunEnabled
-          ? !status.tun.session.owned
-          : status.tun.helper !== 'ready' ||
-            !!status.tun.session.owned ||
-            !!status.local?.owned ||
-            !!status.local?.pending),
-      title: status.tun?.helper === 'missing' ? '首次使用需安装 TUN 权限组件' : '虚拟网卡'
+      checked: panelSwitch?.checked ?? tunEnabled,
+      // The quick action inspects the helper and session again. Background stats
+      // and a previous helper read must not veto a new request.
+      disabled: panelSwitch?.disabled ?? !!status.tun?.session.pending,
+      title: closingTun
+        ? tunStoppingNotice
+        : status.tun?.helper === 'missing'
+          ? '首次使用需安装 TUN 权限组件'
+          : '虚拟网卡'
     },
     dns: {
       checked: status.dns === true,
@@ -201,6 +204,10 @@ function NavigationItem({
     }
   }
   const toggle = toggles[id]
+  const networkSwitch = id === 'sysproxy' || id === 'tun'
+  const openSettings = (): void => {
+    void navigate(relayNavigationTarget(SIDER_CARD_ROUTES[id]))
+  }
   const count = id === 'proxy' ? status.groups : id === 'rule' ? status.rules : undefined
   const activeColors = 'border-primary bg-primary/10 text-foreground'
   return (
@@ -211,7 +218,7 @@ function NavigationItem({
     >
       <button
         type="button"
-        onClick={() => navigate(relayNavigationTarget(SIDER_CARD_ROUTES[id]))}
+        onClick={openSettings}
         title={id === 'profile' && profileName ? `${label} · ${profileName}` : label}
         className={`relay-nav-card w-full min-w-0 rounded-xl border p-2.5 text-sm break-words flex flex-col ${compact ? 'items-center justify-center min-h-12' : 'items-start justify-between gap-2 min-h-[68px] text-left font-semibold'} ${active ? activeColors : 'border-default-200 bg-content1 text-foreground hover:bg-default-100'} `}
         data-card={id}
@@ -239,9 +246,12 @@ function NavigationItem({
           <>
             <span className="relay-nav-core-version">
               <IoApertureOutline className="relay-nav-core-icon" aria-hidden="true" />
-              <span className="truncate" title={status.version}>
-                {status.version ?? '—'}
-              </span>
+              <RelayCoreStatus
+                local={status.local}
+                tun={status.tun}
+                sidebar
+                version={status.version}
+              />
             </span>
             <span className="relay-nav-core-detail">
               <IoSettingsOutline className="relay-nav-icon" aria-hidden="true" />
@@ -288,8 +298,15 @@ function NavigationItem({
             <span className="relay-nav-card-bottom">
               <span className="min-w-0 truncate">
                 {label}
-                {id === 'sysproxy' && systemUnobserved && (
-                  <span className="ml-1 text-xs font-normal opacity-75">· 状态未获取</span>
+                {id === 'tun' && (closingTun || startingTun) && (
+                  <span className="ml-1 text-xs font-normal opacity-75">
+                    {closingTun ? '· 正在关闭' : '· 正在开启'}
+                  </span>
+                )}
+                {id === 'sysproxy' && (switchingSystem || systemUnobserved) && (
+                  <span className="ml-1 text-xs font-normal opacity-75">
+                    {switchingSystem ? '· 切换中' : '· 状态未获取'}
+                  </span>
                 )}
               </span>
               {!toggle && (
@@ -299,7 +316,23 @@ function NavigationItem({
           </>
         )}
       </button>
-      {!compact && toggle && (
+      {networkSwitch && toggle ? (
+        <button
+          type="button"
+          role="switch"
+          aria-label={`${label}快捷开关`}
+          aria-checked={toggle.checked}
+          title={toggle.title}
+          disabled={pending || toggle.disabled}
+          className="relay-nav-network-switch"
+          onClick={() => {
+            if (id === 'tun' && panelSwitch) panelSwitch.setEnabled(!toggle.checked)
+            else void change(id, !toggle.checked)
+          }}
+        >
+          <span aria-hidden="true" />
+        </button>
+      ) : !compact && toggle ? (
         <div className="relay-nav-toggle" onPointerDown={(event) => event.stopPropagation()}>
           <Switch
             size="sm"
@@ -311,7 +344,7 @@ function NavigationItem({
             onValueChange={(value) => void change(id as SidebarSwitch, value)}
           />
         </div>
-      )}
+      ) : null}
       {!compact && id === 'mihomo' && (
         <button
           type="button"
@@ -333,6 +366,18 @@ export function RelayNavigation({ compact }: { compact: boolean }): React.JSX.El
   const { appConfig, mutateAppConfig } = useAppConfig()
   const { profileConfig } = useProfileConfig()
   const sidebar = useSidebarStatus(profileConfig?.current)
+  const panelSwitch = useSyncExternalStore(
+    activeTunSwitch.subscribe,
+    activeTunSwitch.read,
+    activeTunSwitch.read
+  )
+  const transition = useSyncExternalStore(
+    tunSwitchProgress.subscribe,
+    tunSwitchProgress.read,
+    tunSwitchProgress.read
+  )
+  const ordinaryRecovery = sidebar.status.tun?.ordinaryRecovery
+  const closingTun = transition === 'stop' || sidebar.status.tun?.session.phase === 'stopping'
   const [traffic, setTraffic] = useState<{ owner: string; points: TrafficPoint[] }>({
     owner: '',
     points: []
@@ -386,6 +431,21 @@ export function RelayNavigation({ compact }: { compact: boolean }): React.JSX.El
       setPending(false)
     }
   }
+  const lastSwitchIndex = Math.max(visible.indexOf('sysproxy'), visible.indexOf('tun'))
+  const networkNotice = (ordinaryRecovery || closingTun || sidebar.notice) && (
+    <p role="status" className="col-span-full text-xs px-1 pb-2">
+      {ordinaryRecovery
+        ? ordinaryRecoveryNotice(ordinaryRecovery)
+        : closingTun
+          ? tunStoppingNotice
+          : sidebar.notice}
+      {ordinaryRecovery?.phase === 'failed' && (
+        <a href="#/relay?panel=tun" className="ml-1 text-primary">
+          打开虚拟网卡设置
+        </a>
+      )}
+    </p>
+  )
   return (
     <DndContext sensors={sensors} collisionDetection={closestCorners} onDragEnd={reorder}>
       <SortableContext items={visible}>
@@ -393,28 +453,35 @@ export function RelayNavigation({ compact }: { compact: boolean }): React.JSX.El
           className={`relay-navigation grid gap-2 mb-3 ${compact ? 'grid-cols-1' : 'grid-cols-2'}`}
           data-compact={compact}
         >
-          {visible.map((id) => (
-            <NavigationItem
-              key={id}
-              id={id}
-              compact={compact}
-              locked={locked}
-              wide={!compact && layout[id] === 'col-span-2'}
-              profileName={profileName}
-              status={sidebar.status}
-              pending={sidebar.pending}
-              change={sidebar.change}
-              refresh={sidebar.refresh}
-              trafficHistory={traffic.owner === trafficOwner && rates ? traffic.points : []}
-            />
+          {visible.map((id, index) => (
+            <Fragment key={id}>
+              <NavigationItem
+                id={id}
+                compact={compact}
+                locked={locked}
+                wide={!compact && layout[id] === 'col-span-2'}
+                profileName={profileName}
+                status={sidebar.status}
+                closingTun={closingTun}
+                switchingSystem={sidebar.switchingSystem}
+                panelSwitch={id === 'tun' ? panelSwitch : undefined}
+                startingTun={transition === 'start' || sidebar.switchingTun}
+                pending={
+                  sidebar.pending ||
+                  !!transition ||
+                  closingTun ||
+                  ordinaryRecovery?.phase === 'resuming'
+                }
+                change={sidebar.change}
+                refresh={sidebar.refresh}
+                trafficHistory={traffic.owner === trafficOwner && rates ? traffic.points : []}
+              />
+              {index === lastSwitchIndex && networkNotice}
+            </Fragment>
           ))}
         </div>
+        {lastSwitchIndex === -1 && networkNotice}
         {notice && <p role="status">{notice}</p>}
-        {sidebar.notice && (
-          <p role="status" className="text-xs px-1 pb-2">
-            {sidebar.notice}
-          </p>
-        )}
       </SortableContext>
     </DndContext>
   )

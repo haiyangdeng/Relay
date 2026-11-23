@@ -81,27 +81,48 @@ import Darwin
         var preferencesEvents: [String] = [], authorizationChecks = 0
         let preferences = RelayAutomaticUninstall.PreferenceEnvironment(synchronize: { domain in
             preferencesEvents.append("sync:" + domain); return true
-        }, keys: { domain in preferencesEvents.append("keys:" + domain); return cached[domain] ?? [] }, removeKeys: { domain, keys in
-            preferencesEvents.append("remove:" + domain); cached[domain] = (cached[domain] ?? []).filter { !keys.contains($0) }
+        }, keys: { domain in preferencesEvents.append("keys:" + domain); return cached[domain] ?? [] }, deleteDomain: { domain in
+            preferencesEvents.append("remove:" + domain); cached.removeValue(forKey: domain)
         })
         try RelayAutomaticUninstall.clearPreferences(preferences, assertAuthorized: { authorizationChecks += 1 })
-        check(domains.allSatisfy { cached[$0]?.isEmpty == true } && cached["foreign.domain"] == ["keep"], "only owned cached keys cleared, foreign domain preserved")
+        check(domains.allSatisfy { cached[$0] == nil } && cached["foreign.domain"] == ["keep"], "only owned cached keys cleared, foreign domain preserved")
         check(authorizationChecks == 4, "preference clear rechecks authorization before sync and write for each domain")
         check(preferencesEvents == domains.flatMap { ["sync:" + $0, "keys:" + $0, "remove:" + $0, "sync:" + $0, "keys:" + $0] }, "preference deletion flushes and confirms exact domain keys before file deletion")
+        preferencesEvents = []
         try RelayAutomaticUninstall.clearPreferences(preferences, assertAuthorized: {})
-        check(domains.allSatisfy { cached[$0]?.isEmpty == true }, "empty preference domains are idempotent")
+        check(!preferencesEvents.contains(where: { $0.hasPrefix("remove:") }), "absent preference domains are not dirtied on retry")
+        let unavailable = RelayAutomaticUninstall.PreferenceEnvironment(synchronize: { _ in true }, keys: { _ in ["owned"] },
+            deleteDomain: { _ in throw AssistantError("domain deletion refused") })
+        rejects("domain deletion failure retains recovery") { try RelayAutomaticUninstall.clearPreferences(unavailable, assertAuthorized: {}) }
         for failAt in [1, 2, 3, 4] {
             var syncs = 0, removed: [String] = []
             let failing = RelayAutomaticUninstall.PreferenceEnvironment(synchronize: { _ in syncs += 1; return syncs != failAt },
-                keys: { _ in [] }, removeKeys: { domain, _ in removed.append(domain) })
+                keys: { domain in removed.contains(domain) ? [] : ["owned"] }, deleteDomain: { domain in removed.append(domain) })
             rejects("preference sync failure \(failAt) propagated") { try RelayAutomaticUninstall.clearPreferences(failing, assertAuthorized: {}) }
             check(syncs == failAt && removed.count == failAt / 2, "sync failure stops further preference effects \(failAt)")
         }
+        // Absolute defaults domains here point only to this test's private
+        // temporary directory. Exercise the OS deletion transaction itself.
+        let fixtureDomain = base.appendingPathComponent("synthetic-preferences")
+        let fixturePlist = fixtureDomain.appendingPathExtension("plist")
+        let siblingPlist = base.appendingPathComponent("other-domain.plist")
+        let seed = try PropertyListSerialization.data(fromPropertyList: ["fixture": true], format: .binary, options: 0)
+        try seed.write(to: fixturePlist)
+        try seed.write(to: siblingPlist)
+        let systemPreferences = RelayAutomaticUninstall.PreferenceEnvironment.live
+        check(try systemPreferences.synchronize(fixtureDomain.path) && systemPreferences.keys(fixtureDomain.path).contains("fixture"),
+              "isolated actual preference domain is observable")
+        try systemPreferences.deleteDomain(fixtureDomain.path)
+        check(try systemPreferences.synchronize(fixtureDomain.path) && systemPreferences.keys(fixtureDomain.path).isEmpty,
+              "system defaults whole-domain removal committed before unlink")
+        if fm.fileExists(atPath: fixturePlist.path) { try fm.removeItem(at: fixturePlist) }
+        check(try !fm.fileExists(atPath: fixturePlist.path) && Data(contentsOf: siblingPlist) == seed,
+              "only isolated target domain removed, sibling bytes unchanged")
         var deniedEffects = 0
-        let denied = RelayAutomaticUninstall.PreferenceEnvironment(synchronize: { _ in deniedEffects += 1; return true }, keys: { _ in [] }, removeKeys: { _, _ in deniedEffects += 1 })
+        let denied = RelayAutomaticUninstall.PreferenceEnvironment(synchronize: { _ in deniedEffects += 1; return true }, keys: { _ in [] }, deleteDomain: { _ in deniedEffects += 1 })
         rejects("preference authority failure precedes every effect") { try RelayAutomaticUninstall.clearPreferences(denied, assertAuthorized: { throw AssistantError("denied") }) }
         check(deniedEffects == 0, "denied preference authority has no OS effect")
-        let retained = RelayAutomaticUninstall.PreferenceEnvironment(synchronize: { _ in true }, keys: { _ in ["retained"] }, removeKeys: { _, _ in })
+        let retained = RelayAutomaticUninstall.PreferenceEnvironment(synchronize: { _ in true }, keys: { _ in ["retained"] }, deleteDomain: { _ in })
         rejects("preference cache remaining after sync is not success") { try RelayAutomaticUninstall.clearPreferences(retained, assertAuthorized: {}) }
 
         let context = RelayStateContext(home: home.path, stateRoot: home.appendingPathComponent("Library/Application Support/Relay-Preview").path)

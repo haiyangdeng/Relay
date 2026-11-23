@@ -139,6 +139,21 @@ describe('TUN renderer IPC contracts', () => {
   ])('does not convert inconsistent ownership or recovery into a UI success %#', (value) => {
     expect(() => tunSessionState(value)).toThrow()
   })
+  it('decodes actual HTTP and mixed TUN listeners, including disabled or absent mixed', () => {
+    const report = { session: idle, helper: 'ready', warnings: [], httpPort: 7890 }
+    expect(tunStatus({ ...report, mixedPort: 7893 })).toMatchObject({
+      httpPort: 7890,
+      mixedPort: 7893
+    })
+    expect(tunStatus({ ...report, mixedPort: 0 })).not.toHaveProperty('mixedPort')
+    expect(tunStatus({ ...report, mixedPort: undefined })).toEqual(tunStatus(report))
+    expect(
+      tunStatus({ session: idle, helper: 'ready', warnings: [], mixedPort: undefined })
+    ).not.toHaveProperty('httpPort')
+    for (const invalid of [-1, 1, 65536, 7893.5, '7893', null]) {
+      expect(() => tunStatus({ ...report, mixedPort: invalid })).toThrow()
+    }
+  })
   it('keeps unknown helper state distinct and checks result evidence', () => {
     expect(
       tunStatus({ session: idle, helper: 'missing', warnings: ['manual installation required'] })

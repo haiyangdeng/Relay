@@ -16,9 +16,9 @@ import {
 } from 'react-icons/io5'
 import relayMascot from '@renderer/assets/relay-mascot-transparent.png'
 import { relayWorkspaceLink } from '@renderer/utils/relay-workspace'
+import useSWR from 'swr'
 import type { RelayStatus } from '../../../../shared/relay/protocol'
-import type { LocalProxyState } from '../../../../shared/relay/local-proxy'
-import { relayProxyRunning } from './proxy-library-actions'
+import { corePresentationKey, readCorePresentation, RelayCoreStatus } from './core-presentation'
 
 const shortcuts = [
   ['clients', 'Claude 与 Codex', '专用代理与客户端配置', IoCodeSlashOutline, 'blue', 'tile'],
@@ -56,20 +56,12 @@ function OverviewIcon({
 
 export function RelayOverviewPanel({
   status,
-  local
+  active
 }: {
   status?: RelayStatus
-  local?: LocalProxyState
+  active: boolean
 }): React.JSX.Element {
-  const runtime = relayProxyRunning(local)
-    ? `运行中 · 127.0.0.1:${local?.httpPort}`
-    : local?.uncertain
-      ? '运行状态待核对'
-      : local?.pending
-        ? '操作进行中'
-        : local
-          ? '尚未运行'
-          : '待读取运行状态'
+  const { data } = useSWR(active ? corePresentationKey : null, readCorePresentation)
   return (
     <div className="relay-overview">
       <section className="relay-hero">
@@ -91,7 +83,9 @@ export function RelayOverviewPanel({
           <div>
             <small>代理核心</small>
             <strong>Mihomo</strong>
-            <p>{runtime}</p>
+            <p>
+              <RelayCoreStatus {...data} />
+            </p>
           </div>
         </div>
         <div>

@@ -101,7 +101,7 @@ export function appUpdateHandoff(
       local.pid ||
       local.instanceId ||
       local.traffic !== 'inactive' ||
-      !['idle', 'restored'].includes(tun.phase) ||
+      !['idle', 'restored', 'released'].includes(tun.phase) ||
       tun.pending ||
       tun.owned ||
       (tun.phase === 'idle' && !!tun.sessionId) ||

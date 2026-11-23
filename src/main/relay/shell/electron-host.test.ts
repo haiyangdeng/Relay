@@ -561,7 +561,10 @@ describe('Fixed network intents in the inert Electron host menu', () => {
     expect(items.filter((item) => item.label)).toHaveLength(11)
     items.find((item) => item.label === '系统代理')?.click()
     items.find((item) => item.label === '虚拟网卡')?.click()
-    expect(run.mock.calls.map(([action]) => action)).toEqual(['triggerSysProxy', 'triggerTun'])
+    expect(run.mock.calls.map(([action]) => action)).toEqual([
+      { action: 'triggerSysProxy', enabled: true },
+      'triggerTun'
+    ])
     expect(fixture.register).not.toHaveBeenCalled()
     expect(f.perform).not.toHaveBeenCalled()
   })

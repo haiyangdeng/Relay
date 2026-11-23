@@ -52,6 +52,42 @@ export interface RelayProfileGroups {
   groups: Record<string, unknown>[]
   targets: string[]
   providers: string[]
+  savedSelectors?: [string, string][]
+}
+// A saved declaration can prove explicit members. Provider expansion and
+// filtering need the running core's actual membership.
+type GroupDeclarations = Pick<RelayProfileGroups, 'groups' | 'targets'>
+const cachedGroupMembership = new WeakMap<GroupDeclarations, Map<string, Set<string>>>()
+export function canSelectCachedGroupMember(
+  snapshot: GroupDeclarations,
+  name: string,
+  member: string
+): boolean {
+  let membership = cachedGroupMembership.get(snapshot)
+  if (!membership) {
+    membership = new Map()
+    const targets = new Set(snapshot.targets)
+    for (const group of snapshot.groups) {
+      if (typeof group.name !== 'string') continue
+      const members = new Set<string>()
+      if (
+        !membership.has(group.name) &&
+        typeof group.type === 'string' &&
+        ['select', 'url-test', 'fallback', 'smart'].includes(group.type) &&
+        !group.filter &&
+        !group['exclude-filter'] &&
+        !group['exclude-type'] &&
+        Array.isArray(group.proxies)
+      ) {
+        for (const item of group.proxies)
+          if (typeof item === 'string' && item !== group.name && targets.has(item))
+            members.add(item)
+      }
+      membership.set(group.name, members)
+    }
+    cachedGroupMembership.set(snapshot, membership)
+  }
+  return membership.get(name)?.has(member) ?? false
 }
 export interface RelayProfileRules {
   profile: RelayStoredProfile

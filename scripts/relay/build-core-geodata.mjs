@@ -186,7 +186,7 @@ const command = [
   '-overlay',
   overlay,
   '-tags',
-  'relay_local_geodata',
+  'relay_local_geodata,with_gvisor',
   '-ldflags',
   `-X github.com/metacubex/mihomo/constant.Version=${version}`,
   '-o',

@@ -239,6 +239,19 @@ describe('Exhaustive Relay shell intent routing', () => {
 })
 
 describe('Fresh own system-proxy recovery intent', () => {
+  it('keeps the requested checkbox state when cold startup finishes during a click', async () => {
+    const f = fixture()
+    await expect(f.actions.perform({ action: 'triggerSysProxy', enabled: true })).resolves.toBe(
+      'performed'
+    )
+    f.adapters.systemProxy.inspect.mockResolvedValueOnce(proxyReport(false))
+    await expect(f.actions.perform({ action: 'triggerSysProxy', enabled: false })).resolves.toBe(
+      'restored'
+    )
+    expect(f.adapters.systemProxy.prepareRestore).not.toHaveBeenCalled()
+    expect(f.adapters.systemProxy.prepareApply).not.toHaveBeenCalled()
+    expect(f.adapters.systemProxy.execute).not.toHaveBeenCalled()
+  })
   it('binds inspect to the same prepared record/revision and delegates the concrete confirmation', async () => {
     const f = fixture()
     await expect(f.actions.perform('triggerSysProxy')).resolves.toBe('restored')
@@ -311,6 +324,14 @@ describe('Fresh exact owned TUN intent', () => {
     await expect(f.actions.perform('triggerTun')).resolves.toBe('restored')
     expect(f.adapters.tun.stop).toHaveBeenCalledExactlyOnceWith({ sessionId: id })
     expect(f.adapters.assertIdle).toHaveBeenLastCalledWith('triggerTun', id)
+  })
+  it('finishes a verified release without claiming full proxy settings restoration', async () => {
+    const f = fixture()
+    f.adapters.tun.stop.mockResolvedValueOnce({
+      status: 'released',
+      state: { ...tunState(false), phase: 'released' }
+    })
+    await expect(f.actions.perform('triggerTun')).resolves.toBe('performed')
   })
   it('prepares and starts an inactive TUN through the supplied checked service', async () => {
     const f = fixture()

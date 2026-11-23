@@ -118,6 +118,18 @@ describe('TUN real preload and renderer dispatch with an injected main transport
       ['relayTunCancel', { evidenceId: preparedId }]
     ])
   })
+  it('passes explicit ordinary recovery through the real allowlist with just its opaque session identity', async () => {
+    const ordinaryRecovery = { sessionId, phase: 'failed', reason: 'listener' }
+    const failed = { status: 'failed', state: { ...state, phase: 'released' }, ordinaryRecovery }
+    transport.invoke.mockReset().mockResolvedValue(failed)
+    const api = createTunRendererApi((channel, ...args) =>
+      bridge.ipcRenderer.invoke(channel, ...args)
+    )
+    expect(await api.relayTunRecoverOrdinary({ sessionId })).toEqual(failed)
+    expect(transport.invoke).toHaveBeenCalledExactlyOnceWith('relayTunRecoverOrdinary', {
+      sessionId
+    })
+  })
   it('allows only the dedicated TUN update event and rejects invented privilege operations', async () => {
     const unsubscribe = bridge.ipcRenderer.on('relayTunUpdated', () => {})
     expect(transport.on).toHaveBeenCalledWith('relayTunUpdated', expect.any(Function))

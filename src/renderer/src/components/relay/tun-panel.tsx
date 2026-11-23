@@ -1,12 +1,31 @@
-import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type ReactNode
+} from 'react'
 import { Button, Chip, Switch } from '@heroui/react'
 import SettingCard from '@renderer/components/base/base-setting-card'
 import './network-settings.css'
-import type { TunPlanIssue, TunSessionState } from '../../../../shared/relay/tun'
+import {
+  ordinaryRecoveryNotice,
+  type TunPlanIssue,
+  type TunSessionState
+} from '../../../../shared/relay/tun'
 import { RelayTunSettingsEditor } from './tun-settings-editor'
 import { createTunRendererApi } from './tun-api'
-import { prepareCurrentTunConfiguration } from './tun-configuration-action'
-import { createTunPanelController, type TunPanelSnapshot } from './tun-controller'
+import { relayProfileRead } from './profile-read-queue'
+import { prepareCurrentTunConfiguration, readTunProfileId } from './tun-configuration-action'
+import {
+  createTunPanelController,
+  activeTunSwitch,
+  tunSwitchProgress,
+  tunStoppingNotice,
+  type TunPanelSnapshot
+} from './tun-controller'
 
 const issues: Record<TunPlanIssue, string> = {
   parserNotPassed: '完整配置尚未通过固定核心检查',
@@ -33,7 +52,8 @@ export function RelayTunControls({
   onEnable,
   settings,
   canPrepareConfiguration = false,
-  settingsDirty = false
+  settingsDirty = false,
+  bindShortcut = false
 }: {
   snapshot: TunPanelSnapshot
   completeEvidenceId?: string
@@ -46,26 +66,51 @@ export function RelayTunControls({
   settings?: ReactNode
   canPrepareConfiguration?: boolean
   settingsDirty?: boolean
+  bindShortcut?: boolean
 }): React.JSX.Element {
+  const transition = useSyncExternalStore(
+    tunSwitchProgress.subscribe,
+    tunSwitchProgress.read,
+    tunSwitchProgress.read
+  )
   const state = snapshot.status?.session,
-    locked = busy || snapshot.pending || !!state?.pending,
+    ordinaryRecovery = snapshot.status?.ordinaryRecovery,
+    closingTun =
+      transition === 'stop' ||
+      (snapshot.pending && snapshot.action === 'stop') ||
+      state?.phase === 'stopping',
+    locked =
+      ordinaryRecovery?.phase === 'resuming' ||
+      !!transition ||
+      closingTun ||
+      busy ||
+      snapshot.pending ||
+      !!state?.pending,
     plan = snapshot.preparedFor === completeEvidenceId ? snapshot.preparation : undefined,
     ready = !!plan?.readyForConfirmation && now <= plan.expiresAt,
-    phase = snapshot.unconfirmed
-      ? '结果待复核'
-      : snapshot.pending && snapshot.action === 'prepare'
-        ? '正在检查配置'
-        : state
-          ? {
-              idle: '已关闭',
-              prepared: '已关闭',
-              starting: '正在启动',
-              active: state.traffic === 'forwarding' ? '已开启' : '结果待复核',
-              stopping: '正在停用并恢复',
-              restored: '已关闭',
-              uncertain: '结果待复核'
-            }[state.phase]
-          : '正在读取',
+    phase =
+      transition === 'recover' || ordinaryRecovery?.phase === 'resuming'
+        ? '正在恢复普通代理'
+        : !closingTun && ordinaryRecovery?.phase === 'failed'
+          ? '普通代理待恢复'
+          : closingTun
+            ? '正在关闭'
+            : snapshot.unconfirmed
+              ? '结果待复核'
+              : snapshot.pending && snapshot.action === 'prepare'
+                ? '正在检查配置'
+                : state
+                  ? {
+                      idle: '已关闭',
+                      prepared: '已关闭',
+                      starting: '正在启动',
+                      active: state.traffic === 'forwarding' ? '已开启' : '结果待复核',
+                      stopping: '正在停用并恢复',
+                      restored: '已关闭',
+                      released: '已关闭',
+                      uncertain: '结果待复核'
+                    }[state.phase]
+                  : '正在读取',
     helper = snapshot.status?.helper,
     enabled = !snapshot.unconfirmed && state?.phase === 'active' && state.traffic === 'forwarding',
     canStop = !!state?.owned && !!state.sessionId,
@@ -88,6 +133,25 @@ export function RelayTunControls({
               : !completeEvidenceId && !canPrepareConfiguration
                 ? '请先在订阅管理中选择配置。'
                 : ''
+  const switchDisabled = locked || (enabled ? !canStop : enableBlocked || !onEnable)
+  const handlers = useRef({ onAction, onEnable })
+  handlers.current = { onAction, onEnable }
+  const networkSwitch = useMemo(
+    () => ({
+      checked: enabled,
+      disabled: switchDisabled,
+      setEnabled(next: boolean) {
+        if (switchDisabled || next === enabled) return
+        if (!next) handlers.current.onAction('stop')
+        else if (ready && !canPrepareConfiguration) handlers.current.onAction('start')
+        else handlers.current.onEnable?.()
+      }
+    }),
+    [enabled, switchDisabled, ready, canPrepareConfiguration]
+  )
+  useLayoutEffect(() => {
+    return bindShortcut ? activeTunSwitch.bind(networkSwitch) : undefined
+  }, [bindShortcut, networkSwitch])
   return (
     <section className="relay-network-settings" data-relay-settings="tun">
       <div className="relay-network-toolbar">
@@ -107,14 +171,9 @@ export function RelayTunControls({
             <Switch
               size="sm"
               aria-label="启用虚拟网卡"
-              isSelected={enabled}
-              isDisabled={locked || (enabled ? !canStop : enableBlocked || !onEnable)}
-              onValueChange={(next) => {
-                if (next && !enableBlocked) {
-                  if (ready && !canPrepareConfiguration) onAction('start')
-                  else onEnable?.()
-                } else if (!next && canStop) onAction('stop')
-              }}
+              isSelected={networkSwitch.checked}
+              isDisabled={networkSwitch.disabled}
+              onValueChange={networkSwitch.setEnabled}
             />
           </div>
         </div>
@@ -159,6 +218,11 @@ export function RelayTunControls({
       </SettingCard>
       {settings}
       <div className="relay-network-actions">
+        {ordinaryRecovery?.phase === 'failed' && (
+          <Button size="sm" variant="flat" isDisabled={locked} onPress={() => onAction('recover')}>
+            恢复普通代理
+          </Button>
+        )}
         <Button
           size="sm"
           variant="flat"
@@ -179,7 +243,7 @@ export function RelayTunControls({
           高级配置与资源
         </a>
       </div>
-      {!enabled && !snapshot.unconfirmed && blockedReason && (
+      {!closingTun && !enabled && !snapshot.unconfirmed && blockedReason && (
         <p className="relay-network-notice" role="status">
           {blockedReason}
         </p>
@@ -207,16 +271,21 @@ export function RelayTunControls({
           其他会话正在运行。可查看和保存下次使用的设置；启用 TUN 前需先结束这些会话。
         </p>
       )}
-      {snapshot.notice && (
+      {(ordinaryRecovery || closingTun || snapshot.notice) && (
         <p className="relay-network-notice" role="status">
-          {snapshot.notice}
+          {ordinaryRecovery
+            ? ordinaryRecoveryNotice(ordinaryRecovery)
+            : closingTun
+              ? tunStoppingNotice
+              : snapshot.notice}
         </p>
       )}
-      {[...(snapshot.status?.warnings ?? []), ...(state?.warnings ?? [])].map((line, index) => (
-        <p className="relay-network-notice" role="status" key={index}>
-          {line}
-        </p>
-      ))}
+      {!closingTun &&
+        [...(snapshot.status?.warnings ?? []), ...(state?.warnings ?? [])].map((line, index) => (
+          <p className="relay-network-notice" role="status" key={index}>
+            {line}
+          </p>
+        ))}
       <details>
         <summary>会话详情与手动控制</summary>
         <p>
@@ -233,9 +302,10 @@ export function RelayTunControls({
                 : '未确认'}
         </p>
         {state?.owned && <p>保留本次会话所有权及恢复能力；退出Relay前需要停用并验证恢复。</p>}
-        {!snapshot.unconfirmed && state?.restorationVerified && (
-          <p>本次核心、设备及网络恢复已确认。</p>
-        )}
+        {!ordinaryRecovery &&
+          !closingTun &&
+          !snapshot.unconfirmed &&
+          state?.restorationVerified && <p>本次核心、设备及网络恢复已确认。</p>}
         {(state?.sessionId || plan) && (
           <details>
             <summary>会话核对信息</summary>
@@ -316,7 +386,7 @@ export function RelayTunControls({
         {snapshot.unconfirmed && (
           <p role="alert">会话状态未确认，请保留窗口并重新读取；其他配置操作暂缓。</p>
         )}
-        {snapshot.notice && <p role="status">{snapshot.notice}</p>}
+        {!ordinaryRecovery && snapshot.notice && <p role="status">{snapshot.notice}</p>}
         {[...(snapshot.status?.warnings ?? []), ...(state?.warnings ?? [])].map((line, index) => (
           <p key={index}>{line}</p>
         ))}
@@ -333,12 +403,12 @@ export function RelayTunPanel({
   onState,
   onUnconfirmed,
   active = true,
-  preferredProfileId,
+  profileConfig,
   onConfigurationChange
 }: {
   completeEvidenceId?: string
   active?: boolean
-  preferredProfileId?: string
+  profileConfig?: IProfileConfig
   onConfigurationChange?(): void
   busy: boolean
   activationBlocked?: boolean
@@ -346,6 +416,38 @@ export function RelayTunPanel({
   onState(state: TunSessionState | undefined): void
   onUnconfirmed(value: boolean): void
 }): React.JSX.Element {
+  // The workspace inventory may predate import. Resolve the same fresh
+  // selection as the shortcut and give both the editor and switch that ID.
+  const [source, setSource] = useState<{ config?: IProfileConfig; id: string }>()
+  const [refreshSource, setRefreshSource] = useState(0)
+  useEffect(() => {
+    if (!active) {
+      setSource(undefined)
+      return
+    }
+    let current = true
+    void readTunProfileId((channel, ...args) =>
+      channel === 'relayProfileList'
+        ? relayProfileRead('relayProfileList')
+        : window.electron.ipcRenderer.invoke(channel, ...args)
+    ).then(
+      (id) => {
+        if (current) setSource({ config: profileConfig, id })
+      },
+      () => {
+        if (current) setSource(undefined)
+      }
+    )
+    return () => {
+      current = false
+    }
+  }, [active, profileConfig, refreshSource])
+  // Persisting the selected fallback during the first enable publishes its
+  // own notification. Only the same identity may remain usable during reread.
+  const preferredProfileId =
+    active && source && (source.config === profileConfig || source.id === profileConfig?.current)
+      ? source.id
+      : undefined
   const mounted = useRef(true),
     latest = useRef({
       completeEvidenceId,
@@ -423,6 +525,7 @@ export function RelayTunPanel({
   return (
     <RelayTunControls
       snapshot={snapshot}
+      bindShortcut={active}
       canPrepareConfiguration={!!preferredProfileId}
       settingsDirty={settingsDirty}
       settings={
@@ -443,7 +546,10 @@ export function RelayTunPanel({
       busy={busy}
       activationBlocked={activationBlocked}
       now={now}
-      onAction={(action) => void control.run(action)}
+      onAction={(action) => {
+        if (action === 'status') setRefreshSource((revision) => revision + 1)
+        void control.run(action)
+      }}
       onCancel={() => void control.cancel()}
       onEnable={() => void control.enable()}
     />

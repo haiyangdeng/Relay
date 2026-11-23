@@ -4,6 +4,7 @@ import { stripProfileControls } from './profiles'
 // Match the fixed Clash Party v2.0.4 default for node/group delay.
 export const probeDelayURL = 'https://www.gstatic.com/generate_204'
 export const probeMaxNodes = 100
+export const probeMaxGroupMembers = probeMaxNodes + 44
 export const probeConcurrency = 5
 export const probeDelayBuiltins: ReadonlySet<string> = new Set(['DIRECT', 'REJECT', 'COMPATIBLE'])
 export const probeIPProviders = ['ip.sb', 'ipwho.is', 'ipapi.is'] as const
@@ -22,6 +23,7 @@ export interface IsolatedProbeDelay {
   url: string
   timeout: number
   selections: Record<string, string>
+  members?: string[]
 }
 export interface IsolatedProbeRequest {
   profile: RelayProfileSelection
@@ -119,7 +121,9 @@ export function isolatedProbeRequest(input: unknown): IsolatedProbeRequest {
       throw new Error('独立测速参数无效。')
     const value = raw.delay as Record<string, unknown>
     if (
-      Object.keys(value).sort().join(',') !== 'selections,timeout,url' ||
+      !['selections,timeout,url', 'members,selections,timeout,url'].includes(
+        Object.keys(value).sort().join(',')
+      ) ||
       !Number.isInteger(value.timeout) ||
       Number(value.timeout) < 1000 ||
       Number(value.timeout) > 10000 ||
@@ -146,7 +150,24 @@ export function isolatedProbeRequest(input: unknown): IsolatedProbeRequest {
       selections.some(([name, member]) => !probeName(name) || !probeName(member))
     )
       throw new Error('独立测速目标或组选项无效。')
-    delay = { url, timeout: Number(value.timeout), selections: Object.fromEntries(selections) }
+    const members = value.members
+    if (Array.isArray(members) && members.length > probeMaxGroupMembers)
+      throw new Error(`该组超过一次测速的 ${probeMaxGroupMembers} 个直属成员上限。`)
+    if (
+      'members' in value &&
+      (raw.kind !== 'groupDelay' ||
+        !Array.isArray(members) ||
+        !members.length ||
+        !members.every(probeName) ||
+        new Set(members).size !== members.length)
+    )
+      throw new Error('组测速成员无效。')
+    delay = {
+      url,
+      timeout: Number(value.timeout),
+      selections: Object.fromEntries(selections),
+      ...(Array.isArray(members) ? { members: [...members] } : {})
+    }
   }
   return {
     profile: profileSelection(raw.profile),

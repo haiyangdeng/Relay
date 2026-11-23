@@ -1,6 +1,6 @@
 # 构建与发布准备
 
-本仓库是 **V1.0.0** 的对应源码，内部构建号为 **11**。以下流程用于从源码生成本地资源与安装包。打包、安装验收和 GitHub 发布分别记录，不把构建成功视为网络功能实测通过。
+本标签对应 **V1.0.0 Apple Silicon 构建 23**。以下流程也支持从源码生成 Intel 测试包。公开的 Intel 安装包沿用构建 2，重建该文件应检出[历史标签 v1.0.0](https://github.com/haiyangdeng/Relay/tree/v1.0.0)。
 
 ## 工具
 
@@ -32,13 +32,13 @@ python3 scripts/relay/build-public.py resources --execute
 流程：
 
 1. 校验固定源码 archive 摘要和逐文件清单。
-2. 叠加 local-geodata 与 provider-file serialization 两套源文件，编译 arm64/amd64 Core 并本地 ad-hoc 签名。
+2. 叠加 local-geodata、provider-file serialization 和 Darwin TUN handoff 补丁，编译 arm64/amd64 Core 并本地 ad-hoc 签名。
 3. 生成匹配新二进制的 `src/main/relay/core/geodata-manifest.json` 与 Swift 内置摘要/测试固定值；运行时哈希校验保持启用。构建后需要 review 这些源码变更，并把该快照作为安装包的对应源码。
 4. 按独立官方 manifest 下载并校验官方 Core。
 5. 从源码重建 TUN helper/client/uninstaller，更新已启用 capability 的 client/Core 摘要；未启用的 history capability 保持禁用。随后构建 RelayNative、RelayBrowser.app 和只读观察组件；仅包含 `runtimeReady: false` 的 Guard 声明。
 6. 收集资源摘要与来源说明，保存在构建目录。不复用任何旧版私有 App、helper 包或本机路径。
 
-两套补丁和许可见 [`core-extensions/SOURCE.md`](../core-extensions/SOURCE.md)。编译使用 `-trimpath`；新构建摘要可能不同于历史自用版。Go/SDK/签名工具差异不应被描述为已经实现逐字节可复现。
+三项补丁和许可见 [`core-extensions/SOURCE.md`](../core-extensions/SOURCE.md)。编译使用 `-trimpath`；新构建摘要可能不同于历史自用版。Go/SDK/签名工具差异不应被描述为已经实现逐字节可复现。
 
 ## App 与一体安装包
 
@@ -53,7 +53,7 @@ App 中间产物位于 `release/apps.noindex/mac-arm64/Relay.app` 或 `release/a
 
 `.noindex` 用于避免 Spotlight 索引中间 App；Finder 浏览仍可能触发 Launch Services 登记。因此，共用的 `afterSign` 在全部验证通过后，还会核对本次固定 staging 路径、包身份和签名，仅对其中的 RelayBrowser、四个 Electron Helper 和 Relay 主 App 执行定向 `lsregister -u`。未注册路径返回退出码 1 时，只有只读复查确认精确路径已不存在才视为幂等成功；其余失败会中止构建。不重置注册库、不注销其他副本，也不改已安装 App。请勿从中间产物启动应用；之后再用 Finder 浏览这些目录仍可能重新登记。已有旧目录不会被新构建或产品卸载器自动删除。
 
-Installer 从源码生成经过校验的 helper PKG，再将已签名 App 与 helper 安装脚本组合成同一个安装组件。产品版本为 `1.0.0`。安装器固定写入 `/Applications/Relay.app`，发现已有 Relay 应用、组件、运行实例或安装记录时会停止，清理后才可全新安装。重复构建同架构时需先移开原构建输出，第二架构可复用本次通过摘要和源码校验的 helper 构建。
+Installer 将已签名 App、系统代理组件、匹配的 TUN client／双架构核心及自动卸载组件组合成一个安装组件。App 版本为 `1.0.0`，安装产品版本包含内部构建号。安装时根据实际登录用户绑定组件，不使用打包机器的用户 ID。安装器固定写入 `/Applications/Relay.app`；运行中的 Relay 或自有核心会使安装在改动前停止，需要用户手动退出。通过归属、摘要和恢复条件检查的旧版本可以升级并保留用户配置，未知或损坏的安装状态会被拒绝。重复构建同架构时需先移开原构建输出，第二架构可复用本次通过摘要和源码校验的 helper 构建。
 
 每个 App 会生成对应源码、资源清单及 App 文件/链接/模式的配对回执。installer 阶段再次核对该回执，拒绝把旧的同版本 App 与新的源码或 helper 组合。
 
@@ -65,9 +65,9 @@ Installer 从源码生成经过校验的 helper PKG，再将已签名 App 与 he
 
 该过程无需另外运行卸载脚本。普通移动或仅原路径缺失不会被直接当作卸载意图。旧版兼容卸载工具仍由构建器生成，新安装存在时会交给自动卸载链，不并行执行旧清理流程。
 
-卸载会删除 Relay 的专属数据，需保留的配置应先导出。外部修改、未确认的进程归属、权限拒绝或恢复失败会保留必要记录。完整 Finder／系统权限／网络恢复链尚未完成本轮实机验收，不能把离线验证描述为系统验收通过。实现与来源见 [`native/uninstall/README.md`](../native/uninstall/README.md)。
+卸载会删除 Relay 的专属数据，需保留的配置应先导出。外部修改、未确认的进程归属、权限拒绝或恢复失败会保留必要记录。构建 23 已在 Apple Silicon macOS 虚拟机完成两轮拖入废纸篓、清理后重装与网络恢复测试。实现与来源见 [`native/uninstall/README.md`](../native/uninstall/README.md)。
 
-### 可选 TUN 本机安装包
+### 保留的 TUN 开发安装包
 
 ```sh
 python3 scripts/relay/build-public.py tun-installer --dry-run
@@ -75,12 +75,12 @@ python3 scripts/relay/build-public.py tun-installer --dry-run
 python3 scripts/relay/build-public.py tun-installer --execute
 ```
 
-复用已有 managed TUN 打包器，检查编译输入、Core/Client 摘要、签名、包内清单和 BOM；不会安装。该现有安装包会绑定**构建用户 UID**，仅供该用户本机使用，不得当作面向任意用户的通用 GitHub 下载。它与 App + 系统代理安装包分开；无需 TUN 的使用不受影响。已安装的旧 TUN 配对不能自动视作新构建可用，须使用匹配的组件并按既有恢复流程处理。源码中保留完整 TUN 功能和构建入口。
+普通用户使用上方统一安装包即可，不需要执行此开发入口。该入口复用原 managed TUN 打包器，仍绑定**构建用户 UID**，仅供对应用户的本机开发，不作为通用 GitHub 下载。统一安装包使用独立的安装时用户绑定和升级事务，并校验 App、TUN client 与两架构 Core 的配对。
 
 保留应用内部 ID `local.relay.network.preview` 是为了与现有配置及安全绑定兼容，不影响显示版本 1.0.0。当前默认是 **ad-hoc 签名，无 Developer ID、公证**；源码公开不等于 Apple 公证。系统代理管理员组件安装仍需 macOS 授权。
 
 ## 发布验证
 
-V1.0.0 已生成 Apple Silicon 与 Intel 安装包，完成针对性退出／卸载离线回归、独立审阅及包内资源和签名一致性检查。实际网络行为、系统权限和完整卸载链的实机验收仍需单独记录。
+构建 23 的 Apple Silicon 验收覆盖两轮全新安装、首次开启系统代理或 TUN、真实转发，以及关闭 TUN 后恢复先前系统代理状态。本次 Intel 下载保留原构建 2。各架构的对应源码与验收范围见[发行说明](../release-notes.md)。
 
 从干净检出重建时，应保留本次对应源码快照、工具版本、资源摘要、展开的 Installer 检查结果和安装包 SHA256SUMS。不同 SDK、Go 或签名工具的输出不应被描述为已经逐字节可复现。发布步骤见 [`RELEASING.md`](RELEASING.md)。

@@ -1,7 +1,8 @@
+import { mutate } from 'swr'
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { LocalProxyState } from '../../../../shared/relay/local-proxy'
+import type { LocalProxyState, RelayProxyPageOwner } from '../../../../shared/relay/local-proxy'
 import type { ConfigurationEditRecord } from '../../../../shared/relay/configuration-edit'
-import type { SystemProxyReport } from '../../../../shared/relay/system-proxy'
+import type { SystemProxyReport, SystemProxyState } from '../../../../shared/relay/system-proxy'
 import type { TunStatus } from '../../../../shared/relay/tun'
 import type { RuntimeInfoSnapshot } from '../../../../shared/relay/observability'
 import {
@@ -9,9 +10,10 @@ import {
   DEFAULT_MIHOMO_SNIFFER_CONFIG
 } from '../../../../shared/appConfig'
 import { errorMessage } from '../../utils/error-message'
+import { corePresentationKey } from './core-presentation'
 import { createTunPanelController } from './tun-controller'
 import { createTunRendererApi } from './tun-api'
-import { prepareCurrentTunConfiguration } from './tun-configuration-action'
+import { prepareCurrentTunConfiguration, readTunProfileId } from './tun-configuration-action'
 import {
   sidebarConfigurationSwitch,
   sidebarSystemProxy,
@@ -22,7 +24,7 @@ export type SidebarSwitch = 'sysproxy' | 'tun' | 'dns' | 'sniff'
 export interface SidebarStatus {
   local?: LocalProxyState
   system?: SystemProxyReport
-  systemPending?: boolean
+  systemWriting?: boolean
   systemObserved?: boolean
   tun?: TunStatus
   dns?: boolean
@@ -58,7 +60,7 @@ export function sidebarRates(
 }
 export function useSidebarStatus(profileId?: string) {
   const [status, setStatus] = useState<SidebarStatus>({}),
-    [pending, setPending] = useState(false),
+    [pending, setPending] = useState<SidebarSwitch>(),
     [notice, setNotice] = useState('')
   const refs = useRef({
       profileId,
@@ -68,12 +70,13 @@ export function useSidebarStatus(profileId?: string) {
       systemReading: false,
       systemQueued: false,
       systemGeneration: 0,
-      generation: 0,
-      status
+      generation: 0
     }),
+    tunProfile = useRef<{ id: string; observed: boolean }>(undefined),
+    tunGroupCount = useRef<{ sessionId: string; count: number }>(undefined),
     lastTraffic = useRef<Parameters<typeof sidebarRates>[0]>(undefined)
   refs.current.profileId = profileId
-  refs.current.status = status
+  if (tunProfile.current && profileId === tunProfile.current.id) tunProfile.current.observed = true
   const invoke: SidebarInvoke = (channel, ...args) =>
     window.electron.ipcRenderer.invoke(channel, ...args)
   const refreshSystem = useCallback(async function readSystem(): Promise<void> {
@@ -86,7 +89,7 @@ export function useSidebarStatus(profileId?: string) {
     current.systemReading = true
     const generation = current.systemGeneration
     try {
-      let system: { pending: boolean; observed: boolean; report?: SystemProxyReport } | undefined
+      let system: SystemProxyState | undefined
       try {
         system = (await window.electron.ipcRenderer.invoke(
           'relaySystemProxyState'
@@ -98,7 +101,7 @@ export function useSidebarStatus(profileId?: string) {
         setStatus((previous) => ({
           ...previous,
           system: system?.report,
-          systemPending: system?.pending,
+          systemWriting: !!system?.pending && !system.inspecting,
           systemObserved: system?.observed
         }))
     } finally {
@@ -117,9 +120,9 @@ export function useSidebarStatus(profileId?: string) {
     current.reading = generation
     const valid = (): boolean =>
       current.mounted && generation === current.generation && selected === current.profileId
-    const safe = async <T>(channel: string): Promise<T | undefined> => {
+    const safe = async <T>(channel: string, ...args: unknown[]): Promise<T | undefined> => {
       try {
-        return (await window.electron.ipcRenderer.invoke(channel)) as T
+        return (await window.electron.ipcRenderer.invoke(channel, ...args)) as T
       } catch {
         return undefined
       }
@@ -131,6 +134,8 @@ export function useSidebarStatus(profileId?: string) {
         safe<ConfigurationEditRecord>('relayConfigEditRead')
       ])
       if (!valid()) return
+      // Share the same owner observation with the overview on sidebar polls and TUN notifications.
+      void mutate(corePresentationKey, { local, tun }, { revalidate: false })
       const next: SidebarStatus = {
         local,
         tun,
@@ -148,7 +153,9 @@ export function useSidebarStatus(profileId?: string) {
         ...previous,
         ...(previous.local?.instanceId !== local?.instanceId ||
         previous.local?.configurationRevision !== local?.configurationRevision ||
-        previous.local?.phase !== local?.phase
+        previous.local?.phase !== local?.phase ||
+        previous.tun?.session.sessionId !== tun?.session.sessionId ||
+        previous.tun?.session.phase !== tun?.session.phase
           ? next
           : { local, tun })
       }))
@@ -200,6 +207,27 @@ export function useSidebarStatus(profileId?: string) {
         } else lastTraffic.current = undefined
       } else {
         lastTraffic.current = undefined
+        const session = tun?.session
+        if (
+          session?.sessionId &&
+          session.owned &&
+          !session.pending &&
+          session.phase === 'active' &&
+          session.traffic === 'forwarding'
+        ) {
+          if (tunGroupCount.current?.sessionId !== session.sessionId) {
+            const owner = await safe<RelayProxyPageOwner>('relayProxyPageOwner')
+            if (!valid()) return
+            if (owner?.kind === 'tun-managed' && owner.instanceId === session.sessionId) {
+              const groups = await safe<unknown[]>('mihomoGroups', false, owner)
+              if (!valid()) return
+              if (Array.isArray(groups))
+                tunGroupCount.current = { sessionId: session.sessionId, count: groups.length }
+            }
+          }
+          if (tunGroupCount.current?.sessionId === session.sessionId)
+            next.groups = tunGroupCount.current.count
+        } else tunGroupCount.current = undefined
         if (edit && local && !local.owned && !local.pending && !local.uncertain) {
           next.dns = enabled(edit.document.controlled.dns) ?? DEFAULT_MIHOMO_DNS_CONFIG.enable
           next.sniff =
@@ -224,19 +252,17 @@ export function useSidebarStatus(profileId?: string) {
       api: createTunRendererApi(),
       evidence: () => undefined,
       busy: () => false,
-      context: () => refs.current.profileId,
-      activationBlocked: () =>
-        !refs.current.mounted ||
-        !refs.current.status.local ||
-        !!refs.current.status.local?.owned ||
-        !!refs.current.status.local?.pending,
+      // A late first render of the same saved selection is not a profile change.
+      context: () =>
+        refs.current.profileId ??
+        (tunProfile.current?.observed ? undefined : tunProfile.current?.id),
+      // Main verifies the current local owner during both preparation and start.
+      // Polling results can lag behind a handoff or still be loading at first click.
+      activationBlocked: () => !refs.current.mounted,
       prepareEvidence: async (current) => {
-        const id = refs.current.profileId
-        if (!id) throw new Error('请先选择配置。')
-        return prepareCurrentTunConfiguration(id, {
-          invoke,
-          current: () => current() && refs.current.mounted && refs.current.profileId === id
-        })
+        const id = tunProfile.current?.id
+        if (!id) throw new Error('没有可用配置，请先导入或选择配置。')
+        return prepareCurrentTunConfiguration(id, { invoke, current })
       },
       onBusy: () => {}
     })
@@ -274,7 +300,7 @@ export function useSidebarStatus(profileId?: string) {
       local: previous.local,
       tun: previous.tun,
       system: previous.system,
-      systemPending: previous.systemPending,
+      systemWriting: previous.systemWriting,
       systemObserved: previous.systemObserved
     }))
     lastTraffic.current = undefined
@@ -286,26 +312,31 @@ export function useSidebarStatus(profileId?: string) {
     state.operation = true
     const generation = ++state.generation,
       selected = state.profileId
-    setPending(true)
-    setNotice('')
+    setPending(kind)
+    setNotice(
+      kind === 'sysproxy'
+        ? value
+          ? '正在开启系统代理…'
+          : '正在恢复原代理…'
+        : kind === 'tun'
+          ? value
+            ? '正在检查虚拟网卡配置…'
+            : '正在关闭虚拟网卡…'
+          : ''
+    )
     try {
       if (kind === 'sysproxy') {
-        const report = await sidebarSystemProxy(
-          value,
-          invoke,
-          () => state.mounted && generation === state.generation && selected === state.profileId
-        )
-        if (
-          report &&
-          state.mounted &&
-          generation === state.generation &&
-          selected === state.profileId
-        ) {
+        // The explicit enable may select the first imported profile. Its own
+        // selection notification invalidates telemetry, but not this switch.
+        const current = (): boolean => state.mounted && (!selected || selected === state.profileId)
+        const report = await sidebarSystemProxy(value, invoke, current)
+        if (report && current()) {
+          setNotice('')
           ++state.systemGeneration
           setStatus((previous) => ({
             ...previous,
             system: report,
-            systemPending: false,
+            systemWriting: false,
             systemObserved: true
           }))
         }
@@ -313,10 +344,30 @@ export function useSidebarStatus(profileId?: string) {
         const control = tunController.current
         if (!control) return
         await control.run('status')
-        if (value) await control.enable()
-        else await control.run('stop')
+        const observed = control.snapshot()
+        if (observed.unconfirmed || !observed.status)
+          throw new Error(observed.notice || '虚拟网卡状态读取失败。')
+        const { session, helper } = observed.status
+        if (session.pending) throw new Error('虚拟网卡正在切换，请等待完成。')
+        if (value && !session.owned) {
+          if (helper !== 'ready') throw new Error(observed.notice || '虚拟网卡权限组件尚未就绪。')
+          const id = await readTunProfileId(invoke)
+          if (state.profileId && state.profileId !== id)
+            throw new Error('当前配置已变化，请核对订阅选择。')
+          tunProfile.current = { id, observed: state.profileId === id }
+          await control.enable()
+        } else if (!value && session.owned && session.sessionId) {
+          await control.run('stop')
+        } else if (
+          session.owned &&
+          (session.phase !== 'active' || session.traffic !== 'forwarding')
+        ) {
+          throw new Error('虚拟网卡状态需要复核，请打开虚拟网卡设置。')
+        }
         const result = control.snapshot()
         setNotice(result.notice)
+        if (state.mounted && result.status)
+          setStatus((previous) => ({ ...previous, tun: result.status }))
       } else {
         const result = await sidebarConfigurationSwitch(
           kind,
@@ -330,13 +381,22 @@ export function useSidebarStatus(profileId?: string) {
     } catch (error) {
       if (state.mounted) setNotice(errorMessage(error, '操作未完成，请进入对应页面核对。'))
     } finally {
+      if (kind === 'tun') tunProfile.current = undefined
       if (kind === 'dns' || kind === 'sniff')
         window.dispatchEvent(new Event('relay-sidebar-settings-changed'))
       window.dispatchEvent(new Event('relay-sidebar-network-changed'))
       state.operation = false
-      if (state.mounted) setPending(false)
+      if (state.mounted) setPending(undefined)
       await refresh()
     }
   }
-  return { status, pending, notice, refresh, change }
+  return {
+    status,
+    pending: !!pending,
+    switchingSystem: pending === 'sysproxy',
+    switchingTun: pending === 'tun',
+    notice,
+    refresh,
+    change
+  }
 }

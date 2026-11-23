@@ -1,3 +1,4 @@
+import { systemProxyInboundPort } from '../../../../shared/relay/system-proxy'
 import type {
   SystemProxyPreparation,
   SystemProxyReport,
@@ -55,6 +56,42 @@ export function canPrepareSystemProxy(report?: SystemProxyReport): boolean {
   }
 }
 
+export function canSwitchSystemProxy(
+  report?: SystemProxyReport,
+  selected = sessionServices
+): boolean {
+  if (!report) return true // A click inspects the native state before applying anything.
+  if (report.status === 'active' || report.status === 'applied') return report.canRestore
+  return canPrepareSystemProxy(report) && selectedSystemProxyServices(report, selected).length > 0
+}
+
+export async function systemProxyListenerPort(
+  invoke: Invoke,
+  current: () => boolean,
+  settings: Pick<SystemProxySettings, 'socks' | 'mode'>,
+  explicitPort?: number
+): Promise<number> {
+  if (!current()) throw new Error('本次页面操作已失效。')
+  const listener = (await invoke('relayEnsureSystemProxyListener')) as
+    { httpPort: number; mixedPort?: number } | undefined
+  if (!current()) throw new Error('本次页面操作已失效。')
+  const port = listener?.httpPort,
+    mixed = listener?.mixedPort
+  if (!port || !Number.isInteger(port) || port < 1024 || port > 65535)
+    throw new Error('当前核心的代理端口尚未确认，请刷新后重试。')
+  if (explicitPort !== undefined) {
+    if (
+      settings.mode === 'manual' &&
+      settings.socks &&
+      explicitPort === port &&
+      explicitPort !== mixed
+    )
+      throw new Error('所填 HTTP 端口不支持 SOCKS，请使用混合端口。')
+    return explicitPort
+  }
+  return systemProxyInboundPort(port, mixed, settings)
+}
+
 export function systemProxyPortFromCore(
   current: number,
   edited: boolean,
@@ -70,16 +107,29 @@ export function systemProxyPortFromCore(
 }
 
 export async function submitSystemProxy(
-  action: 'apply' | 'restore',
+  intent: 'enable' | 'apply' | 'restore',
   settings: SystemProxySettings,
   invoke: Invoke,
   onPreparation: (plan: SystemProxyPreparation) => void
 ): Promise<SystemProxyResult> {
+  const action = intent === 'enable' ? 'apply' : intent
   const plan = (await invoke(
     action === 'apply' ? 'relaySystemProxyPrepare' : 'relaySystemProxyRestorePrepare',
     action === 'apply' ? settings : undefined
   )) as SystemProxyPreparation
   onPreparation(plan)
+  // Startup can finish its own confirmed apply while this explicit click is
+  // waiting for the listener. An enable switch already reached its target.
+  if (
+    intent === 'enable' &&
+    plan.action === 'apply' &&
+    plan.alreadyApplied === true &&
+    plan.report.recordID &&
+    (plan.report.status === 'active' || plan.report.status === 'applied')
+  ) {
+    await invoke('relaySystemProxyCancel', { evidenceId: plan.evidenceId })
+    return { status: 'applied', report: plan.report, warnings: plan.report.warnings }
+  }
   if (
     plan.action !== action ||
     !(action === 'apply'

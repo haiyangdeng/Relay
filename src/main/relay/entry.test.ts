@@ -64,6 +64,7 @@ import { profileHash } from './profiles/source'
 import { compileProfileRuntime } from './profiles/runtime'
 import { inspectProfile } from './profiles/inspect'
 import { localProxyConfiguration } from './core/local-proxy-runtime'
+import { createStartupPreferences } from './core/startup-preferences'
 import type { RemoteBackupUploadGuards } from './backup/remote'
 import type { TunRuntimeCaptureResult, TunResourceConfirmation } from './tun/service'
 import type { TunInstallation } from './tun/transport'
@@ -105,6 +106,7 @@ const fixture = vi.hoisted(() => {
   }
   return {
     window,
+    createWindow: vi.fn(),
     privateHome: '',
     browserChannels: [] as { dispose(): Promise<void> }[],
     startupWarn: vi.fn(async () => {}),
@@ -529,7 +531,8 @@ vi.mock('electron', () => ({
     exit: vi.fn()
   },
   BrowserWindow: class {
-    constructor() {
+    constructor(options: Electron.BrowserWindowConstructorOptions) {
+      fixture.createWindow(options)
       return fixture.window
     }
   },
@@ -609,6 +612,16 @@ vi.mock('../utils/safeFile', async (original) => {
 })
 // Exercise the actual private-file and Unix binding checks under an owned
 // temporary home; the simulated OS context must never create /fake/home.
+vi.mock('./core/startup-preferences', async (original) => {
+  const actual = await original<typeof import('./core/startup-preferences')>()
+  return {
+    createStartupPreferences: () =>
+      actual.createStartupPreferences({
+        home: fixture.privateHome,
+        stateRoot: fixture.privateHome + '/Library/Application Support/Relay-Preview'
+      })
+  }
+})
 vi.mock('./core/local-proxy-plan-store', async (original) => {
   const actual = await original<typeof import('./core/local-proxy-plan-store')>()
   return {
@@ -878,6 +891,10 @@ vi.mock('./core/local-proxy-runtime', async (original) => ({
 vi.mock('./core/port', async (original) => ({
   ...(await original<typeof import('./core/port')>()),
   probeLocalPort: fixture.localPort,
+  waitForTunPlanPorts: async (_plan: unknown, current: () => void) => {
+    current()
+    return fixture.localPort()
+  },
   ownsHttpListener: fixture.localOwnsListener
 }))
 vi.mock('./profiles/store', () => ({
@@ -1549,6 +1566,11 @@ afterEach(async () => {
 })
 
 describe('Relay entry IPC integration with simulated OS adapters', () => {
+  it('delivers the activation click to the macOS main window controls', () => {
+    expect(fixture.createWindow).toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Relay', acceptFirstMouse: process.platform === 'darwin' })
+    )
+  })
   it('prepares diagnostics during startup without opening a native host or a core', () => {
     expect(fixture.tunDiagnostics).toHaveBeenCalledExactlyOnceWith()
     expect(fixture.tunOpen).not.toHaveBeenCalled()
@@ -1877,6 +1899,15 @@ describe('Relay entry IPC integration with simulated OS adapters', () => {
       await vi.waitFor(() => expect(firstContentSent).toBe(true))
     }
     const saved = async (): Promise<RelayStoredProfile> => {
+      // The initial simulated window can still be reading its empty selection.
+      // Drain that instance before this shared native fixture acquires a profile.
+      await Promise.resolve(
+        invoke('relayLocalProxyAction', {
+          action: 'stop',
+          instanceId: '00000000-0000-0000-0000-000000000001'
+        })
+      ).catch(() => {})
+      expect(fixture.localStart).not.toHaveBeenCalled()
       const stored = await fixture.profileRead()
       stored.text = startupSource
       stored.profile.sha256 = profileHash(startupSource)
@@ -1888,7 +1919,7 @@ describe('Relay entry IPC integration with simulated OS adapters', () => {
       return stored.profile
     }
     it.each(['legacy', 'new'] as const)(
-      'distinguishes a %s dedicated plan before default selection at cold startup',
+      'preserves a %s dedicated plan on the first explicit proxy click',
       async (kind) => {
         const profile = await saved()
         const document = {
@@ -1925,7 +1956,9 @@ describe('Relay entry IPC integration with simulated OS adapters', () => {
           expect(fixture.localStart).not.toHaveBeenCalled()
           expect(await fs.readFile(path)).toEqual(before)
         } else {
-          await vi.waitFor(() => expect(fixture.localStart).toHaveBeenCalledOnce())
+          expect(fixture.localStart).not.toHaveBeenCalled()
+          await invoke('relayEnsureSystemProxyListener')
+          expect(fixture.localStart).toHaveBeenCalledOnce()
           expect(fixture.saveCoreSelectionNative).toHaveBeenCalledOnce()
           expect(JSON.parse(await fs.readFile(path, 'utf8')).pinnedNode.sourceProfileId).toBe(
             profile.id
@@ -2004,6 +2037,236 @@ describe('Relay entry IPC integration with simulated OS adapters', () => {
         expect(fixture.coreStart).not.toHaveBeenCalled()
       }
     )
+    it('saves a verified member of the selected offline profile without starting either core', async () => {
+      const { id, sha256 } = await saved()
+      const profile = { id, sha256 }
+      const request = { profile, group: 'Group', member: 'DIRECT' }
+      expect(await invoke('relayProfileGroupSelect', request)).toEqual({
+        group: 'Group',
+        member: 'DIRECT'
+      })
+      expect(await invoke('relayProfileGroupsRead', profile)).toMatchObject({
+        savedSelectors: [['Group', 'DIRECT']]
+      })
+      await expect(
+        invoke('relayProfileGroupSelect', { ...request, member: 'not a declared node' })
+      ).rejects.toThrow('不支持')
+      await expect(
+        invoke('relayProfileGroupSelect', { ...request, profile: { id, sha256: 'c'.repeat(64) } })
+      ).rejects.toThrow('先选用')
+      expect(fixture.localStart).not.toHaveBeenCalled()
+      expect(fixture.tunOpen).not.toHaveBeenCalled()
+      expect(fixture.systemProxyNative).not.toHaveBeenCalled()
+      fixture.tunStateOverride = {
+        phase: 'active',
+        owned: true,
+        pending: false,
+        traffic: 'forwarding',
+        restorationVerified: false,
+        protectionVerified: false,
+        warnings: []
+      }
+      await expect(
+        invoke('relayProfileGroupSelect', { ...request, member: 'Node' })
+      ).rejects.toThrow()
+      fixture.tunStateOverride = undefined
+      await invoke('relayEnsureSystemProxyListener')
+      await expect(
+        invoke('relayProfileGroupSelect', { ...request, member: 'Node' })
+      ).rejects.toThrow()
+      expect(await invoke('relayProfileGroupsRead', profile)).toMatchObject({
+        savedSelectors: [['Group', 'DIRECT']]
+      })
+    })
+    it('still reads declared groups when the separate startup preference cannot be decoded', async () => {
+      const { id, sha256 } = await saved()
+      const profile = { id, sha256 }
+      const request = { profile, group: 'Group', member: 'DIRECT' }
+      await invoke('relayProfileGroupSelect', request)
+      const fs = await vi.importActual<typeof import('fs/promises')>('fs/promises')
+      const path =
+        fixture.privateHome + '/Library/Application Support/Relay-Preview/Core/core-startup.json'
+      await fs.writeFile(path, 'invalid fixture')
+      const snapshot = await invoke('relayProfileGroupsRead', profile)
+      expect(snapshot).toMatchObject({ groups: [expect.objectContaining({ name: 'Group' })] })
+      expect(snapshot).not.toHaveProperty('savedSelectors')
+      await expect(invoke('relayProfileGroupSelect', request)).rejects.toThrow()
+      expect(await fs.readFile(path, 'utf8')).toBe('invalid fixture')
+    })
+    it('does not save a delayed offline group selection after its page was hidden', async () => {
+      const { id, sha256 } = await saved()
+      const profile = { id, sha256 }
+      const pending = Promise.withResolvers<{ selection: typeof profile; revision: string }>()
+      const entered = Promise.withResolvers<void>()
+      fixture.readCoreSelectionNative.mockImplementationOnce(() => {
+        entered.resolve()
+        return pending.promise
+      })
+      const selected = invoke('relayProfileGroupSelect', {
+        profile,
+        group: 'Group',
+        member: 'Node'
+      })
+      await entered.promise
+      await expect(
+        invoke('relayProfileGroupSelect', { profile, group: 'Group', member: 'DIRECT' })
+      ).rejects.toThrow('等待')
+      fixture.window.on.mock.calls.find(([name]) => name === 'hide')?.[1]()
+      pending.resolve({ selection: profile, revision: 'a'.repeat(64) })
+      await expect(selected).rejects.toThrow('本次界面授权已失效')
+      expect(await invoke('relayProfileGroupsRead', profile)).toMatchObject({ savedSelectors: [] })
+      expect(fixture.localStart).not.toHaveBeenCalled()
+    })
+    const pendingSidebarInspection = async () => {
+      await saved()
+      const normal = fixture.systemProxyNative.getMockImplementation()
+      if (!normal) throw new Error('Missing native fixture')
+      const entered = Promise.withResolvers<void>()
+      const release = Promise.withResolvers<void>()
+      fixture.systemProxyNative.mockImplementationOnce(async (executable, context, action) => {
+        expect(action).toBe('inspect')
+        entered.resolve()
+        await release.promise
+        return normal(executable, context, action)
+      })
+      const read = Promise.resolve(invoke('relaySystemProxyInspect'))
+      await entered.promise
+      return { read, release: release.resolve }
+    }
+    const setWindowVisible = (visible: boolean): void => {
+      fixture.window.isVisible.mockReturnValue(visible)
+      const eventName = visible ? 'show' : 'hide'
+      const callbacks = fixture.window.on.mock.calls.filter(([name]) => name === eventName)
+      expect(callbacks.length).toBeGreaterThan(0)
+      for (const [, callback] of callbacks) callback()
+    }
+    it('completes the first sidebar proxy inspection across hide and show and starts the listener once', async () => {
+      const { read, release } = await pendingSidebarInspection()
+      setWindowVisible(false)
+      setWindowVisible(true)
+      const joined = invoke('relaySystemProxyInspect')
+      release()
+      const [first, second] = await Promise.all([read, joined])
+      expect(first).toMatchObject({ status: 'inactive' })
+      expect(second).toEqual(first)
+      expect(fixture.localStart).not.toHaveBeenCalled()
+      await expect(invoke('relayEnsureSystemProxyListener')).resolves.toMatchObject({
+        httpPort: 18191
+      })
+      expect(fixture.localStart).toHaveBeenCalledOnce()
+      expect(fixture.localStop).not.toHaveBeenCalled()
+      expect(fixture.systemProxyNative.mock.calls.map((call) => call[2])).toEqual(['inspect'])
+    })
+    it('finishes the sidebar proxy inspection while hidden but refuses to start a listener', async () => {
+      const { read, release } = await pendingSidebarInspection()
+      setWindowVisible(false)
+      release()
+      await expect(read).resolves.toMatchObject({ status: 'inactive' })
+      await expect(invoke('relayEnsureSystemProxyListener')).rejects.toThrow('本次界面授权已失效')
+      expect(fixture.localStart).not.toHaveBeenCalled()
+      expect(fixture.systemProxyNative.mock.calls.map((call) => call[2])).toEqual(['inspect'])
+    })
+    it('isolates a new document from the pending sidebar proxy inspection of the previous document', async () => {
+      const { read, release } = await pendingSidebarInspection()
+      const rejected = expect(read).rejects.toThrow('本次界面授权已失效')
+      const navigation = fixture.window.webContents.on.mock.calls.filter(
+        ([name]) => name === 'did-start-navigation'
+      )
+      expect(navigation.length).toBeGreaterThan(0)
+      for (const [, callback] of navigation) callback({ isMainFrame: true, isSameDocument: false })
+      const fresh = invoke('relaySystemProxyInspect')
+      release()
+      await Promise.all([rejected, expect(fresh).resolves.toMatchObject({ status: 'inactive' })])
+      expect(fixture.localStart).not.toHaveBeenCalled()
+      expect(fixture.systemProxyNative.mock.calls.map((call) => call[2])).toEqual([
+        'inspect',
+        'inspect'
+      ])
+    })
+    it('joins a cold proxy restore across the tray and concurrent workspace inspection without reversing the enable click', async () => {
+      await saved()
+      await createStartupPreferences({
+        home: fixture.privateHome,
+        stateRoot: fixture.privateHome + '/Library/Application Support/Relay-Preview'
+      }).systemProxy(true)
+      const normal = fixture.systemProxyNative.getMockImplementation()
+      if (!normal) throw new Error('Missing native fixture')
+      const submitting = Promise.withResolvers<void>()
+      const release = Promise.withResolvers<void>()
+      let applied = false
+      fixture.systemProxyNative.mockImplementation(async (executable, context, action) => {
+        const report = await normal(executable, context, action)
+        if (action === 'apply') {
+          submitting.resolve()
+          await release.promise
+          applied = true
+        }
+        return {
+          ...report,
+          services: [{ ...report.services[0], discovery: false, http: applied, https: applied }],
+          ...(applied
+            ? {
+                status: action === 'apply' ? 'applied' : 'active',
+                canApply: false,
+                canRestore: true,
+                revision: 'b'.repeat(64),
+                recordID: '00000000-0000-4000-8000-000000000038',
+                currentProxyPorts: [18191]
+              }
+            : {})
+        }
+      })
+      await reboot()
+      await submitting.promise
+      const host = fixture.shellHostOptions
+      if (!host) throw new Error('Missing shell host')
+      const tray = host.perform({ action: 'triggerSysProxy', enabled: true })
+      const first = invoke('relaySystemProxyInspect')
+      const second = invoke('relaySystemProxyInspect')
+      release.resolve()
+      const [, report, sharedReport] = await Promise.all([tray, first, second])
+      expect(report).toMatchObject({ status: 'active', canRestore: true })
+      expect(sharedReport).toEqual(report)
+      expect(fixture.systemProxyNative.mock.calls.map((call) => call[2])).toEqual([
+        'inspect',
+        'prepare',
+        'prepare',
+        'apply',
+        'inspect'
+      ])
+      expect(fixture.localStart).toHaveBeenCalledOnce()
+      expect(fixture.localStop).not.toHaveBeenCalled()
+    })
+    it('keeps the first proxy click while first-paint presentation preferences are busy', async () => {
+      await saved()
+      const { SimplePrivateDocumentFile } = await import('./simple/store')
+      const original = SimplePrivateDocumentFile.prototype.read
+      const release = Promise.withResolvers<void>()
+      const entered = Promise.withResolvers<void>()
+      const spy = vi
+        .spyOn(SimplePrivateDocumentFile.prototype, 'read')
+        .mockImplementation(async function (this: InstanceType<typeof SimplePrivateDocumentFile>) {
+          if (this.path.endsWith('/ui-preferences.json')) {
+            entered.resolve()
+            await release.promise
+          }
+          return original.call(this)
+        })
+      try {
+        const reading = Promise.resolve(invoke('relayUIPreferencesRead'))
+        await entered.promise
+        const click = Promise.resolve(invoke('relayEnsureSystemProxyListener'))
+        const checked = expect(click).resolves.toMatchObject({ httpPort: 18191 })
+        await new Promise<void>((resolve) => setImmediate(resolve))
+        expect(fixture.localStart).not.toHaveBeenCalled()
+        release.resolve()
+        await Promise.all([reading, checked])
+        expect(fixture.localStart).toHaveBeenCalledOnce()
+      } finally {
+        release.resolve()
+        spy.mockRestore()
+      }
+    })
     it('waits for a profile list that begins during preparation before starting the core', async () => {
       const profile = await saved()
       let release!: () => void
@@ -2142,7 +2405,7 @@ describe('Relay entry IPC integration with simulated OS adapters', () => {
       await vi.waitFor(() => expect(fixture.appQuit).toHaveBeenCalledOnce())
       expect(fixture.systemProxyNative.mock.calls.every((call) => call[2] === 'inspect')).toBe(true)
     })
-    it('remembers and starts the first available main profile when no saved choice exists', async () => {
+    it('remembers and starts the first available main profile only when the user clicks', async () => {
       const profile = await saved()
       fixture.readCoreSelectionNative.mockResolvedValue({ revision: 'a'.repeat(64) })
       fixture.profileList.mockResolvedValue({
@@ -2159,6 +2422,8 @@ describe('Relay entry IPC integration with simulated OS adapters', () => {
         }
       )
       await reboot()
+      expect(fixture.localStart).not.toHaveBeenCalled()
+      await invoke('relayEnsureSystemProxyListener')
       await vi.waitFor(() =>
         expect(invoke('relayLocalProxyState')).toMatchObject({
           profileId: profile.id,
@@ -2189,10 +2454,9 @@ describe('Relay entry IPC integration with simulated OS adapters', () => {
       expect(fixture.localStart).toHaveBeenCalledOnce()
       expect(fixture.systemProxyNative).not.toHaveBeenCalled()
     })
-    it('uses the available latest subscription version rather than an older historical first inventory item', async () => {
+    it('starts the remembered latest subscription version even when the inventory begins with older history', async () => {
       const latest = await saved(),
         older = { ...latest, id: '00000000-0000-0000-0000-000000000002' }
-      fixture.readCoreSelectionNative.mockResolvedValue({ revision: 'a'.repeat(64) })
       fixture.profileList.mockResolvedValue({
         profiles: [older, latest],
         incomplete: 0,
@@ -2204,13 +2468,6 @@ describe('Relay entry IPC integration with simulated OS adapters', () => {
         incomplete: 0,
         warnings: []
       })
-      fixture.saveCoreSelectionNative.mockImplementation(
-        async (_executable, _context, selection) => {
-          const snapshot = { selection, revision: 'b'.repeat(64) }
-          fixture.readCoreSelectionNative.mockResolvedValue(snapshot)
-          return snapshot
-        }
-      )
       await reboot()
       await vi.waitFor(() =>
         expect(invoke('relayLocalProxyState')).toMatchObject({
@@ -2218,10 +2475,7 @@ describe('Relay entry IPC integration with simulated OS adapters', () => {
           phase: 'running'
         })
       )
-      expect(fixture.saveCoreSelectionNative.mock.calls[0][2]).toEqual({
-        id: latest.id,
-        sha256: latest.sha256
-      })
+      expect(fixture.saveCoreSelectionNative).not.toHaveBeenCalled()
       expect(fixture.localStart).toHaveBeenCalledOnce()
       expect(fixture.systemProxyNative).not.toHaveBeenCalled()
       expect(fixture.tunOpen).not.toHaveBeenCalled()
@@ -2277,6 +2531,9 @@ describe('Relay entry IPC integration with simulated OS adapters', () => {
   it('initializes once without silent-start after a delayed first screen and never repeats on refresh', async () => {
     vi.useFakeTimers()
     try {
+      const sheet = Promise.withResolvers<{ response: number; checkboxChecked: boolean }>()
+      fixture.confirmRestore.mockClear().mockImplementationOnce(() => sheet.promise)
+      fixture.window.webContents.openDevTools.mockClear()
       fixture.shellApply.mockClear()
       fixture.shellSilentStart = true
       fixture.window.webContents.on.mockClear()
@@ -2293,11 +2550,18 @@ describe('Relay entry IPC integration with simulated OS adapters', () => {
       expect(fixture.shellApply).not.toHaveBeenCalled()
       await vi.advanceTimersByTimeAsync(15_000)
       expect(fixture.shellApply).not.toHaveBeenCalled()
+      const shown = fixture.confirmRestore.mock.calls.find(
+        ([, options]) => options.title === 'Relay 界面未就绪'
+      )
+      expect(shown?.[0]).toBe(fixture.window)
+      expect(shown?.[1].signal?.aborted).toBe(false)
       const signal = fixture.window.webContents.on.mock.calls.find(
         ([name]) => name === 'ipc-message'
       )?.[1]
       if (!signal) throw new Error('Missing renderer-ready handler')
       signal(event(), 'rendererFirstContentReady')
+      expect(shown?.[1].signal?.aborted).toBe(true)
+      sheet.resolve({ response: 0, checkboxChecked: false })
       await vi.waitFor(() =>
         expect(fixture.shellApply).toHaveBeenCalledExactlyOnceWith(
           expect.objectContaining({ silentStart: true }),
@@ -2305,6 +2569,7 @@ describe('Relay entry IPC integration with simulated OS adapters', () => {
         )
       )
       expect(fixture.shellShowWindow).toHaveBeenCalled()
+      expect(fixture.window.webContents.openDevTools).not.toHaveBeenCalled()
       const navigate = fixture.window.webContents.on.mock.calls.find(
         ([name]) => name === 'did-start-navigation'
       )?.[1]
@@ -2698,6 +2963,7 @@ describe('Relay entry IPC integration with simulated OS adapters', () => {
       profile: { ...read.profile, sha256: selection.sha256 },
       text: source
     })
+    fixture.readCoreSelectionNative.mockResolvedValue({ selection, revision: 'a'.repeat(64) })
     expect(() =>
       fixture.handlers.get('relayTunConfigurationPrepare')?.(
         { sender: {}, senderFrame: {} },
@@ -2730,6 +2996,34 @@ describe('Relay entry IPC integration with simulated OS adapters', () => {
     expect(fixture.tunInspect).not.toHaveBeenCalled()
     expect(fixture.localStart).not.toHaveBeenCalled()
     expect(fixture.coreStart).not.toHaveBeenCalled()
+  })
+  it('persists the first visible profile only for explicit TUN enable without launching an ordinary core', async () => {
+    const stored = await fixture.profileRead()
+    const text = JSON.stringify({ rules: ['MATCH,REJECT'] })
+    const profile = { ...stored.profile, sha256: profileHash(text) }
+    const selection = { id: profile.id, sha256: profile.sha256 }
+    fixture.profileRead.mockResolvedValue({ ...stored, profile, text })
+    fixture.profileList.mockResolvedValue({
+      profiles: [profile],
+      activeId: null,
+      incomplete: 0,
+      warnings: []
+    })
+    fixture.saveCoreSelectionNative.mockImplementation(async (_exe, _ctx, selection) => {
+      const report = { selection, revision: 'c'.repeat(64) }
+      fixture.readCoreSelectionNative.mockResolvedValue(report)
+      return report
+    })
+    await expect(invoke('relayTunConfigurationPrepare', selection)).rejects.toThrow('已变化')
+    expect(fixture.saveCoreSelectionNative).not.toHaveBeenCalled()
+    const plan = await invoke('relayTunConfigurationPrepare', {
+      intent: 'enable',
+      profile: selection
+    })
+    expect(plan).toMatchObject({ profileId: selection.id, readyForParserCheck: true })
+    expect(fixture.saveCoreSelectionNative).toHaveBeenCalledTimes(1)
+    expect(fixture.localStart).not.toHaveBeenCalled()
+    expect(fixture.tunOpen).not.toHaveBeenCalled()
   })
   describe('Default TUN parser profile entry', () => {
     const architecture = process.arch === 'arm64' ? 'arm64' : 'x64'
@@ -2921,9 +3215,10 @@ describe('Relay entry IPC integration with simulated OS adapters', () => {
   })
 
   it('keeps private subscription sources inert until the requested action persists the URL', async () => {
+    const lists = fixture.sourceList.mock.calls.length
     expect(invoke('relaySourceState')).toMatchObject({ pending: false })
     expect(() => invoke('relaySourceState', {})).toThrow('不接受')
-    expect(fixture.sourceList).toHaveBeenCalledOnce()
+    expect(fixture.sourceList).toHaveBeenCalledTimes(lists)
     fixture.sourceList.mockClear()
     const input = {
       name: 'Fixture',
@@ -3079,10 +3374,11 @@ describe('Relay entry IPC integration with simulated OS adapters', () => {
     expect(invoke('relayProviderState')).toMatchObject({ pending: false })
     expect(() => invoke('relayProviderState', {})).toThrow('不接受')
     const profile = { id: stored.profile.id, sha256: stored.profile.sha256 }
+    const lists = fixture.profileList.mock.calls.length
     const inventory = await invoke('relayProvidersInspect', profile)
     expect(JSON.stringify(inventory)).not.toContain('PRIVATE')
     expect(fixture.providerCacheList).toHaveBeenCalledOnce()
-    expect(fixture.profileList).toHaveBeenCalledOnce()
+    expect(fixture.profileList).toHaveBeenCalledTimes(lists)
     const plan = (await invoke('relayProviderPrepare', {
       profile,
       provider: 'P',
@@ -7958,10 +8254,11 @@ describe('Relay entry IPC integration with simulated OS adapters', () => {
     expect(fixture.coreStart).not.toHaveBeenCalled()
   })
   it('uses the native picker only on request and saves the chosen profile without starting a core', async () => {
-    expect(fixture.profileList).toHaveBeenCalledOnce()
+    const lists = fixture.profileList.mock.calls.length
     expect(fixture.chooseOpen).not.toHaveBeenCalled()
     await expect(invoke('relayProfilePrepare', { path: '/injected' })).rejects.toThrow('不接受')
     expect(await invoke('relayProfilePrepare')).toBeUndefined()
+    expect(fixture.profileList).toHaveBeenCalledTimes(lists)
     expect(fixture.profileSource).not.toHaveBeenCalled()
     fixture.chooseOpen.mockResolvedValue({ canceled: false, filePaths: ['/fixture/chosen.yaml'] })
     const report = (await invoke('relayProfilePrepare')) as { evidenceId: string }
@@ -9664,6 +9961,98 @@ describe('Relay entry IPC integration with simulated OS adapters', () => {
       expect(fixture.coreStop).not.toHaveBeenCalled()
       expect(fixture.tunOpen).not.toHaveBeenCalled()
     })
+    it('uses the imported profile on the first click after import, even after an earlier empty-library failure', async () => {
+      await expect(invoke('relayEnsureSystemProxyListener')).rejects.toThrow('请先导入')
+      expect(fixture.localStart).not.toHaveBeenCalled()
+      const selected = await selectFixture()
+      const stored = await fixture.profileRead()
+      fixture.profileList.mockResolvedValue({
+        profiles: [stored.profile],
+        incomplete: 0,
+        activeId: null,
+        warnings: []
+      })
+      fixture.readCoreSelectionNative.mockResolvedValue({ revision: 'a'.repeat(64) })
+      fixture.saveCoreSelectionNative.mockImplementation(async (_exe, _context, selection) => {
+        const snapshot = { revision: 'b'.repeat(64), selection }
+        fixture.readCoreSelectionNative.mockResolvedValue(snapshot)
+        return snapshot
+      })
+      expect(fixture.localStart).not.toHaveBeenCalled()
+      expect(() => invoke('relayEnsureSystemProxyListener', { port: 12345 })).toThrow('不接受参数')
+      await expect(invoke('relayEnsureSystemProxyListener')).resolves.toMatchObject({
+        httpPort: 18191
+      })
+      expect(invoke('relayLocalProxyState')).toMatchObject({
+        profileId: selected.id,
+        phase: 'running'
+      })
+      await expect(invoke('relayEnsureSystemProxyListener')).resolves.toMatchObject({
+        httpPort: 18191
+      })
+      expect(fixture.localStart).toHaveBeenCalledOnce()
+      expect(fixture.saveCoreSelectionNative).toHaveBeenCalledOnce()
+      expect(fixture.systemProxyNative).not.toHaveBeenCalled()
+    })
+    it('refuses to redirect to a saved port or start another core when the indicated TUN no longer owns a listener', async () => {
+      fixture.tunStateOverride = {
+        phase: 'active',
+        pending: false,
+        owned: true,
+        sessionId: '00000000-0000-4000-8000-000000000030',
+        traffic: 'forwarding',
+        restorationVerified: false,
+        protectionVerified: false,
+        warnings: []
+      }
+      fixture.simulateTunRuntime = true
+      await expect(invoke('relayEnsureSystemProxyListener')).rejects.toThrow('监听尚未确认')
+      expect(fixture.tunCapture).not.toHaveBeenCalled()
+      expect(fixture.localStart).not.toHaveBeenCalled()
+      expect(fixture.systemProxyNative).not.toHaveBeenCalled()
+    })
+    it('finishes the tray enable click when the workspace lists profiles during native preparation', async () => {
+      await selectFixture()
+      allowApply()
+      const normal = fixture.systemProxyNative.getMockImplementation()
+      if (!normal) throw new Error('Missing native fixture')
+      const started = Promise.withResolvers<void>()
+      const release = Promise.withResolvers<void>()
+      let listing: Promise<unknown> | undefined
+      fixture.systemProxyNative.mockImplementation(async (executable, context, action) => {
+        if (action === 'prepare' && !listing) {
+          fixture.profileList.mockImplementationOnce(async () => {
+            started.resolve()
+            await release.promise
+            return { profiles: [], incomplete: 0, activeId: null, warnings: [] }
+          })
+          listing = Promise.resolve(invoke('relayProfileList'))
+        }
+        return normal(executable, context, action)
+      })
+      const host = fixture.shellHostOptions
+      if (!host) throw new Error('Missing shell host')
+      const action = host.perform({ action: 'triggerSysProxy', enabled: true })
+      await started.promise
+      try {
+        await new Promise<void>((resolve) => setImmediate(resolve))
+        expect(fixture.systemProxyNative.mock.calls.map((call) => call[2])).toEqual([
+          'inspect',
+          'prepare'
+        ])
+      } finally {
+        release.resolve()
+      }
+      await Promise.all([action, listing])
+      expect(fixture.systemProxyNative.mock.calls.map((call) => call[2])).toEqual([
+        'inspect',
+        'prepare',
+        'prepare',
+        'apply'
+      ])
+      expect(fixture.localStart).toHaveBeenCalledOnce()
+      expect(fixture.localStop).not.toHaveBeenCalled()
+    })
     it('reuses a confirmed owned HTTP listener without restarting it', async () => {
       const plan = await localPreparation()
       await invoke('relayLocalProxyAction', { action: 'start', evidenceId: plan.evidenceId })
@@ -9726,10 +10115,10 @@ describe('Relay entry IPC integration with simulated OS adapters', () => {
       expect(fixture.confirmRestore).not.toHaveBeenCalled()
       expect(fixture.tunOpen).not.toHaveBeenCalled()
     })
-    it('reports a running HTTP owner as a TUN conflict without stopping or migrating it', async () => {
+    it('refuses TUN without a selected profile and preserves the running HTTP owner', async () => {
       const plan = await localPreparation()
       await invoke('relayLocalProxyAction', { action: 'start', evidenceId: plan.evidenceId })
-      await expect(toggle('triggerTun')).rejects.toThrow('普通代理核心正在运行')
+      await expect(toggle('triggerTun')).rejects.toThrow('没有可用配置')
       expect(fixture.localStart).toHaveBeenCalledOnce()
       expect(fixture.localStop).not.toHaveBeenCalled()
       expect(fixture.tunOpen).not.toHaveBeenCalled()

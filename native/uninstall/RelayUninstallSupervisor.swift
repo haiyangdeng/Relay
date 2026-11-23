@@ -16,6 +16,9 @@ struct RelayUninstallSupervisor {
                 try RelayUninstallPrivateBrowser.run(installation)
                 return
             }
+            if Array(CommandLine.arguments.dropFirst()) == ["--verify-installed-identity"] {
+                try verifyInstalledIdentity(); return
+            }
             guard getuid() == 0, geteuid() == 0, CommandLine.arguments[0] == RelayRemoval.executable else { throw RelayRemoval.fail("Only the installed administrator entry is accepted") }
             let args = Array(CommandLine.arguments.dropFirst())
             if args.count == 5, args[0] == "--register", args[1] == "--uid", args[3] == "--home", let uid = UInt32(args[2]) {
@@ -32,6 +35,29 @@ struct RelayUninstallSupervisor {
             try RelayRemovalMonitor(installation).start()
             dispatchMain()
         } catch { fputs("Relay automatic removal: \(error.localizedDescription)\n", stderr); exit(1) }
+    }
+    // Installer invokes its own packaged verifier before installing any files.
+    // This entry has no input path, creates no state and cannot start cleanup.
+    static func verifyInstalledIdentity() throws {
+        let app = RelayRemoval.app
+        let error = RelayRemoval.fail("The current App does not match its installation")
+        guard !RelayRemoval.present(RelayRemoval.root + "/intent.json"),
+              !RelayRemoval.present(RelayRemoval.root + "/finalization.json") else { throw error }
+        let installation = try RelayRemovalInstallation()
+        try RelayRemoval.directory(app)
+        guard let before = RelayRemoval.info(app), installation.matches(before),
+              let digest = installation.record["appExecutableSHA256"] as? String,
+              RelayRemoval.hash(try Data(contentsOf: URL(fileURLWithPath: app + "/Contents/MacOS/Relay"))) == digest,
+              let daemon = installation.record["daemonSHA256"] as? String,
+              RelayRemoval.hash(try RelayRemoval.file(RelayRemoval.daemon)) == daemon else { throw error }
+        let plist = try PropertyListSerialization.propertyList(from: Data(contentsOf: URL(fileURLWithPath: app + "/Contents/Info.plist")), format: nil) as? [String: Any]
+        guard plist?["CFBundleIdentifier"] as? String == "local.relay.network.preview",
+              plist?["CFBundleExecutable"] as? String == "Relay" else { throw error }
+        _ = try RelayRemoval.requireRun("/usr/bin/codesign", ["--verify", "--all-architectures", "--deep", "--strict", app])
+        guard let after = RelayRemoval.info(app), installation.matches(after),
+              NSDictionary(dictionary: try RelayRemoval.json(RelayRemoval.root + "/installation.json")).isEqual(to: installation.record),
+              !RelayRemoval.present(RelayRemoval.root + "/intent.json"),
+              !RelayRemoval.present(RelayRemoval.root + "/finalization.json") else { throw error }
     }
     static func processPath(_ pid: Int32) -> String? {
         var buffer = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
@@ -50,7 +76,9 @@ struct RelayUninstallSupervisor {
         guard let info = try PropertyListSerialization.propertyList(from: Data(contentsOf: URL(fileURLWithPath: plist)), format: nil) as? [String: Any],
               info["CFBundleIdentifier"] as? String == "local.relay.network.preview", info["CFBundleExecutable"] as? String == "Relay" else { throw RelayRemoval.fail("Unexpected application identity") }
         _ = try RelayRemoval.requireRun("/usr/bin/codesign", ["--verify", "--deep", "--strict", RelayRemoval.app])
-        let bookmark = try URL(fileURLWithPath: RelayRemoval.app).bookmarkData(options: [.minimalBookmark], includingResourceValuesForKeys: nil, relativeTo: nil)
+        let bookmark = try RelayRemovalAppIdentity.bookmark(URL(fileURLWithPath: RelayRemoval.app))
+        let bound = try RelayRemovalAppIdentity(bookmark: bookmark, registeredInode: UInt64(app.st_ino))
+        guard bound.matches(app), let linked = RelayRemoval.info(RelayRemoval.app), bound.matches(linked) else { throw RelayRemoval.fail("Installed App changed during registration") }
         try RelayRemoval.save([
             "version": 1, "generation": UUID().uuidString, "clientUID": uid, "home": home,
             "appPath": RelayRemoval.app, "appDevice": UInt64(app.st_dev), "appInode": UInt64(app.st_ino),
@@ -80,16 +108,9 @@ final class RelayRemovalMonitor {
             // The root-owned durable intent proves deletion even if Trash was emptied.
             _ = try phase()
         } else {
-            var path = RelayRemoval.app
-            if RelayRemoval.info(path).map(installation.matches) != true {
-                guard let encoded = installation.record["appBookmark"] as? String, let data = Data(base64Encoded: encoded) else { throw RelayRemoval.fail("Missing App identity bookmark") }
-                var stale = false
-                let url = try URL(resolvingBookmarkData: data, options: [.withoutUI, .withoutMounting], relativeTo: nil, bookmarkDataIsStale: &stale)
-                path = url.path
-            }
-            fd = open(path, O_EVTONLY | O_NOFOLLOW | O_DIRECTORY | O_CLOEXEC)
-            var object = stat()
-            guard fd >= 0, fstat(fd, &object) == 0, installation.matches(object) else { if fd >= 0 { close(fd) }; throw RelayRemoval.fail("Cannot acquire the registered App; no deletion inferred") }
+            guard let identity = installation.identity else { throw RelayRemoval.fail("Cannot acquire the registered App; no deletion inferred") }
+            fd = fcntl(identity.descriptor, F_DUPFD_CLOEXEC, 0)
+            guard fd >= 0 else { throw RelayRemoval.fail("Cannot observe the registered App") }
             let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: [.rename, .delete, .revoke], queue: queue)
             source.setEventHandler { [self] in
                 if vnode?.data.contains(.delete) == true { descriptorDeleted = true }
@@ -110,11 +131,12 @@ final class RelayRemovalMonitor {
               intent["clientUID"] as? UInt32 == installation.uid, let phase = intent["phase"] as? String,
               ["requested", "user-cleaned", "components-cleaned"].contains(phase) else { throw RelayRemoval.fail("Invalid durable removal intent") }; return phase
     }
-    private func mark(_ phase: String) throws {
+    private func mark(_ phase: String, legacyPending: Bool = false) throws {
         var value: [String: Any] = ["version": 1, "generation": installation.generation, "clientUID": installation.uid, "phase": phase]
         if RelayRemoval.present(RelayRemoval.root + "/intent.json") {
             value["observedAppPath"] = try RelayRemoval.json(RelayRemoval.root + "/intent.json")["observedAppPath"]
         } else if fd >= 0 { value["observedAppPath"] = RelayRemoval.trackedPath(fd) }
+        if legacyPending { value["legacyLoginPending"] = true }
         try RelayRemoval.save(value, "intent.json")
     }
     private func tick() {
@@ -166,14 +188,24 @@ final class RelayRemovalMonitor {
         return false
     }
     private var preparedLoginItem = false
+    private var retryLegacyAfter: Date?
     private func prepareLegacyLoginItem() throws {
         if preparedLoginItem { return }
         let intent = try RelayRemoval.json(RelayRemoval.root + "/intent.json")
         let candidate = fd >= 0 ? RelayRemoval.trackedPath(fd) : intent["observedAppPath"] as? String
+        if let inventory = try? RelayRemoval.run("/usr/bin/sfltool", ["dumpbtm"], timeout: 15,
+                maximumOutputBytes: 16 * 1024 * 1024, requireCompleteOutput: true),
+           inventory.0 == 0, RelayUninstallRegistration.legacyLoginAbsent(inventory.1, uid: installation.uid, movedPath: candidate ?? RelayRemoval.app) {
+            preparedLoginItem = true
+            return
+        }
         guard let path = candidate, RelayRemoval.info(path).map(installation.matches) == true else {
             // Fresh installs do not create a mainApp login item. A surviving
             // old registration can only be unregistered by that signed App;
             // immediately emptied old bundles cannot be re-executed.
+            guard intent["legacyLoginPending"] as? Bool != true else {
+                throw RelayRemoval.fail("Pending legacy registration could not be verified after moving the signed App")
+            }
             preparedLoginItem = true; return
         }
         let executable = path + "/Contents/MacOS/Relay"
@@ -187,13 +219,20 @@ final class RelayRemovalMonitor {
         let current = try phase()
         // An installed replacement must never have its configuration deleted.
         if RelayRemoval.present(RelayRemoval.app) { throw RelayRemoval.fail("An App is present at the installation path") }
+        if current == "requested", let retry = retryLegacyAfter, Date() < retry { return }
         if current == "requested", try appRunning() { return } // Main drains its owned children.
         let managedLease = try RelayRemovalComponents.acquireManagedLease()
         defer { if managedLease >= 0 { close(managedLease) } }
-        try RelayRemovalLifecycle.run(phase: current, restoreUser: {
-            do { try prepareLegacyLoginItem() }
-            catch { fputs("Relay legacy login cleanup unavailable: \(error.localizedDescription)\n", stderr) }
-            preparedLoginItem = true
+        let retireNetwork = {
+            try RelayRemovalComponents.loginItem(self.installation)
+            try RelayRemovalComponents.managed(self.installation, heldLease: managedLease)
+            try RelayRemovalComponents.systemProxy(self.installation)
+        }
+        try RelayRemovalLifecycle.run(phase: current, prepareLegacyLogin: prepareLegacyLoginItem, retireNetworkOnLoginFailure: {
+            try retireNetwork()
+            try mark("requested", legacyPending: true)
+            retryLegacyAfter = Date().addingTimeInterval(60)
+        }, restoreUser: {
             _ = try RelayRemoval.requireRun("/bin/launchctl", ["asuser", String(installation.uid), "/usr/bin/sudo", "-n", "-H", "-u", "#\(installation.uid)", RelayRemoval.executable, "--user-stop-browser"], timeout: 45)
             guard let user = getpwuid(installation.uid), let namePointer = user.pointee.pw_name else { throw RelayRemoval.fail("Bound user unavailable") }
             let name = String(cString: namePointer)
@@ -205,9 +244,7 @@ final class RelayRemovalMonitor {
         }, removeRegistrations: {
             try RelayUninstallRegistration.run(installation)
         }, removeComponents: {
-            try RelayRemovalComponents.loginItem(installation)
-            try RelayRemovalComponents.managed(installation, heldLease: managedLease)
-            try RelayRemovalComponents.systemProxy(installation)
+            try retireNetwork()
             try RelayRemovalComponents.forgetReceipts()
         }, checkpoint: { try mark($0) }, finish: {
             try RelayRemoval.save(installation.record, "finalization.json")

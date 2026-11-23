@@ -18,6 +18,7 @@ export function RelayProfilesPanel({
   preparation,
   inventory,
   busy,
+  selectionBusy = busy,
   notice,
   onPrepare,
   onList,
@@ -29,6 +30,7 @@ export function RelayProfilesPanel({
   preparation?: RelayProfilePreparation
   inventory?: RelayProfileInventory
   busy: boolean
+  selectionBusy?: boolean
   notice: string
   onPrepare(): void
   onSave(): void
@@ -160,7 +162,7 @@ export function RelayProfilesPanel({
         >
           导入本地配置…
         </button>
-        <button disabled={locked} onClick={onList}>
+        <button disabled={selectionBusy || nodeBusy} onClick={onList}>
           读取已保存配置
         </button>
       </div>
@@ -213,26 +215,34 @@ export function RelayProfilesPanel({
         <div>
           <p>
             已保存 {inventory.profiles.length} 份 · 未确认／未知条目 {inventory.incomplete} 项 ·
-            {activeProfileId ? '本次普通核心已加载配置' : '当前没有已确认的运行配置'}
+            {activeProfileId ? '当前核心已加载配置' : '当前没有已确认的运行配置'}
           </p>
-          {onChoose && <p>点击配置即可使用；普通核心运行时会检查并加载所选配置。</p>}
           <ul>
             {inventory.profiles.map((profile) => (
               <li key={profile.id}>
-                <strong>{profile.name}</strong> · {summary(profile.summary)}
+                {onChoose ? (
+                  <button
+                    type="button"
+                    aria-pressed={(activeProfileId ?? currentSelection) === profile.id}
+                    disabled={
+                      selectionBusy ||
+                      nodeBusy ||
+                      (activeProfileId ?? currentSelection) === profile.id
+                    }
+                    onClick={() => onChoose(profile)}
+                  >
+                    <strong>{profile.name}</strong>
+                  </button>
+                ) : (
+                  <strong>{profile.name}</strong>
+                )}
+                {' · '}
+                {summary(profile.summary)}
                 {activeProfileId === profile.id
-                  ? ' · 本次普通核心已加载'
+                  ? ' · 当前核心已加载'
                   : currentSelection === profile.id
                     ? ' · 已选用'
                     : ''}
-                {onChoose && (
-                  <button
-                    disabled={locked || currentSelection === profile.id}
-                    onClick={() => onChoose(profile)}
-                  >
-                    选用此配置
-                  </button>
-                )}
                 <button disabled={locked} onClick={() => void readOriginal(profile)}>
                   查看此配置原文
                 </button>

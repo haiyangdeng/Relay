@@ -9,9 +9,12 @@ import { issueGeoAutomaticPermit } from '../resources/automatic-permit'
 import type { RuleProviderResourceCandidate } from '../resources/rule-provider-candidate'
 import { createReadonlyFloatingBridge } from '../../../preload/relay-floating'
 import type { TunPlanEvidence } from './plan'
+import type { ProxyGroupAction } from './proxy-groups'
 import {
   createTunSessionService,
   TunStartFailure,
+  TunResourcesReleaseDenied,
+  TunDisposalDenied,
   type TunHostObservation,
   type TunSessionBinding,
   type TunSessionHost,
@@ -26,6 +29,7 @@ import type {
 } from './resources-channel'
 import type { TunResourceInbox } from './resource-inbox'
 import type { TunRuleProvidersChannel } from './rule-providers-contract'
+import { createTunHandoff } from './handoff'
 
 const hash = (text: string): string => createHash('sha256').update(text).digest('hex')
 function fixture(
@@ -819,6 +823,46 @@ describe('TUN main-process owned session lifecycle', () => {
 })
 
 describe('Mihomo-owned TUN session orchestration', () => {
+  it('uses the inspected session’s mixed listener for a large loaded configuration without exporting it', async () => {
+    const f = fixture('core-managed', 0)
+    const configuration = {
+      ...JSON.parse(f.evidence.configuration),
+      'mixed-port': 17888,
+      rules: Array.from(
+        { length: 4500 },
+        (_, index) => `DOMAIN,${'a'.repeat(50)}.${'b'.repeat(50)}.${index}.example,REJECT`
+      )
+    }
+    f.evidence.configuration = JSON.stringify(configuration)
+    f.request.configurationSHA256 = hash(f.evidence.configuration)
+    f.evidence.parser.configurationSHA256 = f.request.configurationSHA256
+    f.request.bundleSHA256 = hash(
+      JSON.stringify({ configuration, assets: [], pins: [], unresolved: [] })
+    )
+    expect(Buffer.byteLength(f.evidence.configuration)).toBeGreaterThan(512 * 1024)
+    const started = await f.start()
+    expect(started.status).toBe('started')
+    const sessionId = started.state.sessionId
+    await f.service.inspect()
+    expect(f.host.inspect).toHaveBeenCalledOnce()
+    expect(f.host.runtimeReader).toBeUndefined()
+    expect(f.service.systemProxyListener(sessionId)).toEqual({ httpPort: 17888, mixedPort: 17888 })
+    expect(() => f.service.systemProxyListener('other-session')).toThrow('监听尚未确认')
+    f.setObserved(f.report('unknown'))
+    await f.service.inspect()
+    expect(() => f.service.systemProxyListener(sessionId)).toThrow('监听尚未确认')
+  })
+
+  it('returns only an enabled ordinary HTTP-capable inbound from the active session', async () => {
+    const http = fixture('core-managed', 18777)
+    const running = await http.start()
+    expect(http.service.systemProxyListener(running.state.sessionId)).toEqual({ httpPort: 18777 })
+    const tunOnly = fixture('core-managed', 0)
+    const noListener = await tunOnly.start()
+    expect(noListener.status).toBe('started')
+    expect(() => tunOnly.service.systemProxyListener(noListener.state.sessionId)).toThrow('端口')
+  })
+
   const readable = () => {
     const f = fixture('core-managed')
     let mode: 'rule' | 'global' | 'direct' = 'rule',
@@ -976,25 +1020,603 @@ describe('Mihomo-owned TUN session orchestration', () => {
   it('does not accept the old no-network coreReady phase as self-managed TUN activation', async () => {
     const f = fixture('core-managed')
     f.host.startCore = vi.fn(async () => f.report('coreReady'))
-    expect((await f.start()).status).toBe('uncertain')
-    expect(f.service.state().owned).toBe(true)
+    expect((await f.start()).status).toBe('failed')
+    expect(f.service.state()).toMatchObject({ owned: false, restorationVerified: true })
     expect(f.host.activate).not.toHaveBeenCalled()
-    expect((await f.service.stop({ sessionId: f.service.state().sessionId })).status).toBe(
-      'restored'
-    )
+    expect(f.host.stopCore).toHaveBeenCalledOnce()
   })
-  it('retains recovery after a core launch error and does not repeat startup', async () => {
+  it('restores after a core launch error and does not repeat startup', async () => {
     const f = fixture('core-managed')
     f.host.startCore = vi.fn(async () => {
       throw new Error('owned child readiness failed')
     })
-    expect((await f.start()).status).toBe('uncertain')
-    expect(f.service.state().owned).toBe(true)
+    expect((await f.start()).status).toBe('failed')
+    expect(f.service.state()).toMatchObject({ owned: false, restorationVerified: true })
+    expect(f.host.stopCore).toHaveBeenCalledOnce()
     expect(f.host.startCore).toHaveBeenCalledTimes(1)
-    expect((await f.service.stop({ sessionId: f.service.state().sessionId })).status).toBe(
-      'restored'
+  })
+})
+
+describe('managed TUN fixed-group handoff', () => {
+  it('a TUN-first activation restores the saved selectors and implicit GLOBAL using this live table, skipping missing members', async () => {
+    const f = fixture('core-managed')
+    const candidate = {
+      evidence: f.evidence,
+      recheck: f.recheck,
+      profileId: 'same',
+      readSavedSelectors: async () =>
+        new Map([
+          ['Policy', 'Good'],
+          ['GLOBAL', 'Policy'],
+          ['Removed policy', 'Good'],
+          ['Stale', 'Removed'],
+          ['Empty', 'Removed'],
+          ['Auto', 'Good']
+        ])
+    }
+    f.adapters.readCandidate.mockResolvedValue(candidate)
+    const table = {
+      Policy: { name: 'Policy', type: 'Selector', all: ['Fails', 'Good'], now: 'Fails', fixed: '' },
+      GLOBAL: {
+        name: 'GLOBAL',
+        type: 'Selector',
+        all: ['DIRECT', 'Policy'],
+        now: 'DIRECT',
+        fixed: ''
+      },
+      Stale: { name: 'Stale', type: 'Selector', all: ['Keep'], now: 'Keep', fixed: '' },
+      Empty: { name: 'Empty', type: 'Selector', all: [], now: '', fixed: '' },
+      Auto: { name: 'Auto', type: 'URLTest', all: ['Fails', 'Good'], now: 'Good', fixed: '' }
+    }
+    const channel = vi.fn(async (action: ProxyGroupAction) => {
+      if (action.action === 'select') {
+        const row = table[action.group as keyof typeof table]
+        row.now = action.member
+        if (row.type !== 'Selector') row.fixed = action.member
+        return {} // The native select acknowledgement contains no snapshot.
+      }
+      return structuredClone(table)
+    })
+    Object.assign(f.host, { proxyGroups: channel })
+    expect((await f.start()).status).toBe('started')
+    expect(
+      channel.mock.calls.flatMap(([action]) =>
+        action.action === 'select' ? [[action.group, action.member]] : []
+      )
+    ).toEqual([
+      ['Policy', 'Good'],
+      ['GLOBAL', 'Policy'],
+      ['Auto', 'Good']
+    ])
+    expect(table.Stale.now).toBe('Keep')
+  })
+  it('cancels a TUN-first saved choice read before issuing any selection against a revoked session', async () => {
+    const f = fixture('core-managed')
+    const candidate = {
+      evidence: f.evidence,
+      recheck: f.recheck,
+      profileId: 'same',
+      readSavedSelectors: async () => new Map([['Policy', 'Good']])
+    }
+    f.adapters.readCandidate.mockResolvedValue(candidate)
+    const channel = vi.fn(async (action: ProxyGroupAction) => {
+      if (action.action === 'groups') f.service.invalidatePending()
+      return { Policy: { name: 'Policy', type: 'Selector', all: ['Fails', 'Good'], now: 'Fails' } }
+    })
+    Object.assign(f.host, { proxyGroups: channel })
+    const result = await f.start()
+    expect(result.status).not.toBe('started')
+    expect(channel.mock.calls.map(([action]) => action.action)).toEqual(['groups'])
+  })
+
+  for (const confirm of [true, false]) {
+    it(
+      confirm
+        ? 'pins the old automatic-group member and reports later unpinning'
+        : 'recovers the ordinary path when the actual pin is missing',
+      async () => {
+        const f = fixture('core-managed')
+        const candidate = {
+          evidence: f.evidence,
+          recheck: f.recheck,
+          profileId: 'fixture',
+          fixedGroups: [{ name: 'Auto', member: 'B' }]
+        }
+        f.adapters.readCandidate.mockResolvedValue(candidate)
+        let fixed = ''
+        Object.assign(f.host, {
+          proxyGroups: async (action: ProxyGroupAction) => {
+            if (action.action === 'select' && confirm) fixed = action.member
+            if (action.action === 'automatic') fixed = ''
+            return {
+              Auto: { name: 'Auto', type: 'Fallback', fixed, now: fixed || 'A', all: ['A', 'B'] },
+              Select: { name: 'Select', type: 'Selector', now: 'B', all: ['A', 'B'] }
+            }
+          }
+        })
+        const result = await f.start()
+        if (!confirm) {
+          expect(result.state).toMatchObject({ owned: false, restorationVerified: true })
+          expect(result.state.warnings).toContain('TUN启动失败阶段：fixed-group-handoff。')
+          expect(f.host.stopCore).toHaveBeenCalledOnce()
+          return
+        }
+        expect(result.status).toBe('started')
+        expect(await f.service.proxySelections()).toContainEqual({
+          name: 'Auto',
+          now: 'B',
+          members: ['A', 'B']
+        })
+        await f.service.changeProxy({ action: 'automatic', group: 'Auto' })
+        expect(await f.service.proxySelections()).toEqual([
+          { name: 'Auto', now: null, members: ['A', 'B'] },
+          { name: 'Select', now: 'B', members: ['A', 'B'] }
+        ])
+      }
     )
-    expect(f.host.startCore).toHaveBeenCalledTimes(1)
+  }
+})
+
+describe('Managed TUN startup failure compensation', () => {
+  function failedStartup() {
+    const f = fixture('core-managed')
+    vi.mocked(f.host.startCore).mockRejectedValue(new Error('private readiness detail'))
+    return f
+  }
+
+  it('cleans up one failed managed launch under its start consent and reports verified restoration', async () => {
+    const f = failedStartup()
+    f.adapters.confirmStop.mockResolvedValue(false)
+    const result = await f.start()
+    expect(result.status).toBe('failed')
+    expect(result.state).toMatchObject({
+      owned: false,
+      phase: 'restored',
+      restorationVerified: true,
+      pending: false
+    })
+    expect(f.events.slice(-5)).toEqual([
+      'revokeActivation',
+      'stopCore',
+      'release',
+      'verifyRestored',
+      'dispose'
+    ])
+    expect(f.adapters.confirmStop).not.toHaveBeenCalled()
+    expect(f.host.startCore).toHaveBeenCalledOnce()
+    expect(f.host.stopCore).toHaveBeenCalledOnce()
+    expect(f.service.isBlocking()).toBe(false)
+    expect(result.state.warnings).toContain('TUN启动失败阶段：core-start。')
+    expect(JSON.stringify(result)).not.toContain('private readiness')
+  })
+
+  it.each(['cancelled', 'recheck', 'open'] as const)(
+    'does not run compensation before a managed host exists: %s',
+    async (failure) => {
+      const f = failedStartup()
+      if (failure === 'cancelled') f.adapters.confirmStart.mockResolvedValue(false)
+      else if (failure === 'recheck') f.recheck.mockRejectedValue(new Error('candidate changed'))
+      else f.adapters.openHost.mockRejectedValue(new Error('nothing opened'))
+      expect((await f.start()).status).toBe(failure === 'cancelled' ? 'cancelled' : 'failed')
+      expect(f.host.revokeActivation).not.toHaveBeenCalled()
+      expect(f.host.stopCore).not.toHaveBeenCalled()
+      expect(f.host.dispose).not.toHaveBeenCalled()
+    }
+  )
+
+  it('compensates a registered managed host when opening later fails', async () => {
+    const f = failedStartup(),
+      open = f.adapters.openHost.getMockImplementation()
+    if (!open) throw new Error('fixture opener missing')
+    f.adapters.openHost.mockImplementation(async (...args) => {
+      await open(...args)
+      throw new Error('registered host opening failed')
+    })
+    expect((await f.start()).status).toBe('failed')
+    expect(f.host.startCore).not.toHaveBeenCalled()
+    expect(f.host.stopCore).toHaveBeenCalledOnce()
+    expect(f.host.dispose).toHaveBeenCalledOnce()
+    expect(f.service.state().owned).toBe(false)
+  })
+
+  it.each(['reject', 'throw'] as const)(
+    'still attempts owned cleanup after %s revocation without retrying launch',
+    async (failure) => {
+      const f = failedStartup()
+      if (failure === 'throw')
+        vi.mocked(f.host.revokeActivation).mockImplementation(() => {
+          throw new Error('revocation unavailable')
+        })
+      else vi.mocked(f.host.revokeActivation).mockRejectedValue(new Error('revocation unavailable'))
+      expect((await f.start()).status).toBe('failed')
+      expect(f.host.revokeActivation).toHaveBeenCalledOnce()
+      expect(f.host.startCore).toHaveBeenCalledOnce()
+      expect(f.host.stopCore).toHaveBeenCalledOnce()
+      expect(f.service.state().restorationVerified).toBe(true)
+    }
+  )
+
+  it.each(['stopCore', 'release', 'verifyRestored', 'dispose'] as const)(
+    'retains the owned session after one failed compensation step: %s',
+    async (method) => {
+      const f = failedStartup()
+      vi.mocked(f.host[method]).mockRejectedValueOnce(new Error('private recovery detail'))
+      const result = await f.start()
+      expect(result.status).toBe('uncertain')
+      expect(result.state).toMatchObject({ owned: true, restorationVerified: false })
+      const steps = ['stopCore', 'release', 'verifyRestored', 'dispose'] as const,
+        failedIndex = steps.indexOf(method)
+      for (const [index, step] of steps.entries())
+        expect(f.host[step]).toHaveBeenCalledTimes(index <= failedIndex ? 1 : 0)
+      expect(f.host.startCore).toHaveBeenCalledOnce()
+      expect(f.service.isBlocking()).toBe(true)
+      expect(result.state.warnings).toContain('TUN启动失败阶段：core-start。')
+      expect(result.state.warnings).toContain(
+        `TUN启动恢复失败阶段：${
+          {
+            stopCore: 'core-stop',
+            release: 'device-release',
+            verifyRestored: 'restoration-check',
+            dispose: 'host-dispose'
+          }[method]
+        }。`
+      )
+      expect(JSON.stringify(result)).not.toContain('private')
+      const stopped = await f.service.stop({ sessionId: result.state.sessionId })
+      expect(stopped.status).toBe('restored')
+      expect(f.host.startCore).toHaveBeenCalledOnce()
+      if (method === 'dispose') {
+        expect(f.host.stopCore).toHaveBeenCalledOnce()
+        expect(f.host.release).toHaveBeenCalledOnce()
+        expect(f.host.verifyRestored).toHaveBeenCalledOnce()
+        expect(f.host.dispose).toHaveBeenCalledTimes(2)
+      }
+    }
+  )
+
+  it('keeps foreign restoration receipts from releasing recovery ownership', async () => {
+    const f = failedStartup()
+    vi.mocked(f.host.verifyRestored).mockImplementation(async () => ({
+      ...f.report('restored'),
+      runtimeConfigurationSHA256: 'a'.repeat(64)
+    }))
+    expect((await f.start()).status).toBe('uncertain')
+    expect(f.host.stopCore).toHaveBeenCalledOnce()
+    expect(f.host.dispose).not.toHaveBeenCalled()
+    expect(f.service.state().owned).toBe(true)
+  })
+
+  it('joins in-flight revocation and concurrent quit without waiting on its own busy flag', async () => {
+    const f = failedStartup(),
+      startedCore = Promise.withResolvers<TunHostObservation>(),
+      revoked = Promise.withResolvers<void>()
+    vi.mocked(f.host.startCore).mockImplementation(() => startedCore.promise)
+    vi.mocked(f.host.revokeActivation).mockImplementation(() => revoked.promise)
+    const started = f.start()
+    await vi.waitFor(() => expect(f.host.startCore).toHaveBeenCalledOnce())
+    const closed = f.service.requestClose()
+    expect(f.host.revokeActivation).toHaveBeenCalledOnce()
+    startedCore.reject(new Error('failed during quit'))
+    await Promise.resolve()
+    expect(f.host.stopCore).not.toHaveBeenCalled()
+    revoked.resolve()
+    expect((await started).status).toBe('failed')
+    expect(await closed).toBe(true)
+    expect(f.adapters.confirmStop).not.toHaveBeenCalled()
+    expect(f.host.stopCore).toHaveBeenCalledOnce()
+    expect(f.host.dispose).toHaveBeenCalledOnce()
+  })
+
+  it('cleans up when the UI is invalidated after core readiness without requesting new stop consent', async () => {
+    const f = fixture('core-managed')
+    vi.mocked(f.host.startCore).mockImplementation(async () => {
+      f.service.invalidatePending()
+      f.adapters.confirmStop.mockResolvedValue(false)
+      return f.report('active')
+    })
+    expect((await f.start()).status).toBe('failed')
+    expect(f.host.stopCore).toHaveBeenCalledOnce()
+    expect(f.adapters.confirmStop).not.toHaveBeenCalled()
+    expect(f.service.state().owned).toBe(false)
+  })
+
+  it.each([true, false])(
+    'lets the handoff resume ordinary service only after successful compensation: %s',
+    async (canRestore) => {
+      const f = failedStartup(),
+        ordinary = { owned: true },
+        resumed = vi.fn(async () => {
+          expect(f.service.state()).toMatchObject({ owned: false, restorationVerified: true })
+          ordinary.owned = true
+        }),
+        stopped = vi.fn(async () => {
+          ordinary.owned = false
+          return true
+        }),
+        handoff = createTunHandoff({
+          state: f.service.state,
+          localOwned: () => ordinary.owned,
+          start: f.service.start,
+          stop: f.service.stop
+        })
+      if (!canRestore)
+        vi.mocked(f.host.verifyRestored).mockRejectedValue(new Error('baseline differs'))
+      const prepared = await f.service.prepare(f.request)
+      handoff.remember(prepared.evidenceId, {
+        instanceId: 'fixture-ordinary',
+        httpPort: 18290,
+        recheck: async () => {},
+        recheckResume: async () => {},
+        assertCurrentOwner: vi.fn(),
+        authorizeStop: vi.fn(),
+        authorized: () => true,
+        stopLocal: stopped,
+        resumeLocal: resumed
+      })
+      const result = await handoff.start({ evidenceId: prepared.evidenceId })
+      expect(result.status).toBe(canRestore ? 'failed' : 'uncertain')
+      expect(stopped).toHaveBeenCalledOnce()
+      expect(resumed).toHaveBeenCalledTimes(canRestore ? 1 : 0)
+      expect(ordinary.owned).toBe(canRestore)
+      expect(f.host.startCore).toHaveBeenCalledOnce()
+    }
+  )
+})
+
+describe('Managed TUN release with retained external protection evidence', () => {
+  function releasable(execution: 'core-managed' | undefined = 'core-managed') {
+    const f = fixture(execution),
+      disposed = vi.fn(async () => {})
+    f.host.disposeReleased = disposed
+    return { ...f, disposed }
+  }
+
+  it.each(['release', 'verifyRestored'] as const)(
+    'releases a stopped managed host after %s fails without claiming restoration',
+    async (method) => {
+      const f = releasable()
+      await f.start()
+      vi.mocked(f.host[method]).mockRejectedValue(new Error('private external change'))
+      const stopped = await f.service.stop({ sessionId: f.service.state().sessionId })
+      expect(stopped.status).toBe('released')
+      expect(stopped.state).toMatchObject({
+        owned: false,
+        phase: 'released',
+        pending: false,
+        restorationVerified: false,
+        traffic: 'inactive'
+      })
+      expect(stopped.state.sessionId).toBeUndefined()
+      expect(stopped.state.warnings.join(' ')).toContain('保留当前系统代理设置')
+      expect(JSON.stringify(stopped)).not.toContain('private')
+      expect(f.disposed).toHaveBeenCalledOnce()
+      expect(f.host.stopCore).toHaveBeenCalledOnce()
+      expect(f.host.dispose).not.toHaveBeenCalled()
+      expect(f.service.isBlocking()).toBe(false)
+      expect(await f.service.requestClose()).toBe(true)
+      expect(f.disposed).toHaveBeenCalledOnce()
+    }
+  )
+
+  it.each(['stopCore', 'dispose'] as const)(
+    'does not use external-change disposal when %s fails',
+    async (method) => {
+      const f = releasable()
+      await f.start()
+      vi.mocked(f.host[method]).mockRejectedValue(new Error('failure'))
+      expect((await f.service.stop({ sessionId: f.service.state().sessionId })).state.owned).toBe(
+        true
+      )
+      expect(f.disposed).not.toHaveBeenCalled()
+    }
+  )
+
+  it('requires an accepted stopped receipt before external-change disposal', async () => {
+    const f = releasable()
+    await f.start()
+    vi.mocked(f.host.stopCore).mockImplementation(async () => ({
+      ...f.report('coreStopped'),
+      sessionId: '11111111-1111-1111-1111-111111111111'
+    }))
+    expect((await f.service.stop({ sessionId: f.service.state().sessionId })).state.owned).toBe(
+      true
+    )
+    expect(f.disposed).not.toHaveBeenCalled()
+  })
+
+  it('does not release a descriptor host through the managed-only capability', async () => {
+    const f = fixture(),
+      disposed = vi.fn(async () => {})
+    f.host.disposeReleased = disposed
+    await f.start()
+    vi.mocked(f.host.release).mockRejectedValue(new Error('failure'))
+    expect((await f.service.stop({ sessionId: f.service.state().sessionId })).state.owned).toBe(
+      true
+    )
+    expect(disposed).not.toHaveBeenCalled()
+  })
+
+  it('keeps explicit stop consent before any managed terminal release', async () => {
+    const f = releasable()
+    await f.start()
+    f.adapters.confirmStop.mockResolvedValue(false)
+    vi.mocked(f.host.release).mockRejectedValue(new Error('failure'))
+    expect((await f.service.stop({ sessionId: f.service.state().sessionId })).status).toBe(
+      'cancelled'
+    )
+    expect(f.host.stopCore).not.toHaveBeenCalled()
+    expect(f.disposed).not.toHaveBeenCalled()
+  })
+
+  it('retains the terminal attempt and retries only that disposal under fresh explicit consent', async () => {
+    const f = releasable()
+    await f.start()
+    vi.mocked(f.host.release).mockRejectedValue(new Error('external protection changed'))
+    f.disposed.mockRejectedValueOnce(new Error('terminal acknowledgement exit pending'))
+    const first = await f.service.stop({ sessionId: f.service.state().sessionId })
+    expect(first.state).toMatchObject({ owned: true, phase: 'uncertain' })
+    expect(f.disposed).toHaveBeenCalledOnce()
+    f.service.invalidatePending()
+    const revokes = vi.mocked(f.host.revokeActivation).mock.calls.length
+    await f.service.inspect()
+    expect(f.host.inspect).not.toHaveBeenCalled()
+    f.adapters.confirmStop.mockResolvedValueOnce(false)
+    expect((await f.service.stop({ sessionId: first.state.sessionId })).status).toBe('cancelled')
+    expect(f.disposed).toHaveBeenCalledOnce()
+    const retried = await f.service.stop({ sessionId: first.state.sessionId })
+    expect(retried.state).toMatchObject({
+      owned: false,
+      phase: 'released',
+      restorationVerified: false
+    })
+    expect(f.host.stopCore).toHaveBeenCalledOnce()
+    expect(f.host.release).toHaveBeenCalledOnce()
+    expect(f.host.verifyRestored).not.toHaveBeenCalled()
+    expect(f.disposed).toHaveBeenCalledTimes(2)
+    expect(f.host.revokeActivation).toHaveBeenCalledTimes(revokes)
+  })
+
+  it('allows ordinary restoration after a strictly denied terminal release and a restored baseline', async () => {
+    const f = releasable()
+    await f.start()
+    vi.mocked(f.host.verifyRestored).mockRejectedValueOnce(new Error('network still differs'))
+    f.disposed.mockRejectedValueOnce(new TunResourcesReleaseDenied())
+    const first = await f.service.stop({ sessionId: f.service.state().sessionId })
+    expect(first.state).toMatchObject({ owned: true, phase: 'uncertain' })
+    expect(f.disposed).toHaveBeenCalledOnce()
+    expect(f.host.dispose).not.toHaveBeenCalled()
+    const second = await f.service.stop({ sessionId: first.state.sessionId })
+    expect(second.status).toBe('restored')
+    expect(second.state).toMatchObject({ owned: false, restorationVerified: true })
+    expect(f.adapters.confirmStop).toHaveBeenCalledTimes(2)
+    expect(f.host.stopCore).toHaveBeenCalledTimes(2)
+    expect(f.host.release).toHaveBeenCalledTimes(2)
+    expect(f.host.verifyRestored).toHaveBeenCalledTimes(2)
+    expect(f.host.dispose).toHaveBeenCalledOnce()
+    expect(f.disposed).toHaveBeenCalledOnce()
+  })
+
+  it('uses terminal resource release only after normal disposal explicitly denies a changed protection baseline', async () => {
+    const f = releasable()
+    await f.start()
+    vi.mocked(f.host.dispose).mockRejectedValueOnce(new TunDisposalDenied())
+    const stopped = await f.service.stop({ sessionId: f.service.state().sessionId })
+    expect(stopped.state).toMatchObject({
+      owned: false,
+      phase: 'released',
+      restorationVerified: false
+    })
+    expect(f.host.stopCore).toHaveBeenCalledOnce()
+    expect(f.host.release).toHaveBeenCalledOnce()
+    expect(f.host.verifyRestored).toHaveBeenCalledOnce()
+    expect(f.host.dispose).toHaveBeenCalledOnce()
+    expect(f.disposed).toHaveBeenCalledOnce()
+  })
+
+  it('keeps unknown normal-disposal failures on the same terminal action', async () => {
+    const f = releasable()
+    await f.start()
+    vi.mocked(f.host.dispose).mockRejectedValueOnce(new Error('normal disposal exit unknown'))
+    const first = await f.service.stop({ sessionId: f.service.state().sessionId })
+    expect(first.state.owned).toBe(true)
+    expect(f.disposed).not.toHaveBeenCalled()
+    const second = await f.service.stop({ sessionId: first.state.sessionId })
+    expect(second.status).toBe('restored')
+    expect(f.host.stopCore).toHaveBeenCalledOnce()
+    expect(f.host.release).toHaveBeenCalledOnce()
+    expect(f.host.verifyRestored).toHaveBeenCalledOnce()
+    expect(f.host.dispose).toHaveBeenCalledTimes(2)
+    expect(f.disposed).not.toHaveBeenCalled()
+  })
+
+  it('discards stale normal-restoration evidence when both terminal actions explicitly deny release', async () => {
+    const f = releasable()
+    await f.start()
+    vi.mocked(f.host.dispose).mockRejectedValueOnce(new TunDisposalDenied())
+    f.disposed.mockRejectedValueOnce(new TunResourcesReleaseDenied())
+    const first = await f.service.stop({ sessionId: f.service.state().sessionId })
+    expect(first.state).toMatchObject({ owned: true, phase: 'uncertain' })
+    expect(f.disposed).toHaveBeenCalledOnce()
+    const second = await f.service.stop({ sessionId: first.state.sessionId })
+    expect(second.status).toBe('restored')
+    expect(f.host.stopCore).toHaveBeenCalledTimes(2)
+    expect(f.host.release).toHaveBeenCalledTimes(2)
+    expect(f.host.verifyRestored).toHaveBeenCalledTimes(2)
+    expect(f.host.dispose).toHaveBeenCalledTimes(2)
+    expect(f.disposed).toHaveBeenCalledOnce()
+  })
+
+  it('allows quit after safe terminal release while preserving uncertain restoration', async () => {
+    const f = releasable()
+    await f.start()
+    vi.mocked(f.host.verifyRestored).mockRejectedValue(new Error('external protection changed'))
+    expect(await f.service.requestClose()).toBe(true)
+    expect(f.adapters.confirmStop).toHaveBeenCalledExactlyOnceWith(expect.anything(), 'quit')
+    expect(f.service.state()).toMatchObject({
+      owned: false,
+      phase: 'released',
+      restorationVerified: false
+    })
+  })
+
+  it('waits for outstanding revocation before attempting terminal disposal', async () => {
+    const f = releasable(),
+      revoked = Promise.withResolvers<void>()
+    await f.start()
+    vi.mocked(f.host.revokeActivation).mockImplementation(() => revoked.promise)
+    vi.mocked(f.host.release).mockImplementation(async () => {
+      f.service.invalidatePending()
+      throw new Error('external protection changed')
+    })
+    const stopped = f.service.stop({ sessionId: f.service.state().sessionId })
+    await vi.waitFor(() => expect(f.host.revokeActivation).toHaveBeenCalledOnce())
+    expect(f.disposed).not.toHaveBeenCalled()
+    revoked.resolve()
+    expect((await stopped).state.owned).toBe(false)
+    expect(f.disposed).toHaveBeenCalledOnce()
+  })
+
+  it('resumes the ordinary core once after a failed startup proves that native resources were released', async () => {
+    const f = releasable(),
+      ordinary = { owned: true },
+      resumed = vi.fn(async () => {}),
+      stopped = vi.fn(async () => {
+        ordinary.owned = false
+        return true
+      }),
+      handoff = createTunHandoff({
+        state: f.service.state,
+        localOwned: () => ordinary.owned,
+        start: f.service.start,
+        stop: f.service.stop
+      })
+    vi.mocked(f.host.startCore).mockRejectedValue(new Error('readiness failed'))
+    vi.mocked(f.host.verifyRestored).mockRejectedValue(new Error('external protection changed'))
+    const prepared = await f.service.prepare(f.request)
+    handoff.remember(prepared.evidenceId, {
+      instanceId: 'fixture-ordinary',
+      httpPort: 18290,
+      recheck: async () => {},
+      recheckResume: async () => {},
+      assertCurrentOwner: vi.fn(),
+      authorizeStop: vi.fn(),
+      authorized: () => true,
+      stopLocal: stopped,
+      resumeLocal: resumed
+    })
+    const started = await handoff.start({ evidenceId: prepared.evidenceId })
+    expect(started.status).toBe('failed')
+    expect(started.state).toMatchObject({
+      owned: false,
+      phase: 'released',
+      restorationVerified: false
+    })
+    expect(stopped).toHaveBeenCalledOnce()
+    expect(resumed).toHaveBeenCalledOnce()
+    expect(f.disposed).toHaveBeenCalledOnce()
+    expect(f.adapters.confirmStop).not.toHaveBeenCalled()
+    expect(await f.service.requestClose()).toBe(true)
+    expect(resumed).toHaveBeenCalledOnce()
   })
 })
 

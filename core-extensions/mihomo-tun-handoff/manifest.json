@@ -1,0 +1,14 @@
+{
+  "commit": "3f27ef39f8c96bbfbc8b0b9bb10f5c9ef60149d8",
+  "overlays": {
+    "adapter/inbound/listen.go": {
+      "sha256": "7016a5a5c5aaae12a7a29d7ed88c1c326064890dd555a1e576fd93421296898e",
+      "upstreamSHA256": "2eca8f9f4528dabccf594a91257af5a25068d3c8685841f8cb86139012d5986f"
+    },
+    "adapter/inbound/relay_tun_handoff_darwin.go": {
+      "sha256": "e9bc9c53c37afb3be71ed0193458712b6d1fa9e4a61303b47c3cce316bdf9847",
+      "upstreamSHA256": null
+    }
+  },
+  "patchSHA256": "a08f4fbdd4cea6170b3cc2f1d7387713e58a58908a804369367c5008c47ff0a6"
+}

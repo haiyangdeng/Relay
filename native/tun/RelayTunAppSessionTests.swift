@@ -192,6 +192,10 @@ private final class SessionFixture {
                         return f.last()
                     }
                     func phase(_ output: [String: Any]) -> String? { (output["observation"] as? [String: Any])?["phase"] as? String }
+                    if scenario == "successful" {
+                        do { _ = try send("disposeReleased"); check(false, "legacy host rejects owned-only disposal") }
+                        catch { check(f.events.isEmpty && !session.canExit, "legacy host rejects owned-only disposal before revoking or acquiring anything") }
+                    }
                     let initial = try send("initialize")
                     check(phase(initial) == (f.prepareFails ? "unknown" : "idle"), scenario + ": initialization uses actual control dispatch")
                     if !f.prepareFails {
@@ -447,7 +451,7 @@ private final class SessionFixture {
                     directory = bundle.directory
                     var identity = stat(); guard lstat(bundle.directory, &identity) == 0 else { throw Injected.unavailable }; directoryIdentity = identity
                     var config = try RelayTunStrictJSON.object(bundle.configuration, limit: 2 * 1024 * 1024), tun = try RelayTunStrictJSON.object(bundle.configuration, limit: 2 * 1024 * 1024)["tun"] as! [String: Any]
-                    tun["file-descriptor"] = 0; tun["recvmsgx"] = true; tun["dns-mode"] = "disabled"
+                    tun["file-descriptor"] = 0; tun["recvmsgx"] = true; tun["dns-mode"] = ""
                     config["tun"] = tun; config["allow-lan"] = false; config["ipv6"] = true
                     for key in ["port", "socks-port", "mixed-port", "redir-port", "tproxy-port"] { config[key] = config[key] ?? 0 }
                     let configs = try data(config)
@@ -635,7 +639,7 @@ private final class SessionFixture {
                     driver.makeManagedCore = { bundle, authorized in
                         coreDirectory = bundle.directory
                         var config = try RelayTunStrictJSON.object(bundle.configuration, limit: 2 * 1024 * 1024), tun = config["tun"] as! [String: Any]
-                        tun["file-descriptor"] = 0; tun["recvmsgx"] = true; tun["dns-mode"] = "disabled"
+                        tun["file-descriptor"] = 0; tun["recvmsgx"] = true; tun["dns-mode"] = ""
                         config["tun"] = tun; config["allow-lan"] = false; config["ipv6"] = true
                         for key in ["port", "socks-port", "mixed-port", "redir-port", "tproxy-port"] { config[key] = config[key] ?? 0 }
                         let configs = try data(config)
@@ -747,7 +751,7 @@ private final class SessionFixture {
                         scenario + ": immutable source remains unchanged and no helper or actual Core is invoked")
                 }
             }
-            for scenario in ["normal", "control-loss", "resource-fails", "lock-fails", "launch-fails", "post-spawn-fails", "readiness-fails", "readiness-retries", "readiness-field-fails", "readiness-child-exits", "readiness-revoked", "readiness-json-fails", "readiness-http-fails", "interface-remains", "baseline-changed", "child-still-running", "interface-recovers", "baseline-recovers", "normal-delayed-interface", "normal-delayed-baseline", "control-loss-delayed-interface", "control-loss-delayed-baseline", "protection-changed", "baseline-read-fails", "interface-read-fails", "clock-frozen", "baseline-after-deadline", "dispose-lock-fails", "restored-interface-changed", "restored-network-changed"] {
+            for scenario in ["normal", "control-loss", "resource-fails", "lock-fails", "launch-fails", "post-spawn-fails", "readiness-fails", "readiness-retries", "readiness-field-fails", "readiness-stack-unavailable", "readiness-child-exits", "readiness-revoked", "readiness-json-fails", "readiness-json-with-stack-diagnostic", "readiness-http-fails", "interface-remains", "baseline-changed", "child-still-running", "interface-recovers", "baseline-recovers", "normal-delayed-interface", "normal-delayed-baseline", "control-loss-delayed-interface", "control-loss-delayed-baseline", "protection-changed", "protection-explicit", "protection-prelaunch", "protection-interface", "protection-network", "protection-child", "protection-read", "protection-lock", "protection-record", "protection-after-restored", "protection-unchanged", "baseline-read-fails", "interface-read-fails", "clock-frozen", "baseline-after-deadline", "dispose-lock-fails", "restored-interface-changed", "restored-network-changed"] {
                 try fixture(managed: true, extra: scenario == "normal" ? ["port": 18080] : [:]) { source, bootstrap in
                     let f = SessionFixture()
                     f.baseline = .init(networkSHA256: String(repeating: "c", count: 64), protectionSHA256: String(repeating: "d", count: 64))
@@ -765,7 +769,7 @@ private final class SessionFixture {
                         directory = bundle.directory
                         var reported = try RelayTunStrictJSON.object(bundle.configuration, limit: 2 * 1024 * 1024)
                         var tun = reported["tun"] as! [String: Any]
-                        tun["file-descriptor"] = 0; tun["recvmsgx"] = true; tun["dns-mode"] = "disabled"
+                        tun["file-descriptor"] = 0; tun["recvmsgx"] = true; tun["dns-mode"] = ""
                         reported["tun"] = tun; reported["allow-lan"] = false; reported["ipv6"] = true
                         for port in ["port", "socks-port", "mixed-port", "redir-port", "tproxy-port"] { reported[port] = reported[port] ?? 0 }
                         let configs = try data(reported)
@@ -775,18 +779,21 @@ private final class SessionFixture {
                                 try bundle.verify()
                             }, hold: {
                                 if scenario == "lock-fails" { throw Injected.unavailable }
+                                if scenario == "protection-prelaunch" {
+                                    currentBaseline = .init(networkSHA256: currentBaseline.networkSHA256, protectionSHA256: String(repeating: "0", count: 64))
+                                }
                             }, launch: { register in
                                 starts += 1
                                 if scenario == "launch-fails" { throw Injected.unavailable }
                                 running = true; visible = true
                                 register(.init(observe: { running ? .running : .exited(0) }, stop: {
                                     stops += 1
-                                    if scenario != "child-still-running" { running = false }
-                                    if !["interface-remains", "interface-recovers"].contains(scenario) && !running { visible = false }
-                                    if ["baseline-changed", "baseline-recovers", "clock-frozen", "baseline-after-deadline"].contains(scenario) {
+                                    if !["child-still-running", "protection-child"].contains(scenario) { running = false }
+                                    if !["interface-remains", "interface-recovers", "protection-interface"].contains(scenario) && !running { visible = false }
+                                    if ["baseline-changed", "baseline-recovers", "clock-frozen", "baseline-after-deadline", "protection-network"].contains(scenario) {
                                         currentBaseline = .init(networkSHA256: String(repeating: "0", count: 64), protectionSHA256: currentBaseline.protectionSHA256)
                                     }
-                                    if scenario == "protection-changed" {
+                                    if scenario.hasPrefix("protection-") && !["protection-after-restored", "protection-unchanged"].contains(scenario) {
                                         currentBaseline = .init(networkSHA256: currentBaseline.networkSHA256, protectionSHA256: String(repeating: "0", count: 64))
                                     }
                                     return .init(waitStatus: 0, forced: false)
@@ -794,7 +801,7 @@ private final class SessionFixture {
                                     reads += 1
                                     if scenario == "readiness-fails" { throw RelayTunCoreReadiness.Failure.resource }
                                     if scenario == "readiness-retries" && reads == 1 { throw RelayTunCoreReadiness.Failure.io(.version, .receive) }
-                                    if scenario == "readiness-field-fails" { throw RelayTunCoreReadiness.Failure.field(.enable) }
+                                    if scenario == "readiness-field-fails" || scenario == "readiness-stack-unavailable" { throw RelayTunCoreReadiness.Failure.field(.enable) }
                                     if scenario == "readiness-child-exits" {
                                         running = false
                                         throw RelayTunCoreReadiness.Failure.field(.enable)
@@ -803,7 +810,7 @@ private final class SessionFixture {
                                         permitted = false
                                         throw RelayTunCoreReadiness.Failure.field(.enable)
                                     }
-                                    if scenario == "readiness-json-fails" { throw RelayTunCoreReadiness.Failure.json(.configs) }
+                                    if scenario == "readiness-json-fails" || scenario == "readiness-json-with-stack-diagnostic" { throw RelayTunCoreReadiness.Failure.json(.configs) }
                                     if scenario == "readiness-http-fails" { throw RelayTunCoreReadiness.Failure.http(.configs) }
                                     if captureReadFails { throw Injected.unavailable }
                                     if endpoint == "configs", let captureMode {
@@ -830,7 +837,7 @@ private final class SessionFixture {
                                     try access.enterWrite()
                                     rulesLock.lock(); defer { rulesLock.unlock() }
                                     rulesWrites += 1; rulesTable = try previous.settingDisabled(index: mutation.index, value: mutation.disabled); return rulesTable
-                                }))
+                                }, startupDiagnostic: { ["readiness-stack-unavailable", "readiness-json-with-stack-diagnostic"].contains(scenario) ? "core.tun.stack.unavailable" : nil }))
                                 if scenario == "post-spawn-fails" { throw Injected.unavailable }
                             }, interfacePresent: {
                                 if stops > 0 && scenario == "interface-read-fails" { throw Injected.unavailable }
@@ -840,7 +847,7 @@ private final class SessionFixture {
                                 }
                                 return visible
                             }, baseline: {
-                                if stops > 0 && scenario == "baseline-read-fails" { throw Injected.unavailable }
+                                if stops > 0 && ["baseline-read-fails", "protection-read"].contains(scenario) { throw Injected.unavailable }
                                 if stops > 0 && scenario.hasSuffix("delayed-baseline") {
                                     recoveryReads += 1
                                     if recoveryReads < 3 {
@@ -849,7 +856,7 @@ private final class SessionFixture {
                                 }
                                 return currentBaseline
                             }, dispose: {
-                                if scenario == "dispose-lock-fails" { throw Injected.unavailable }
+                                if ["dispose-lock-fails", "protection-lock"].contains(scenario) { throw Injected.unavailable }
                                 releases += 1
                             }), recoveryClock: .init(now: { recoveryTime }, pause: {
                                 recoveryPauses += 1
@@ -866,6 +873,15 @@ private final class SessionFixture {
                         frame["version"] = 1; frame["id"] = id; frame["action"] = action
                         try session.accept(JSONSerialization.data(withJSONObject: frame, options: [.sortedKeys])); session.waitForDisposal()
                     }
+                    var releaseRequest = [Int32](repeating: -1, count: 2), releaseResponse = [Int32](repeating: -1, count: 2)
+                    if scenario == "protection-explicit" {
+                        guard pipe(&releaseRequest) == 0, pipe(&releaseResponse) == 0,
+                              let channel = RelayTunRuntimeCapture.Channel(input: releaseRequest[0], output: releaseResponse[1]) else { throw Injected.unavailable }
+                        try session.startRuntimeCapture(channel)
+                    }
+                    defer {
+                        if releaseRequest[1] >= 0 { Darwin.close(releaseRequest[1]); Darwin.close(releaseResponse[0]) }
+                    }
                     try send("initialize")
                     if scenario == "normal" {
                         try send("inspectWorkDirectory")
@@ -873,14 +889,16 @@ private final class SessionFixture {
                               "work directory proof is unavailable before the owned child starts")
                     }
                     try send("startCore")
-                    let failureCodes = ["resource-fails": "managed.resource", "lock-fails": "managed.lock",
+                    let failureCodes = ["resource-fails": "managed.resource", "lock-fails": "managed.lock", "protection-prelaunch": "managed.baseline",
                         "launch-fails": "managed.spawn", "post-spawn-fails": "managed.spawn", "readiness-fails": "readiness.resource",
+                        "readiness-stack-unavailable": "core.tun.stack.unavailable",
                         "readiness-field-fails": "readiness.field.tun.enable", "readiness-child-exits": "readiness.field.tun.enable",
                         "readiness-revoked": "readiness.field.tun.enable",
+                        "readiness-json-with-stack-diagnostic": "readiness.json.configs",
                         "readiness-json-fails": "readiness.json.configs", "readiness-http-fails": "readiness.http.configs"]
                     let failedStart = failureCodes[scenario] != nil
                     check(session.coreStartFailure == failureCodes[scenario], scenario + ": startup failures retain an exact allowlisted stage without private error text")
-                    if ["readiness-json-fails", "readiness-http-fails", "readiness-child-exits", "readiness-revoked"].contains(scenario) {
+                    if ["readiness-json-fails", "readiness-json-with-stack-diagnostic", "readiness-http-fails", "readiness-child-exits", "readiness-revoked"].contains(scenario) {
                         check(reads == 1, scenario + ": terminal parse failure, child exit or revoked consent does not retry a control read")
                     }
                     if scenario == "readiness-retries" {
@@ -1004,8 +1022,55 @@ private final class SessionFixture {
                         check(rulesClosed && stops == 0 && (f.last()["observation"] as? [String: Any])?["phase"] as? String == "active",
                               "actual AppSession rules EOF keeps original lifecycle/control active without stop or recovery")
                     }
-                    let recovered = !["interface-remains", "baseline-changed", "child-still-running", "protection-changed", "baseline-read-fails", "interface-read-fails", "clock-frozen", "baseline-after-deadline", "dispose-lock-fails", "restored-interface-changed", "restored-network-changed"].contains(scenario)
-                    if scenario == "normal" || scenario.hasPrefix("normal-delayed-") {
+                    let releasedUnverified = ["protection-changed", "protection-explicit", "protection-after-restored", "protection-prelaunch"].contains(scenario)
+                    let recovered = !scenario.hasPrefix("protection-") && !["interface-remains", "baseline-changed", "child-still-running", "baseline-read-fails", "interface-read-fails", "clock-frozen", "baseline-after-deadline", "dispose-lock-fails", "restored-interface-changed", "restored-network-changed"].contains(scenario)
+                    if scenario.hasPrefix("protection-") {
+                        if scenario == "protection-changed" { session.inputEnded(); session.waitForDisposal() }
+                        else {
+                            try send("stopCore"); try send("release")
+                            if scenario == "protection-after-restored" {
+                                try send("verifyRestored")
+                                check((f.last()["observation"] as? [String: Any])?["phase"] as? String == "restored", "owned release: prior restoration is independently verified")
+                                currentBaseline = .init(networkSHA256: currentBaseline.networkSHA256, protectionSHA256: String(repeating: "0", count: 64))
+                            }
+                            if scenario == "protection-record" { try Data("existing-evidence".utf8).write(to: URL(fileURLWithPath: source + "/release.json")) }
+                            let external = currentBaseline
+                            try send("disposeReleased")
+                            check(f.last()["closed"] as? Bool == releasedUnverified && currentBaseline == external,
+                                  scenario + ": explicit close never changes external proxy, route or DNS observations")
+                            if releasedUnverified {
+                                check(f.last()["restorationVerified"] as? Bool == false && f.last()["reason"] as? String == "external-protection-changed" && f.last()["stateDisposition"] as? String == "retained-evidence",
+                                      scenario + ": bound close distinguishes released ownership from network restoration")
+                            }
+                        }
+                        check(session.canExit == releasedUnverified, scenario + ": only positive owned release permits exit")
+                        if releasedUnverified {
+                            let record = try RelayTunStrictJSON.object(Data(contentsOf: URL(fileURLWithPath: source + "/release.json")), limit: 4096)
+                            check(Set(record.keys) == Set(["version", "sessionId", "evidenceSHA256", "runtimeConfigurationSHA256", "baseline", "status", "ownedRecoveryRetained", "restorationVerified", "reason"]) &&
+                                  record["status"] as? String == "resources-released" && record["restorationVerified"] as? Bool == false && record["ownedRecoveryRetained"] as? Bool == false &&
+                                  record["sessionId"] as? String == binding["sessionId"] as? String && !FileManager.default.fileExists(atPath: source + "/recovery.json"),
+                                  scenario + ": private terminal proof is distinct from restored recovery and contains no runtime secrets")
+                            let bytes = try Data(contentsOf: URL(fileURLWithPath: source + "/release.json"))
+                            session.inputEnded(); session.waitForDisposal()
+                            check(try Data(contentsOf: URL(fileURLWithPath: source + "/release.json")) == bytes,
+                                  scenario + ": repeated EOF retains the exact write-once evidence")
+                        } else if scenario == "protection-record" {
+                            check(try Data(contentsOf: URL(fileURLWithPath: source + "/release.json")) == Data("existing-evidence".utf8),
+                                  "owned release: failed evidence publication cannot overwrite or report success")
+                        } else {
+                            check(!FileManager.default.fileExists(atPath: source + "/release.json"),
+                                  scenario + ": uncertain child, device, route/DNS, read or lock produces no terminal release proof")
+                        }
+                        if scenario == "protection-explicit" {
+                            var bytes = [UInt8](repeating: 0, count: 4096), eof = false
+                            for _ in 0..<4 {
+                                var poller = pollfd(fd: releaseResponse[0], events: Int16(POLLIN), revents: 0)
+                                guard poll(&poller, 1, 1000) > 0 else { break }
+                                if Darwin.read(releaseResponse[0], &bytes, bytes.count) == 0 { eof = true; break }
+                            }
+                            check(eof, "owned release: optional capture pipe cancellation drains before close acknowledgement")
+                        }
+                    } else if scenario == "normal" || scenario.hasPrefix("normal-delayed-") {
                         try send("stopCore")
                         if scenario == "normal" {
                             try send("inspectWorkDirectory")
@@ -1061,7 +1126,7 @@ private final class SessionFixture {
                         }
                     }
                     if let code = session.recoveryFailureCode { recoveryDiagnosticCodes.insert(code) }
-                    let beforeLaunch = ["resource-fails", "lock-fails"].contains(scenario)
+                    let beforeLaunch = ["resource-fails", "lock-fails", "protection-prelaunch"].contains(scenario)
                     if scenario.contains("delayed-") {
                         check(recoveryReads >= 3 && recoveryPauses == 2 && session.recoveryFailureCode == nil,
                               scenario + ": finite read-only observation completes without issuing an extra shutdown")
@@ -1070,7 +1135,7 @@ private final class SessionFixture {
                         check(recoveryPauses == 100 && session.recoveryFailureCode == (scenario == "interface-remains" ? "restore.interface-deadline" : "restore.network-deadline"),
                               scenario + ": fixed observation budget expires with a precise code and retained ownership")
                     }
-                    let recoveryCodes = ["protection-changed": "restore.protection", "baseline-read-fails": "restore.baseline-read",
+                    let recoveryCodes = ["baseline-read-fails": "restore.baseline-read",
                         "interface-read-fails": "restore.interface-read", "clock-frozen": "restore.network-deadline",
                         "baseline-after-deadline": "restore.network-deadline", "dispose-lock-fails": "dispose.lock"]
                     if let code = recoveryCodes[scenario] {
@@ -1080,8 +1145,8 @@ private final class SessionFixture {
                     }
                     check(starts == (beforeLaunch ? 0 : 1) && stops == (beforeLaunch || scenario == "launch-fails" ? 0 : 1),
                           scenario + ": managed recovery never retries launch or signals an unowned process")
-                    check(releases == (recovered ? 1 : 0),
-                          scenario + ": installation ownership is released only after verified recovery")
+                    check(releases == (recovered || releasedUnverified || scenario == "protection-record" ? 1 : 0),
+                          scenario + ": installation closes only after positive owned recovery; evidence failure still refuses successful exit")
                     if let directory {
                         check(FileManager.default.fileExists(atPath: directory) == (!recovered && scenario != "dispose-lock-fails"),
                               scenario + ": unverified recovery retains the private runtime")

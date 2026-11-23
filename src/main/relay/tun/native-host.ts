@@ -2,6 +2,8 @@ import { tunDigest } from '../../../shared/relay/tun'
 import { parseTunHostFrame } from './wire-json'
 import {
   validateTunHostObservation,
+  TunResourcesReleaseDenied,
+  TunDisposalDenied,
   type TunHostObservation,
   type TunSessionBinding,
   type TunSessionHost,
@@ -14,6 +16,7 @@ type Action =
       keyof TunSessionHost,
       | 'dispose'
       | 'runtimeReader'
+      | 'proxyGroups'
       | 'rulesChannel'
       | 'resourcesChannel'
       | 'resourceInbox'
@@ -21,7 +24,8 @@ type Action =
       | 'smartToolsChannel'
     >
   | 'dispose'
-type ObservingAction = Exclude<Action, 'revokeActivation' | 'dispose' | 'inspectWorkDirectory'>
+type ClosingAction = 'dispose' | 'disposeReleased'
+type ObservingAction = Exclude<Action, 'revokeActivation' | ClosingAction | 'inspectWorkDirectory'>
 export interface TunHostIO {
   write(frame: string): void
   end(): void
@@ -41,7 +45,8 @@ const recovery = new Set<Action>([
   'stopCore',
   'release',
   'verifyRestored',
-  'dispose'
+  'dispose',
+  'disposeReleased'
 ])
 const expected: Partial<Record<ObservingAction, TunHostObservation['phase']>> = {
   initialize: 'idle',
@@ -113,9 +118,10 @@ export function createTunHostChannel(
     restored = false,
     closing = false,
     closed = false,
-    disposeRequested = false,
+    disposeRequested: ClosingAction | undefined,
     disposalRestorationVerified = false,
     inputEnded = false,
+    coreStopped = false,
     stateDisposition: Response['stateDisposition'],
     buffer = Buffer.alloc(0),
     exitWaiter: { resolve(): void; reject(error: Error): void } | undefined
@@ -171,6 +177,39 @@ export function createTunHostChannel(
           ? { path: proof.path, device: proof.device, inode: proof.inode }
           : null
       return { version: 1, id, action, workDirectory }
+    }
+    if (action === 'disposeReleased') {
+      const success = value.closed === true
+      if (
+        execution !== 'core-managed' ||
+        Object.keys(value).sort().join(',') !==
+          [
+            'version',
+            'id',
+            'action',
+            ...Object.keys(binding),
+            'closed',
+            ...(success ? ['restorationVerified', 'reason', 'stateDisposition'] : [])
+          ]
+            .sort()
+            .join(',') ||
+        typeof value.closed !== 'boolean' ||
+        value.sessionId !== binding.sessionId ||
+        value.evidenceSHA256 !== binding.evidenceSHA256 ||
+        value.runtimeConfigurationSHA256 !== binding.runtimeConfigurationSHA256 ||
+        (success &&
+          (value.restorationVerified !== false ||
+            value.reason !== 'external-protection-changed' ||
+            value.stateDisposition !== 'retained-evidence'))
+      )
+        throw error()
+      return {
+        version: 1,
+        id,
+        action,
+        acknowledged: success,
+        ...(success ? { stateDisposition: 'retained-evidence' as const } : {})
+      }
     }
     if (action === 'revokeActivation' || action === 'dispose') {
       const flag = action === 'dispose' ? 'closed' : 'revoked'
@@ -245,7 +284,13 @@ export function createTunHostChannel(
           // replay its operation after a timeout. The terminal close ack may
           // still prove closure of an already-restored session; no further
           // network command can have followed that dispose request.
-          if (response.action === 'dispose' && response.acknowledged) closed = true
+          if (
+            (response.action === 'dispose' || response.action === 'disposeReleased') &&
+            response.acknowledged
+          ) {
+            closed = true
+            stateDisposition = response.stateDisposition
+          }
           retired.delete(response.id)
           continue
         }
@@ -253,14 +298,27 @@ export function createTunHostChannel(
         clearTimeout(entry.timer)
         if (response.acknowledged === false) {
           markUncertain()
-          entry.reject(error())
+          // A bound negative reply proves this command did not close the host.
+          // Keep unknown/late outcomes terminal, but let a definite refusal
+          // return to normal restoration after its cause has been resolved.
+          if (entry.action === 'disposeReleased' || entry.action === 'dispose')
+            disposeRequested = undefined
+          entry.reject(
+            entry.action === 'disposeReleased'
+              ? new TunResourcesReleaseDenied()
+              : entry.action === 'dispose'
+                ? new TunDisposalDenied()
+                : error()
+          )
           continue
         }
         if (entry.action === 'initialize') initialized = true
         if (response.observation?.phase === 'unknown') markUncertain()
         if (entry.action === 'verifyRestored' && response.observation?.phase === 'restored')
           restored = true
-        if (entry.action === 'dispose') {
+        if (entry.action === 'stopCore' && response.observation?.phase === 'coreStopped')
+          coreStopped = true
+        if (entry.action === 'dispose' || entry.action === 'disposeReleased') {
           closed = true
           stateDisposition = response.stateDisposition
           for (const [id, read] of pending) {
@@ -295,13 +353,14 @@ export function createTunHostChannel(
         ended ||
         faulted ||
         closed ||
-        (closing && action !== 'dispose') ||
-        (disposeRequested && action !== 'dispose') ||
+        (closing && action !== 'dispose' && action !== 'disposeReleased') ||
+        (disposeRequested !== undefined && action !== disposeRequested) ||
+        (action === 'disposeReleased' && (execution !== 'core-managed' || !coreStopped)) ||
         occupied ||
         (action !== 'initialize' && !initialized && !recovery.has(action)) ||
         (uncertain && !recovery.has(action)) ||
-        (action === 'dispose' &&
-          ((!restored && !disposalRestorationVerified) ||
+        ((action === 'dispose' || action === 'disposeReleased') &&
+          ((action === 'dispose' && !restored && !disposalRestorationVerified) ||
             [...pending.values()].some((entry) => entry.action !== 'inspectWorkDirectory') ||
             [...retired.values()].some((action) => action !== 'inspectWorkDirectory')))
       ) {
@@ -321,9 +380,9 @@ export function createTunHostChannel(
         )
       pending.set(id, { action, resolve, reject, timer })
       if (!readDirectory && !recovery.has(action)) restored = false
-      if (action === 'dispose') {
-        disposeRequested = true
-        disposalRestorationVerified = true
+      if (action === 'dispose' || action === 'disposeReleased') {
+        disposeRequested = action
+        disposalRestorationVerified = action === 'dispose'
       }
       try {
         const nonce = action === 'dispose' ? stateCleanupProof?.() : undefined
@@ -346,6 +405,46 @@ export function createTunHostChannel(
     const response = await request(action)
     if (!response.observation) throw error()
     return response.observation
+  }
+  const close = async (action: ClosingAction): Promise<void> => {
+    if (closing || (disposeRequested !== undefined && disposeRequested !== action)) throw error()
+    // A native close acknowledgement alone does not prove its process and
+    // all inherited FD references exited. Also wait for the owned IO close.
+    closing = true
+    try {
+      // An acknowledged close is bound to the earlier verified restoration.
+      // If process exit was slow, retry only its exit observation, never a
+      // command against an ended channel or a previously restored network.
+      if (!closed) await request(action)
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          markUncertain()
+          reject(error())
+        }, timeout)
+        exitWaiter = {
+          resolve: () => {
+            clearTimeout(timer)
+            resolve()
+          },
+          reject: (failure) => {
+            clearTimeout(timer)
+            reject(failure)
+          }
+        }
+        if (faulted) exitWaiter.reject(error())
+        else if (ended) exitWaiter.resolve()
+        else if (!inputEnded) {
+          try {
+            inputEnded = true
+            io.end()
+          } catch {
+            fail()
+          }
+        }
+      })
+    } finally {
+      closing = false
+    }
   }
   return {
     ready: observe('initialize'),
@@ -370,45 +469,7 @@ export function createTunHostChannel(
     async revokeActivation(): Promise<void> {
       await request('revokeActivation')
     },
-    async dispose(): Promise<void> {
-      if (closing) throw error()
-      // A native close acknowledgement alone does not prove its process and
-      // all inherited FD references exited. Also wait for the owned IO close.
-      closing = true
-      try {
-        // An acknowledged close is bound to the earlier verified restoration.
-        // If process exit was slow, retry only its exit observation, never a
-        // command against an ended channel or a previously restored network.
-        if (!closed) await request('dispose')
-        await new Promise<void>((resolve, reject) => {
-          const timer = setTimeout(() => {
-            markUncertain()
-            reject(error())
-          }, timeout)
-          exitWaiter = {
-            resolve: () => {
-              clearTimeout(timer)
-              resolve()
-            },
-            reject: (failure) => {
-              clearTimeout(timer)
-              reject(failure)
-            }
-          }
-          if (faulted) exitWaiter.reject(error())
-          else if (ended) exitWaiter.resolve()
-          else if (!inputEnded) {
-            try {
-              inputEnded = true
-              io.end()
-            } catch {
-              fail()
-            }
-          }
-        })
-      } finally {
-        closing = false
-      }
-    }
+    dispose: () => close('dispose'),
+    ...(execution === 'core-managed' ? { disposeReleased: () => close('disposeReleased') } : {})
   }
 }

@@ -69,4 +69,5 @@ final class RelayTunRuntimeResourcesChannel {
     }
     func start() { engine.start() }
     func invalidate() { engine.invalidate() }
+    func invalidateAndDrain() -> Bool { engine.invalidateAndDrain() }
 }

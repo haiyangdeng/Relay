@@ -56,7 +56,7 @@ require_idle() {
     proxy_action=
     core_revision=
     processes=$(/bin/ps -axo comm=) || fail '无法检查运行进程。'
-    if printf '%s\n' "$processes" | /usr/bin/grep -Eq '\.app/Contents/(MacOS/Relay$|Frameworks/Relay Helper|Resources/relay/.*/mihomo$)|/Relay/(TunManaged|Tun)/|/Relay-Preview/(Core|CoreOwner|NativeRuntime)/|/Relay(CoreOwner|TunClient|TunHelper|Browser)$'; then
+    if printf '%s\n' "$processes" | /usr/bin/grep -Eq '\.app/Contents/(MacOS/Relay$|Frameworks/Relay Helper|Resources/relay/.*/mihomo$)|/Relay/(TunManaged|Tun)/|/Relay-Preview/(Core|CoreOwner|NativeRuntime|Variants/variants)/|/Relay(CoreOwner|TunClient|TunHelper|Browser)$'; then
         fail 'Relay 或其后台核心仍在运行。请通过 Relay 菜单退出后再卸载。'
     fi
     for record in "$user_state/CoreOwner/.session" "$user_state/Desktop Login/state.json"; do
@@ -130,13 +130,18 @@ inspect() {
         fail '发现旧版 Relay TUN 安装记录或服务，请先用其原配卸载器处理。'
     fi
     if present "$tun"; then
-        /usr/bin/xcode-select -p >/dev/null 2>&1 || fail '现有 TUN 卸载工具需要可用的 macOS Command Line Tools。'
         root_directory "$tun"
         root_file "$tun/installation.json" 644
         case "$(value "$tun/installation.json" role)" in core-managed-v1|core-managed-v2) ;; *) fail 'TUN 组件类型未知。';; esac
         [ "$(value "$tun/installation.json" clientUID)" = "$user_uid" ] || fail 'TUN 组件属于其他用户。'
         root_file "$tun/uninstall.py" 755
         [ "$(digest "$tun/uninstall.py")" = "$(value "$tun/installation.json" uninstallerSHA256)" ] || fail 'TUN 卸载器摘要不匹配。'
+        IFS= read -r tun_interpreter < "$tun/uninstall.py"
+        case "$tun_interpreter" in
+            '#!/bin/sh') ;; # Integrated package: system tools only.
+            '#!/usr/bin/python3') /usr/bin/xcode-select -p >/dev/null 2>&1 || fail '旧版 TUN 卸载工具需要可用的 macOS Command Line Tools。';;
+            *) fail 'TUN 卸载器入口未知。';;
+        esac
         tun_digest=$(digest "$tun/installation.json")
         tun_present=yes
     fi

@@ -98,6 +98,7 @@ function fixture() {
   const invoke = vi.fn(async (channel: string): Promise<unknown> => {
     if (channel === 'relaySystemProxyDraftRead') return structuredClone(state.draft)
     if (channel === 'relaySystemProxyInspect') return structuredClone(state.report)
+    if (channel === 'relayEnsureSystemProxyListener') return { httpPort: 18191 }
     throw new Error(`Unexpected IPC: ${channel}`)
   })
   vi.stubGlobal('window', {
@@ -246,6 +247,117 @@ describe('System proxy panel visibility lifecycle (injected hooks/IPC)', () => {
     expect(f.find('Relay 系统代理').isDisabled).toBe(false)
     f.onlyReads()
   })
+  it('updates the switch on a main-process change without rereading or writing system settings', async () => {
+    const f = fixture()
+    await f.flush()
+    expect(f.find('Relay 系统代理').isSelected).toBe(false)
+    f.invoke.mockImplementation(async (channel) => {
+      if (channel !== 'relaySystemProxyState') throw new Error('Unexpected ' + channel)
+      return {
+        pending: false,
+        observed: true,
+        report: { ...f.state.report, status: 'active', recordID: 'record', canRestore: true }
+      }
+    })
+    f.emit('controledMihomoConfigUpdated')
+    await f.flush()
+    expect(f.find('Relay 系统代理').isSelected).toBe(true)
+    expect(f.find('Relay 系统代理').isDisabled).toBe(false)
+    expect(f.calls('relaySystemProxyInspect')).toBe(1)
+    expect(f.calls('relaySystemProxyExecute')).toBe(0)
+  })
+  it('applies system proxy through active TUN without starting an ordinary core', async () => {
+    const f = fixture()
+    await f.flush()
+    const read = f.invoke.getMockImplementation()
+    if (!read) throw new Error('Missing fixture')
+    f.invoke.mockImplementation(async (channel) => {
+      if (channel === 'relayEnsureSystemProxyListener') return { httpPort: 7892 }
+      if (channel === 'relaySystemProxyPrepare')
+        return {
+          action: 'apply',
+          evidenceId: 'plan',
+          report: { ...f.state.report, canApply: true }
+        }
+      if (channel === 'relaySystemProxyExecute')
+        return {
+          status: 'applied',
+          report: { ...f.state.report, status: 'applied', recordID: 'record' },
+          warnings: []
+        }
+      if (channel === 'relaySystemProxyCancel') return undefined
+      return read(channel)
+    })
+    ;(f.find('应用设置').onPress as () => void)()
+    await f.flush()
+    expect(f.calls('relaySystemProxyExecute')).toBe(1)
+    expect(f.calls('relayLocalProxyState')).toBe(0)
+    expect(f.invoke).toHaveBeenCalledWith(
+      'relaySystemProxyPrepare',
+      expect.objectContaining({ port: 7892 })
+    )
+  })
+
+  it('accepts the first click during its initial read and applies once after settings arrive', async () => {
+    const f = fixture(),
+      nativeRead = deferred<unknown>()
+    const read = f.invoke.getMockImplementation()
+    if (!read) throw new Error('Missing fixture')
+    f.invoke.mockImplementation(async (channel) => {
+      if (channel === 'relaySystemProxyInspect') return nativeRead.promise
+      if (channel === 'relayEnsureSystemProxyListener') return { httpPort: 7892 }
+      if (channel === 'relaySystemProxyPrepare')
+        return {
+          action: 'apply',
+          evidenceId: 'proof',
+          report: { ...f.state.report, canApply: true }
+        }
+      if (channel === 'relaySystemProxyExecute')
+        return {
+          status: 'applied',
+          report: { ...f.state.report, status: 'applied', recordID: 'r', canRestore: true },
+          warnings: []
+        }
+      return read(channel)
+    })
+    await f.flush()
+    expect(f.find('Relay 系统代理').isDisabled).toBe(false)
+    const enable = f.find('Relay 系统代理').onValueChange as (value: boolean) => void
+    enable(true)
+    enable(true)
+    await f.flush()
+    expect(f.find('Relay 系统代理').isDisabled).toBe(true)
+    expect(f.calls('relaySystemProxyPrepare')).toBe(0)
+    nativeRead.resolve(f.state.report)
+    await f.flush()
+    expect(f.find('Relay 系统代理').isSelected).toBe(true)
+    expect(
+      f.invoke.mock.calls.filter(([channel]) => channel === 'relayEnsureSystemProxyListener')
+    ).toEqual([['relayEnsureSystemProxyListener']])
+    expect(f.calls('relaySystemProxyExecute')).toBe(1)
+  })
+
+  it('allows one click while opening a listener and can retry directly after a startup error', async () => {
+    const f = fixture(),
+      waiting = deferred<unknown>()
+    await f.flush()
+    const read = f.invoke.getMockImplementation()
+    if (!read) throw new Error('Missing fixture')
+    f.invoke.mockImplementation(async (channel) => {
+      if (channel === 'relayEnsureSystemProxyListener') return waiting.promise
+      return read(channel)
+    })
+    const enable = f.find('Relay 系统代理').onValueChange as (value: boolean) => void
+    enable(true)
+    enable(true)
+    await f.flush()
+    expect(f.find('Relay 系统代理').isDisabled).toBe(true)
+    expect(f.calls('relayEnsureSystemProxyListener')).toBe(1)
+    waiting.resolve(undefined)
+    await f.flush()
+    expect(f.find('Relay 系统代理').isDisabled).toBe(false)
+    expect(f.calls('relaySystemProxyExecute')).toBe(0)
+  })
   it('does not replay a cancelled apply when visibility returns during confirmation', async () => {
     const f = fixture(),
       execution = deferred<unknown>()
@@ -253,15 +365,6 @@ describe('System proxy panel visibility lifecycle (injected hooks/IPC)', () => {
     const read = f.invoke.getMockImplementation()
     if (!read) throw new Error('Missing read fixture')
     f.invoke.mockImplementation(async (channel) => {
-      if (channel === 'relayLocalProxyState')
-        return {
-          phase: 'running',
-          owned: true,
-          pending: false,
-          uncertain: false,
-          traffic: 'listening',
-          httpPort: 18191
-        }
       if (channel === 'relaySystemProxyPrepare')
         return {
           action: 'apply',

@@ -2,7 +2,7 @@ import type { EventEmitter } from 'events'
 import { spawn, execFile } from 'child_process'
 import { rm } from 'fs/promises'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { probeDelayURL } from '../../../shared/relay/isolated-probes'
+import { probeDelayURL, type IsolatedProbeDelay } from '../../../shared/relay/isolated-probes'
 import { startOwnedCore } from '../core/owned-runtime'
 import { isolatedProbeConfiguration } from './probe-configuration'
 import { startIsolatedProbe } from './probe-runtime'
@@ -410,7 +410,12 @@ describe('Actual isolated probe and owned-core launch integration with synthetic
   })
 })
 
-function groupFixture(count: number, badNodes = false, target = 'GROUP') {
+function groupFixture(
+  count: number,
+  badNodes = false,
+  target = 'GROUP',
+  groups?: { name: string; type: string; proxies: string[] }[]
+) {
   const nodes = Array.from({ length: count }, (_, index) => ({
     name: `node-${index}`,
     type: 'socks5',
@@ -422,10 +427,10 @@ function groupFixture(count: number, badNodes = false, target = 'GROUP') {
     nodes[1].type = 'unsupported-protocol'
     nodes[2].server = 'unresolvable.example.com'
   }
-  let text = JSON.stringify({
-    proxies: nodes,
-    'proxy-groups': [{ name: 'GROUP', type: 'select', proxies: nodes.map((row) => row.name) }]
-  })
+  const savedGroups = groups ?? [
+    { name: 'GROUP', type: 'select', proxies: nodes.map((row) => row.name) }
+  ]
+  let text = JSON.stringify({ proxies: nodes, 'proxy-groups': savedGroups })
   const service = createIsolatedProbes({
     context,
     resourceRoot: async () => '/fixture/resources',
@@ -436,7 +441,13 @@ function groupFixture(count: number, badNodes = false, target = 'GROUP') {
         ...request.profile,
         name: 'Synthetic group',
         createdAt: '2026-11-10T00:00:00Z',
-        summary: { proxies: count, groups: 1, rules: 0, proxyProviders: 0, ruleProviders: 0 }
+        summary: {
+          proxies: count,
+          groups: savedGroups.length,
+          rules: 0,
+          proxyProviders: 0,
+          ruleProviders: 0
+        }
       },
       text,
       revision: 'c'.repeat(64)
@@ -447,24 +458,73 @@ function groupFixture(count: number, badNodes = false, target = 'GROUP') {
     change: () => {
       text = text.replace('1080', '1081')
     },
-    prepare: () => service.prepare({ ...request, kind: 'groupDelay', target }, () => {})
+    prepare: (delay?: IsolatedProbeDelay, group = target) =>
+      service.prepare(
+        { ...request, kind: 'groupDelay', target: group, ...(delay ? { delay } : {}) },
+        () => {}
+      )
   }
 }
 const delayRequests = () => f.requests.filter((row) => /^\/proxies\/[^/]+\/delay\?/u.test(row.path))
 
 describe('Whole static group measurement through the real service and launch chain', () => {
-  it('refreshes synthetic GLOBAL through the real service without a saved GLOBAL or active-core writes', async () => {
-    const { service, prepare } = groupFixture(38, false, 'GLOBAL')
-    const plan = await prepare()
-    const result = await service.run({ evidenceId: plan.evidenceId }, () => {})
-    expect(plan.nodes).toHaveLength(38)
-    expect(result.measurements).toHaveLength(38)
-    expect(result.measurements.every((row) => row.milliseconds === 178)).toBe(true)
-    expect(new Set(delayRequests().map((row) => row.path)).size).toBe(38)
+  it.each([38, 100])(
+    'refreshes %i direct static nodes plus a child-group result for synthetic GLOBAL',
+    async (count) => {
+      const { service, prepare } = groupFixture(count, false, 'GLOBAL')
+      const plan = await prepare()
+      const result = await service.run({ evidenceId: plan.evidenceId }, () => {})
+      const nodes = Array.from({ length: count }, (_, index) => `node-${index}`)
+      expect(plan.nodes).toEqual([...nodes, 'GROUP'])
+      expect(result.measurements.map((row) => row.name)).toEqual(plan.nodes)
+      expect(result.measurements.find((row) => row.name === 'GROUP')).toMatchObject({
+        milliseconds: null,
+        error: expect.any(String)
+      })
+      expect(
+        result.measurements
+          .filter((row) => row.name !== 'GROUP')
+          .every((row) => row.milliseconds === 178)
+      ).toBe(true)
+      expect(
+        delayRequests()
+          .map((row) => row.path.split('?')[0])
+          .sort()
+      ).toEqual(nodes.map((node) => `/proxies/${node}/delay`).sort())
+      expect(f.requests.every((row) => row.method === 'GET')).toBe(true)
+      expect(spawn).toHaveBeenCalledOnce()
+      expect(f.stop).toHaveBeenCalledOnce()
+      expect(f.release).toHaveBeenCalledOnce()
+    }
+  )
+  it('dispatches only direct members of the requested group, preserving shared names and following one child selection', async () => {
+    const groups = [
+      { name: 'Left', type: 'select', proxies: ['node-0', 'node-1', 'Child'] },
+      { name: 'Right', type: 'select', proxies: ['node-1', 'node-2'] },
+      { name: 'Child', type: 'select', proxies: ['node-3', 'node-4'] }
+    ]
+    const { service, prepare } = groupFixture(6, false, 'Left', groups)
+    const delay = { url: probeDelayURL, timeout: 5000, selections: { Child: 'node-3' } }
+    const targets = () => delayRequests().map((row) => row.path.split('?')[0])
+    const left = await prepare({ ...delay, members: ['node-1', 'Child'] })
+    expect(left.nodes).toEqual(['node-1', 'Child'])
+    const first = await service.run({ evidenceId: left.evidenceId }, () => {})
+    expect(first.measurements).toEqual([
+      { name: 'node-1', milliseconds: 178 },
+      { name: 'Child', milliseconds: 178 }
+    ])
+    expect(targets().sort()).toEqual(['/proxies/node-1/delay', '/proxies/node-3/delay'])
+    const firstCount = targets().length
+    await expect(prepare({ ...delay, members: ['node-2'] })).rejects.toThrow('组成员已变化')
+    expect(targets()).toHaveLength(firstCount)
+    const right = await prepare(delay, 'Right')
+    const second = await service.run({ evidenceId: right.evidenceId }, () => {})
+    expect(second.measurements.map((row) => row.name)).toEqual(['node-1', 'node-2'])
+    expect(targets().slice(firstCount).sort()).toEqual([
+      '/proxies/node-1/delay',
+      '/proxies/node-2/delay'
+    ])
     expect(f.requests.every((row) => row.method === 'GET')).toBe(true)
-    expect(spawn).toHaveBeenCalledOnce()
-    expect(f.stop).toHaveBeenCalledOnce()
-    expect(f.release).toHaveBeenCalledOnce()
   })
   it.each([38, 100])(
     'measures all %i members once on one temporary core with at most five simultaneous requests',

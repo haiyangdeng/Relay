@@ -22,12 +22,18 @@ export function RelayCachedProxyGroup({
   group,
   profile,
   locked,
+  selectedMember,
+  canSelect,
+  onSelect,
   beginProbe,
   endProbe
 }: {
   group: CachedProxyGroup
   profile: RelayStoredProfile
   locked: boolean
+  selectedMember?: string
+  canSelect(member: string): boolean
+  onSelect(member: string): void
   beginProbe(): boolean
   endProbe(): void
 }): React.JSX.Element {
@@ -55,7 +61,7 @@ export function RelayCachedProxyGroup({
   const members = group.members.filter((member) =>
     member.name.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase())
   )
-  const nestedMeasurements = [...measurements].filter(
+  const additionalMembers = [...measurements].filter(
     ([name]) => !group.members.some((member) => member.name === name)
   )
   const test = async (): Promise<void> => {
@@ -137,7 +143,7 @@ export function RelayCachedProxyGroup({
           <span className="block truncate text-sm font-medium">{group.name}</span>
           <span className="text-default-500 text-xs">
             {group.typeLabel} · {search ? `${members.length} / ` : ''}
-            {group.totalMembers} 个声明成员
+            {group.totalMembers} 个声明成员{selectedMember ? ` · 已选 ${selectedMember}` : ''}
           </span>
         </button>
         <div className="flex items-center ml-auto">
@@ -151,7 +157,7 @@ export function RelayCachedProxyGroup({
               setOpen(true)
             }}
           />
-          <span title="缓存没有当前运行节点，使用此配置后可定位。">
+          <span title="代理运行后可定位当前节点。">
             <Button
               aria-label={`定位 ${group.name} 当前节点`}
               isIconOnly
@@ -194,9 +200,13 @@ export function RelayCachedProxyGroup({
               const measurement = measurements.get(member.name)
               const delay = measurement?.milliseconds
               return (
-                <div
+                <button
                   key={member.name}
-                  className="flex min-w-0 items-center justify-between gap-2 rounded-lg bg-default-100 px-3 py-2 text-sm"
+                  type="button"
+                  aria-pressed={selectedMember === member.name}
+                  disabled={locked || !canSelect(member.name)}
+                  onClick={() => onSelect(member.name)}
+                  className="flex min-w-0 items-center justify-between gap-2 rounded-lg bg-default-100 px-3 py-2 text-left text-sm aria-pressed:bg-primary/20 aria-pressed:ring-1 aria-pressed:ring-primary"
                   title={member.name}
                 >
                   <span className="truncate">{member.name}</span>
@@ -218,7 +228,7 @@ export function RelayCachedProxyGroup({
                             ? '未解析'
                             : '未测速'}
                   </span>
-                </div>
+                </button>
               )
             })}
           </div>
@@ -230,10 +240,10 @@ export function RelayCachedProxyGroup({
               {group.unresolvedReasons.join('；')}。
             </p>
           )}
-          {nestedMeasurements.length > 0 && (
-            <div className="px-3 pb-3 text-xs space-y-1" aria-label="组内子节点测速结果">
-              <p className="text-default-500">组内子节点测速</p>
-              {nestedMeasurements.map(([name, measurement]) => (
+          {additionalMembers.length > 0 && (
+            <div className="px-3 pb-3 text-xs space-y-1" aria-label="组内其他直属成员测速结果">
+              <p className="text-default-500">组内其他直属成员</p>
+              {additionalMembers.map(([name, measurement]) => (
                 <div key={name} className="flex justify-between gap-2">
                   <span className="truncate">{name}</span>
                   <span

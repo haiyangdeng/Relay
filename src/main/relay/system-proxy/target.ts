@@ -3,7 +3,9 @@ import type { SystemProxySettings } from '../../../shared/relay/system-proxy'
 
 // Only checks the user-selected endpoint. It neither changes configuration nor
 // treats a reachable port as proof of the process, protocol or no-direct guard.
-export function verifyProxyTarget(settings: SystemProxySettings): Promise<void> {
+export function verifyProxyTarget(
+  settings: Pick<SystemProxySettings, 'host' | 'port'>
+): Promise<void> {
   return new Promise((resolve, reject) => {
     const socket = createConnection({ host: settings.host, port: settings.port })
     let done = false

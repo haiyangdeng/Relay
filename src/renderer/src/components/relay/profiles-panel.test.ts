@@ -10,6 +10,40 @@ vi.mock('./rules-panel', () => ({ RelayProfileRulesManager: () => null }))
 vi.mock('@renderer/utils/ipc', () => ({ saveSimpleRuleProvider: vi.fn() }))
 
 describe('Inactive profile presentation and import gate', () => {
+  it('keeps profile activation available while the active TUN locks configuration editing', () => {
+    const html = renderToStaticMarkup(
+      createElement(RelayProfilesPanel, {
+        busy: true,
+        selectionBusy: false,
+        notice: '',
+        currentSelection: 'a',
+        activeProfileId: 'a',
+        inventory: {
+          profiles: ['a', 'b'].map((id) => ({
+            id,
+            name: id,
+            sha256: id.repeat(64),
+            createdAt: '2026-11-22',
+            summary: { proxies: 1, groups: 1, rules: 1, proxyProviders: 0, ruleProviders: 0 }
+          })),
+          activeId: null,
+          incomplete: 0,
+          warnings: []
+        },
+        onPrepare: vi.fn(),
+        onSave: vi.fn(),
+        onList: vi.fn(),
+        onChoose: vi.fn()
+      })
+    )
+    expect(html).toContain('当前核心已加载')
+    expect(html).toContain('<button type="button" aria-pressed="false"><strong>b</strong></button>')
+    expect(html).toContain(
+      '<button type="button" aria-pressed="true" disabled=""><strong>a</strong></button>'
+    )
+    expect(html).not.toContain('选用此配置')
+    expect(html).toContain('<button disabled="">编辑此配置节点</button>')
+  })
   it('keeps structured provider drafts unread and unsavable until explicit source read', () => {
     const html = renderToStaticMarkup(
       createElement(RelayProfileRuleEditor, {

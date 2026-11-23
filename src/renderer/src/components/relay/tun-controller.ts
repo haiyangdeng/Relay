@@ -1,9 +1,10 @@
 import { errorMessage } from '../../utils/error-message'
-import type {
-  TunIpcApi,
-  TunSessionPreparation,
-  TunSessionState,
-  TunStatus
+import {
+  ordinaryRecoveryNotice,
+  type TunIpcApi,
+  type TunSessionPreparation,
+  type TunSessionState,
+  type TunStatus
 } from '../../../../shared/relay/tun'
 
 export interface TunPanelSnapshot {
@@ -11,9 +12,55 @@ export interface TunPanelSnapshot {
   preparation?: TunSessionPreparation
   preparedFor?: string
   pending: boolean
-  action?: 'status' | 'prepare' | 'start' | 'stop' | 'inspect'
+  action?: 'status' | 'prepare' | 'start' | 'stop' | 'recover' | 'inspect'
   unconfirmed: boolean
   notice: string
+}
+export const tunStoppingNotice = '正在关闭 TUN 并恢复普通代理…'
+// The visible TUN panel owns its current draft, readiness and confirmation
+// evidence. Its sidebar shortcut must issue exactly the same command.
+export interface TunSwitchBinding {
+  checked: boolean
+  disabled: boolean
+  setEnabled(enabled: boolean): void
+}
+const panelListeners = new Set<() => void>()
+let panelSwitch: TunSwitchBinding | undefined
+export const activeTunSwitch = {
+  read: () => panelSwitch,
+  subscribe(listener: () => void) {
+    panelListeners.add(listener)
+    return () => {
+      panelListeners.delete(listener)
+    }
+  },
+  bind(binding: TunSwitchBinding) {
+    panelSwitch = binding
+    panelListeners.forEach((listener) => listener())
+    return () => {
+      if (panelSwitch !== binding) return
+      panelSwitch = undefined
+      panelListeners.forEach((listener) => listener())
+    }
+  }
+}
+
+// Serialise mutations across both controls even when a different panel is
+// opened while a shortcut is waiting for preparation or restoration.
+let switching: 'start' | 'stop' | 'recover' | undefined
+const switchListeners = new Set<() => void>()
+export const tunSwitchProgress = {
+  read: () => switching,
+  subscribe(listener: () => void) {
+    switchListeners.add(listener)
+    return () => {
+      switchListeners.delete(listener)
+    }
+  }
+}
+function switchingChanged(value: typeof switching): void {
+  switching = value
+  switchListeners.forEach((listener) => listener())
 }
 // Only opaque main-process evidence/session IDs leave this controller. Source
 // changes retire preparations; an actual owned-session result is always kept,
@@ -38,9 +85,18 @@ export function createTunPanelController(adapters: {
     value = { ...value, ...patch }
     listeners.forEach((listener) => listener())
   }
-  const session = (state: TunSessionState): void => {
+  const session = (
+    state: TunSessionState,
+    ordinaryRecovery?: TunStatus['ordinaryRecovery']
+  ): void => {
     publish({
-      status: { helper: 'unconfirmed', warnings: [], ...value.status, session: state },
+      status: {
+        helper: 'unconfirmed',
+        warnings: [],
+        ...value.status,
+        ordinaryRecovery,
+        session: state
+      },
       unconfirmed: false
     })
   }
@@ -70,7 +126,12 @@ export function createTunPanelController(adapters: {
     enableAfterPreparation = false
   ): Promise<void> => {
     updateEvidence()
-    if (value.pending || adapters.busy()) return
+    if (
+      value.pending ||
+      adapters.busy() ||
+      (switching && ['stop', 'recover', 'start', 'prepare'].includes(action))
+    )
+      return
     if ((action === 'prepare' || action === 'start') && adapters.activationBlocked?.()) {
       publish({ notice: '其他会话正在运行；可查看和保存设置，启用 TUN 前需先结束这些会话。' })
       return
@@ -103,13 +164,26 @@ export function createTunPanelController(adapters: {
       return
     }
     if (action === 'stop' && !value.status?.session.sessionId) return
-    publish({ pending: true, action, notice: '处理中…' })
+    const ordinaryRecovery = value.status?.ordinaryRecovery
+    if (action === 'recover' && ordinaryRecovery?.phase !== 'failed') return
+    let completedStopNotice: string | undefined
+    const switchingAction =
+      action === 'stop' || action === 'recover' || action === 'start' || enableAfterPreparation
+    if (switchingAction)
+      switchingChanged(action === 'stop' || action === 'recover' ? action : 'start')
+    publish({ pending: true, action, notice: action === 'stop' ? tunStoppingNotice : '处理中…' })
     adapters.onBusy(true)
     try {
       if (action === 'status') {
         hostChangePending = false
         const status = await adapters.api.relayTunStatus()
-        publish({ status, unconfirmed: false, notice: status.warnings.join(' ') })
+        publish({
+          status,
+          unconfirmed: false,
+          notice: status.ordinaryRecovery
+            ? ordinaryRecoveryNotice(status.ordinaryRecovery)
+            : status.warnings.join(' ')
+        })
       } else if (action === 'prepare') {
         publish({ preparation: undefined, preparedFor: undefined })
         await retire(current)
@@ -177,15 +251,18 @@ export function createTunPanelController(adapters: {
           }
           publish({ preparation: undefined, preparedFor: undefined, action: 'start' })
           const result = await adapters.api.relayTunStart({ evidenceId: prepared.evidenceId })
-          session(result.state)
+          session(result.state, result.ordinaryRecovery)
           publish({
-            notice: {
-              started: '本次 TUN 已启用。',
-              restored: '本次网络恢复已确认。',
-              cancelled: '已取消本次操作。',
-              failed: '启动检查未通过，请核对当前状态。',
-              uncertain: '启用结果待核对，请保留窗口并刷新状态。'
-            }[result.status]
+            notice:
+              result.state.warnings.join(' ') ||
+              {
+                started: '本次 TUN 已启用。',
+                restored: '本次网络恢复已确认。',
+                released: 'TUN 已关闭，保留当前系统代理设置。',
+                cancelled: '已取消本次操作。',
+                failed: '启动检查未通过，请核对当前状态。',
+                uncertain: '启用结果待核对，请保留窗口并刷新状态。'
+              }[result.status]
           })
         }
       } else if (action === 'inspect') {
@@ -198,19 +275,29 @@ export function createTunPanelController(adapters: {
             if (!current) throw new Error('缺少本次准备。')
             return adapters.api.relayTunStart({ evidenceId: current.evidenceId })
           }
+          if (action === 'recover' && ordinaryRecovery)
+            return adapters.api.relayTunRecoverOrdinary({ sessionId: ordinaryRecovery.sessionId })
           const sessionId = value.status?.session.sessionId
           if (!sessionId) throw new Error('缺少本次会话。')
           return adapters.api.relayTunStop({ sessionId })
         })()
-        session(result.state)
+        if (
+          (action === 'stop' || action === 'recover') &&
+          (result.status === 'restored' || result.status === 'released' || result.ordinaryRecovery)
+        )
+          completedStopNotice = result.state.warnings.join(' ') || undefined
+        session(result.state, result.ordinaryRecovery)
         publish({
-          notice: {
-            started: '本次TUN已启用；不代表Claude禁止直连保护已验证。',
-            restored: '本次核心、设备及网络恢复已确认。',
-            cancelled: '已取消本次操作；请以当前会话状态为准。',
-            failed: '启动前检查未通过，请重新准备。',
-            uncertain: '本次结果未确认；保留窗口及恢复能力，重新复核后明确停用。'
-          }[result.status]
+          notice:
+            result.state.warnings.join(' ') ||
+            {
+              started: '本次TUN已启用；不代表Claude禁止直连保护已验证。',
+              restored: '本次核心、设备及网络恢复已确认。',
+              released: 'TUN 已关闭，保留当前系统代理设置。',
+              cancelled: '已取消本次操作；请以当前会话状态为准。',
+              failed: '启动前检查未通过，请重新准备。',
+              uncertain: '本次结果未确认；保留窗口及恢复能力，重新复核后明确停用。'
+            }[result.status]
         })
       }
     } catch (error) {
@@ -260,11 +347,17 @@ export function createTunPanelController(adapters: {
           publish({
             status,
             unconfirmed: hostChangePending,
-            notice: hostChangePending
-              ? '读取期间宿主状态再次变化，请重新读取确认。'
-              : status.session.restorationVerified
-                ? '本次核心、设备及网络恢复已确认。'
-                : [...status.warnings, ...status.session.warnings].join(' ')
+            notice: status.ordinaryRecovery
+              ? ordinaryRecoveryNotice(status.ordinaryRecovery)
+              : hostChangePending
+                ? '读取期间宿主状态再次变化，请重新读取确认。'
+                : completedStopNotice &&
+                    !status.session.owned &&
+                    ['restored', 'released'].includes(status.session.phase)
+                  ? completedStopNotice
+                  : status.session.restorationVerified
+                    ? '本次核心、设备及网络恢复已确认。'
+                    : [...status.warnings, ...status.session.warnings].join(' ')
           })
         } catch {
           publish({
@@ -274,6 +367,7 @@ export function createTunPanelController(adapters: {
         }
       }
       publish({ pending: false, action: undefined })
+      if (switchingAction) switchingChanged(undefined)
       adapters.onBusy(false)
     }
   }

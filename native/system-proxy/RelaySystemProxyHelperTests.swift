@@ -125,6 +125,126 @@ import Darwin
             ] { rejects("reply rejects \(name)") { try badReply.validate(request: change, trust: trust) } }
             rejects("status reply rejects a mutation result") { try reply(result: Backend.ChangeResult(status: "applied", snapshot: target)).validate(request: status, trust: trust) }
 
+            var admission = RelaySystemProxyHelperAdmission.fresh
+            check(!admission.admit(change) && admission.admit(status) && !admission.admit(change) && !admission.admit(status),
+                  "new connection admits only a read-only handshake and no writes before authentication")
+            admission = .ready(status.nonce, status.deadline)
+            check(!admission.admit(request(nonce: UUID().uuidString.lowercased())) && !admission.admit(request(deadline: 109)),
+                  "a second operation cannot switch the nonce or extend the deadline")
+            check(admission.admit(change) && !admission.admit(change) && !admission.admit(status),
+                  "authenticated connection admits its change only once")
+
+            typealias Client = RelaySystemProxyHelperClient
+            let connectionIntent = request(deadline: 160)
+            let envelope = try JSONEncoder().encode(connectionIntent)
+            _ = try Request.parse(envelope, now: 100, receiver: .localClient)
+            var expiredLocalNonce: String?
+            do { _ = try Request.parse(envelope, now: 161, receiver: .localClient) }
+            catch let receipt as Client.NotSubmitted { expiredLocalNonce = receipt.nonce }
+            check(expiredLocalNonce == nonce &&
+                  (connectionIntent.failureBeforeWrite(RelaySystemProxyHelperFailure.peer) as? Client.NotSubmitted)?.nonce == nonce &&
+                  !(request(nonce: "broken").failureBeforeWrite(RelaySystemProxyHelperFailure.reply) is Client.NotSubmitted) &&
+                  !(status.failureBeforeWrite(RelaySystemProxyHelperFailure.peer) is Client.NotSubmitted),
+                  "expired local parse and pre-XPC identity failures issue a matching proof only for an identified change")
+            try request(nil, nil, operation: .status, deadline: 160).validate(now: 100)
+            rejects("daemon rejects the local 60-second change envelope as a direct write") {
+                _ = try Request.parse(envelope, now: 100)
+            }
+            rejects("local change intent cannot extend the total connection window") {
+                try request(deadline: 161).validate(now: 100, receiver: .localClient)
+            }
+            rejects("daemon handshake cannot exceed the total connection window") {
+                try request(nil, nil, operation: .status, deadline: 161).validate(now: 100)
+            }
+            for (daemonReady, expectedWriteDeadline) in [(110.7, 118.7 as TimeInterval?), (156.5, 160), (160.1, nil)] {
+                var now: TimeInterval = 100, opened = 0, handshakes = 0
+                var writes: [TimeInterval] = [], exactHandshake = true, completed = false
+                do {
+                    _ = try Client.transact(connectionIntent, now: { now }, connect: { opened += 1; return opened },
+                        close: { _ in }, send: { connection, part in
+                        if part.operation == .status {
+                            handshakes += 1
+                            exactHandshake = exactHandshake && part.deadline == connectionIntent.deadline && part.nonce == connectionIntent.nonce
+                            if connection == 1 { now = 104.5; throw Client.TransportFailure.interrupted }
+                            now = daemonReady
+                            return reply()
+                        }
+                        try part.validate(now: now, receiver: .daemon)
+                        exactHandshake = exactHandshake && part.nonce == connectionIntent.nonce && connection == 2
+                        writes.append(part.deadline)
+                        return reply(result: Backend.ChangeResult(status: "applied", snapshot: target))
+                    })
+                    completed = true
+                } catch {}
+                let expectedResult = expectedWriteDeadline == nil ? "expired handshake sends no write" : "one short write within the original window"
+                check(exactHandshake && opened == 2 && handshakes == 2 && writes == (expectedWriteDeadline.map { [$0] } ?? [])
+                    && completed == (expectedWriteDeadline != nil), "delayed launchd at \(daemonReady): \(expectedResult)")
+            }
+            // A cold, still-live peer spent over 39 s in macOS code identity
+            // admission. A single connection must then get a short write, and
+            // a lost write reply can never produce the local no-write receipt.
+            for (ready, lateReply) in [(139.0, false), (139.0, true), (160.0, false), (161.0, false)] {
+                var now: TimeInterval = 100, calls: [String] = [], windows: [TimeInterval] = []
+                var proof: String?, success = false
+                do {
+                    _ = try Client.transact(connectionIntent, now: { now }, connect: { 1 }, close: { _ in },
+                        send: { _, part in
+                            calls.append(part.operation.rawValue)
+                            if part.operation == .status { now = ready; return reply() }
+                            windows.append(part.deadline - now)
+                            if lateReply { throw Client.TransportFailure.interrupted }
+                            return reply(result: Backend.ChangeResult(status: "applied", snapshot: target))
+                        })
+                    success = true
+                } catch let receipt as Client.NotSubmitted { proof = receipt.nonce } catch {}
+                let expired = ready >= connectionIntent.deadline
+                check(calls == (expired ? ["status"] : ["status", "change"]) && windows == (expired ? [] : [8]) &&
+                    proof == (expired ? nonce : nil) && success == (!expired && !lateReply),
+                    "single cold connection waits until \(ready); lost write reply=\(lateReply), no-write proof=\(expired)")
+            }
+            rejects("a quoted no-write claim from a daemon is not a valid change receipt") {
+                try reply(result: Backend.ChangeResult(status: "notSubmitted", snapshot: before)).validate(request: change, trust: trust)
+            }
+            for (fault, expectedCalls, shouldSucceed) in [
+                ("none", ["1:status", "1:change"], true),
+                ("idle exit", ["1:status", "2:status", "2:change"], true),
+                ("interrupted twice", ["1:status", "2:status"], false),
+                ("interrupted write reply", ["1:status", "1:change"], false),
+                ("rejected identity", ["1:status"], false),
+                ("rejected handshake", ["1:status"], false),
+                ("expired before reconnect", ["1:status"], false),
+                ("expired before write", ["1:status"], false),
+                ("standalone status", ["1:status", "2:status"], true)
+            ] {
+                var opened = 0, closed: [Int] = [], calls: [String] = [], now: TimeInterval = 100
+                let original = fault == "standalone status" ? status : change
+                var succeeded = false, payloadsMatch = true
+                do {
+                    _ = try Client.transact(original, now: { now }, connect: { opened += 1; return opened },
+                        close: { closed.append($0) }, send: { connection, part in
+                        calls.append("\(connection):\(part.operation.rawValue)")
+                        payloadsMatch = payloadsMatch && part.nonce == original.nonce && part.deadline == original.deadline
+                        if part.operation == .status {
+                            payloadsMatch = payloadsMatch && part.target == nil && part.expected == nil
+                            if fault == "expired before reconnect" { now = 109; throw Client.TransportFailure.interrupted }
+                            if fault == "interrupted twice" || (connection == 1 && ["idle exit", "standalone status"].contains(fault)) {
+                                throw Client.TransportFailure.interrupted
+                            }
+                            if fault == "rejected identity" { throw RelaySystemProxyHelperFailure.peer }
+                            if fault == "rejected handshake" { return reply(error: "rejected") }
+                            if fault == "expired before write" { now = 109 }
+                            return reply()
+                        }
+                        payloadsMatch = payloadsMatch && part.expected == before && part.target == target
+                        if fault == "interrupted write reply" { throw Client.TransportFailure.interrupted }
+                        return reply(result: Backend.ChangeResult(status: "applied", snapshot: target))
+                    })
+                    succeeded = true
+                } catch {}
+                check(succeeded == shouldSucceed && calls == expectedCalls && closed == Array(1...opened) && payloadsMatch,
+                      "single-connection handshake: \(fault)")
+            }
+
             var disk = before, cache = before, commits = 0, applies = 0
             let session = Backend.LockedSession(synchronize: { cache = disk }, read: { cache }, stage: { cache = $0 }, commit: { commits += 1; disk = cache; return true }, apply: { applies += 1; return true })
             let first = try Backend.changeLocked(before, target, session: session)

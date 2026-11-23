@@ -22,7 +22,9 @@ export const shellEnvironmentFormats = [
 ] as const
 export type RelayShellEnvironmentFormat = (typeof shellEnvironmentFormats)[number]
 export type RelayShellActionRequest =
-  RelayShellAction | { action: 'copyEnv'; format: RelayShellEnvironmentFormat }
+  | RelayShellAction
+  | { action: 'copyEnv'; format: RelayShellEnvironmentFormat }
+  | { action: 'triggerSysProxy'; enabled: boolean }
 export const shellEnvironmentLabels: Record<RelayShellEnvironmentFormat, string> = {
   default: '原有格式（含NO_PROXY）',
   bash: 'Bash',
@@ -431,6 +433,12 @@ function shellEnvironmentFormat(value: unknown): RelayShellEnvironmentFormat {
 export function shellActionRequest(value: unknown): RelayShellActionRequest {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return shellAction(value)
   const request = value as Record<string, unknown>
+  if (
+    request.action === 'triggerSysProxy' &&
+    typeof request.enabled === 'boolean' &&
+    Object.keys(request).length === 2
+  )
+    return { action: 'triggerSysProxy', enabled: request.enabled }
   if (Object.keys(request).sort().join(',') !== 'action,format' || request.action !== 'copyEnv')
     throw new Error('窗口动作未支持。')
   return { action: 'copyEnv', format: shellEnvironmentFormat(request.format) }

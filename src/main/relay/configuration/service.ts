@@ -165,7 +165,8 @@ export function createCompleteConfigurationService(adapters: {
     async prepare(
       raw: unknown,
       recheckEdits?: () => Promise<void>,
-      enableTun = false
+      enableTun = false,
+      transform?: (configuration: Record<string, unknown>) => Record<string, unknown>
     ): Promise<CompleteConfigurationPlan> {
       const request = configurationRequest(raw)
       if (pending || closing) throw new Error('请等待完整配置操作结束。')
@@ -194,6 +195,13 @@ export function createCompleteConfigurationService(adapters: {
             { ...DEFAULT_MIHOMO_TUN_CONFIG, device: getDefaultMihomoTunDevice(process.platform) },
             { ...tun, enable: true }
           )
+        }
+        if (transform) {
+          if (!enableTun) throw new Error('监听投影仅供 TUN 准备使用。')
+          composed.configuration = {
+            ...composed.configuration,
+            ...transform(composed.configuration)
+          }
         }
         const bundle = await bindRuntimeResources(
           JSON.stringify(composed.configuration),

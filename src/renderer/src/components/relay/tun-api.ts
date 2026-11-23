@@ -20,6 +20,8 @@ export function createTunRendererApi(
       tunSessionResult(await invoke('relayTunStart', tunEvidenceRequest(request))),
     relayTunStop: async (request) =>
       tunSessionResult(await invoke('relayTunStop', tunSessionRequest(request))),
+    relayTunRecoverOrdinary: async (request) =>
+      tunSessionResult(await invoke('relayTunRecoverOrdinary', tunSessionRequest(request))),
     relayTunInspect: async () => tunSessionState(await invoke('relayTunInspect')),
     relayTunCancel: async (request) => {
       const result = await invoke('relayTunCancel', tunEvidenceRequest(request))

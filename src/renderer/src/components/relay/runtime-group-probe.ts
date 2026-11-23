@@ -21,16 +21,11 @@ interface RuntimeProbeOptions {
   prepared(plan: IsolatedProbePlan): void
 }
 
-// Include aliases and built-ins so every displayed member gets this run's result.
+// A nested group is one outbound on its parent's card.
 export function runtimeProbeMembers(group: string, groups: IMihomoMixedGroup[]): string[] {
-  const names = new Set<string>()
-  const visit = (name: string): void => {
-    if (names.has(name)) return
-    names.add(name)
-    for (const member of groups.find((entry) => entry.name === name)?.all ?? []) visit(member.name)
-  }
-  visit(group)
-  return [...names]
+  return [
+    ...new Set(groups.find((entry) => entry.name === group)?.all.map((member) => member.name))
+  ]
 }
 
 export function runtimeProbeDisplayStatus(
@@ -44,6 +39,33 @@ export function runtimeProbeDisplayStatus(
     }
   return { error }
 }
+export type RuntimeGroupMeasurements = Map<string, Map<string, ProxyDelay>>
+
+export function updateRuntimeGroupMeasurements(
+  previous: RuntimeGroupMeasurements | undefined,
+  group: string,
+  members: readonly string[],
+  measurements: IsolatedProbeResult['measurements'],
+  error?: string
+): RuntimeGroupMeasurements {
+  const byGroup = new Map(previous)
+  const byMember = new Map(byGroup.get(group))
+  const rows = new Map(measurements.map((row) => [row.name, row]))
+  for (const name of members) {
+    const row = rows.get(name)
+    byMember.set(
+      name,
+      row
+        ? row.error
+          ? { error: row.error }
+          : row.milliseconds
+        : runtimeProbeDisplayStatus(name, error)
+    )
+  }
+  byGroup.set(group, byMember)
+  return byGroup
+}
+
 export function runtimeProbeTestAvailable(name: string): boolean {
   return name === 'GLOBAL' || !reservedProfileTargets.has(name) || probeDelayBuiltins.has(name)
 }

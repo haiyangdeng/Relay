@@ -23,6 +23,19 @@ describe('Isolated delay request settings', () => {
     expect(result).toEqual({ ...request, delay })
     expect(result.delay?.selections).not.toBe(delay.selections)
   })
+  it('copies the direct member snapshot only for a group measurement', () => {
+    const members = ['Node A', 'Nested']
+    const snapshot = isolatedProbeRequest({ ...request, delay: { ...delay, members } })
+    members.push('Node B')
+    expect(snapshot.delay?.members).toEqual(['Node A', 'Nested'])
+    expect(() =>
+      isolatedProbeRequest({ ...request, kind: 'nodeDelay', delay: { ...delay, members } })
+    ).toThrow('组测速成员')
+    for (const invalid of [[], ['A', 'A'], [3], null])
+      expect(() =>
+        isolatedProbeRequest({ ...request, delay: { ...delay, members: invalid } })
+      ).toThrow('组测速成员')
+  })
   it.each(['ip', 'latency'])('does not expand %s requests with delay controls', (kind) => {
     expect(isolatedProbeRequest({ ...request, kind })).toEqual({ ...request, kind })
     expect(() => isolatedProbeRequest({ ...request, kind, delay })).toThrow('测速参数')

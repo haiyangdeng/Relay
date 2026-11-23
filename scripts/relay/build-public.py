@@ -68,7 +68,8 @@ def verify_inputs():
         raise RuntimeError('Unexpected source revision')
     if digest(base / 'manifest.json') != extra['requires']['manifestSHA256']:
         raise RuntimeError('Base extension manifest changed')
-    for directory in [base, supplement]:
+    handoff = ROOT / 'core-extensions/mihomo-tun-handoff'
+    for directory in [base, supplement, handoff]:
         plain_tree(directory)
     if digest(base / 'upstream-source-files.json') != manifest['upstream']['sourceInventorySHA256']:
         raise RuntimeError('Source inventory changed')
@@ -86,7 +87,16 @@ def verify_inputs():
     for path in [ROOT / 'native/guard/terminal/package/manifest.json', ROOT / 'native/guard/package/cli-manifest.json']:
         if read_json(path).get('runtimeReady') is not False:
             raise RuntimeError('This release recipe supports the unsigned self-use feature set only')
-    return manifest, extra
+    handoff_manifest = read_json(handoff / 'manifest.json')
+    handoff_pin = core['source']['darwinTunHandoff']
+    if handoff_manifest['commit'] != COMMIT or digest(handoff / 'manifest.json') != handoff_pin['manifestSHA256']:
+        raise RuntimeError('Unexpected Darwin TUN handoff manifest')
+    if digest(handoff / 'patches/0003-darwin-tun-handoff.patch') != handoff_manifest['patchSHA256'] or handoff_manifest['patchSHA256'] != handoff_pin['patchSHA256']:
+        raise RuntimeError('Darwin TUN handoff patch changed')
+    for name, pin in handoff_manifest['overlays'].items():
+        if digest(handoff / 'overlay' / name) != pin['sha256']:
+            raise RuntimeError('Darwin TUN handoff overlay changed: ' + name)
+    return manifest, extra, handoff_manifest
 
 
 def prerequisites():
@@ -130,12 +140,25 @@ def verify_source_tree(source):
         raise RuntimeError('Extracted source differs from fixed source inventory')
 
 
-def compile_core(source, manifest, extra):
-    # Go overlay leaves upstream source untouched. Both reviewed patches are represented.
+def verify_core_tun_stacks(binary):
+    metadata = output('go', 'version', '-m', binary)
+    tags = re.search(r'^\s*build\s+-tags=(\S+)$', metadata, re.MULTILINE)
+    if not tags or not {'relay_local_geodata', 'with_gvisor'}.issubset(tags.group(1).split(',')) or not re.search(
+            r'^\s*dep\s+github.com/metacubex/gvisor\s+', metadata, re.MULTILINE):
+        raise RuntimeError('Core is missing the Mixed/gVisor TUN stack; rebuild with with_gvisor')
+
+
+def compile_core(source, manifest, extra, handoff):
+    # Go overlay leaves upstream source untouched. The reviewed patches are represented.
     replacements = {}
-    for extension, entries in [('mihomo-geodata-v1', manifest['overlays']), ('mihomo-provider-file-v1', extra['overlays'])]:
+    for extension, entries in [('mihomo-geodata-v1', manifest['overlays']), ('mihomo-provider-file-v1', extra['overlays']),
+                               ('mihomo-tun-handoff', handoff['overlays'])]:
         for name in entries:
             replacements[str(source / name)] = str(ROOT / 'core-extensions' / extension / 'overlay' / name)
+    for name, pin in handoff['overlays'].items():
+        path = source / name
+        if (digest(path) if path.exists() else None) != pin['upstreamSHA256']:
+            raise RuntimeError('Darwin TUN handoff base differs: ' + name)
     overlay = WORK / 'overlay.json'
     overlay.write_text(json.dumps({'Replace': replacements}, indent=2) + '\n')
     env = {**os.environ, 'GOENV': 'off', 'GOTOOLCHAIN': 'local', 'GOTELEMETRY': 'off',
@@ -153,9 +176,10 @@ def compile_core(source, manifest, extra):
         binary = destination / 'darwin-{}'.format(arch) / 'mihomo'
         binary.parent.mkdir(parents=True)
         run('go', 'build', '-trimpath', '-buildvcs=false', '-overlay', overlay,
-            '-tags', 'relay_local_geodata', '-ldflags',
+            '-tags', 'relay_local_geodata,with_gvisor', '-ldflags',
             '-X github.com/metacubex/mihomo/constant.Version=' + VERSION,
             '-o', binary, '.', cwd=source, env={**env, 'GOARCH': go_arch})
+        verify_core_tun_stacks(binary)
         run('/usr/bin/codesign', '--force', '--sign', '-', '--timestamp=none', binary)
         run('/usr/bin/codesign', '--verify', '--strict', binary)
         raw = binary.read_bytes()
@@ -176,7 +200,8 @@ def compile_core(source, manifest, extra):
     (destination / 'manifest.json').write_text(json.dumps(updated, indent=2) + '\n')
     for relative, name in [('mihomo-geodata-v1/LICENSE.upstream', 'LICENSE'),
                            ('mihomo-geodata-v1/patches/0001-local-geodata-v1.patch', '0001-local-geodata-v1.patch'),
-                           ('mihomo-provider-file-v1/patches/0001-serialize-local-file-updates.patch', '0002-serialize-local-file-updates.patch')]:
+                           ('mihomo-provider-file-v1/patches/0001-serialize-local-file-updates.patch', '0002-serialize-local-file-updates.patch'),
+                           ('mihomo-tun-handoff/patches/0003-darwin-tun-handoff.patch', '0003-darwin-tun-handoff.patch')]:
         shutil.copyfile(ROOT / 'core-extensions' / relative, destination / name)
     shutil.copyfile(ROOT / 'core-extensions/SOURCE.md', destination / 'SOURCE.md')
 
@@ -193,6 +218,7 @@ def build_tun_resources():
         if read_json(directory / filename).get('clientSHA256') is not None:
             env['RELAY_TUN_' + variable + '_PIN_OUTPUT'] = str(directory / filename)
     for variable, filename in [('CAPTURE', 'runtime-capture-client.json'),
+                               ('PROXY_GROUPS', 'proxy-groups-client.json'),
                                ('RULES', 'runtime-rules-client.json'),
                                ('RESOURCES', 'runtime-resources-client.json'),
                                ('PROVIDERS', 'runtime-rule-providers-client.json')]:
@@ -225,7 +251,7 @@ def verify_tun_pairing():
 
 
 def resources():
-    manifest, extra = verify_inputs()
+    manifest, extra, handoff = verify_inputs()
     prerequisites()
     if output('go', 'version').split()[2] != manifest['SDK']['version']:
         raise RuntimeError('Use the pinned Go SDK: ' + manifest['SDK']['version'])
@@ -234,7 +260,7 @@ def resources():
     WORK.mkdir(parents=True)
     RESOURCE.mkdir(parents=True)
     source = fetch_source(manifest)
-    compile_core(source, manifest, extra)
+    compile_core(source, manifest, extra, handoff)
     verify_source_tree(source)
     verify_inputs()
     build_tun_resources()
@@ -320,7 +346,7 @@ def installer(arch):
         run('zsh', 'scripts/relay/build-system-proxy-helper.zsh', env=env)
     verify_packaged_app(arch)
     run('python3', 'scripts/relay/build-integrated-installer.py', '--app', app_path(arch),
-        '--helper-build', helper, '--output', WORK / ('installer-' + arch))
+        '--helper-build', helper, '--tun-build', WORK / 'tun-helper', '--output', WORK / ('installer-' + arch))
 
 
 def tun_installer():

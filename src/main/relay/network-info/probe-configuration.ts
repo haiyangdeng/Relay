@@ -9,7 +9,7 @@ import type {
   IsolatedProbeRequest,
   IsolatedProbeTargets
 } from '../../../shared/relay/isolated-probes'
-import { probeMaxNodes } from '../../../shared/relay/isolated-probes'
+import { probeMaxGroupMembers, probeMaxNodes } from '../../../shared/relay/isolated-probes'
 export const isolatedProbeGroup = '__RELAY_ISOLATED_PROBE__'
 const object = (v: unknown): v is Record<string, unknown> =>
   !!v && typeof v === 'object' && !Array.isArray(v)
@@ -35,7 +35,7 @@ export function isolatedProbeTargets(text: string): IsolatedProbeTargets {
   const data = source(text)
   return {
     nodes: [...data.nodes.keys()].slice(0, 100),
-    groups: ['GLOBAL', ...data.groups.keys()].slice(0, 41)
+    groups: [...new Set(['GLOBAL', ...data.groups.keys()])].slice(0, 41)
   }
 }
 export function isolatedProbeConfiguration(
@@ -55,37 +55,39 @@ export function isolatedProbeConfiguration(
   )
     throw new Error('1-RTT延迟测试设置无效。')
   const builtins = new Set(['DIRECT', 'REJECT', 'COMPATIBLE'])
-  const measurementLimit = request.delay ? probeMaxNodes + 44 : probeMaxNodes
+  const measurementLimit = request.kind === 'groupDelay' ? probeMaxGroupMembers : probeMaxNodes
   const delayTargets = new Map<string, string>()
   const failures = new Map<string, string>()
+  // Mirrors Mihomo's implicit GLOBAL selector. A declared GLOBAL has its own members.
+  const directMembers = (name: string): string[] => {
+    const group = data.groups.get(name)
+    if (!group && name === 'GLOBAL')
+      return ['DIRECT', 'REJECT', ...data.nodes.keys(), ...data.groups.keys()]
+    if (
+      !group ||
+      !Array.isArray(group.proxies) ||
+      !group.proxies.every((member): member is string => typeof member === 'string') ||
+      (group.use !== undefined && (!Array.isArray(group.use) || group.use.length > 0)) ||
+      group['include-all'] ||
+      group['include-all-proxies'] ||
+      group['include-all-providers'] ||
+      group.filter ||
+      group['exclude-filter'] ||
+      group['exclude-type']
+    )
+      throw new Error('本次仅支持明确保存的静态节点及静态成员；不解析动态提供者。')
+    return group.proxies
+  }
   const resolve = (name: string, stack = new Set<string>()): string => {
     if (builtins.has(name)) return name === 'COMPATIBLE' ? 'DIRECT' : name
     if (data.nodes.has(name)) return name
     if (stack.has(name) || stack.size >= 16) throw new Error('当前选中路径存在循环。')
     const group = data.groups.get(name)
-    if (
-      name !== 'GLOBAL' &&
-      (!group || !['select', 'url-test', 'fallback'].includes(String(group.type)))
-    )
+    if (group && !['select', 'url-test', 'fallback'].includes(String(group.type)))
       throw new Error('此组不能用单一选中节点表示延迟。')
-    if (
-      group &&
-      ((Array.isArray(group.use) && group.use.length > 0) ||
-        group['include-all'] ||
-        group['include-all-proxies'] ||
-        group['include-all-providers'] ||
-        group.filter ||
-        group['exclude-filter'] ||
-        group['exclude-type'])
-    )
-      throw new Error('动态代理组不支持独立路径快照。')
+    const members = directMembers(name)
     const member = request.delay?.selections[name]
-    const members =
-      name === 'GLOBAL'
-        ? [...data.nodes.keys(), ...data.groups.keys(), ...builtins]
-        : group?.proxies
-    if (!member || !Array.isArray(members) || !members.includes(member))
-      throw new Error('代理组当前选中路径未确认。')
+    if (!member || !members.includes(member)) throw new Error('代理组当前选中路径未确认。')
     return resolve(member, new Set([...stack, name]))
   }
   const select = (name: string): void => {
@@ -99,52 +101,25 @@ export function isolatedProbeConfiguration(
       failures.set(name, error instanceof Error ? error.message : '选中路径未确认')
     }
   }
-  const collect = (name: string, ancestors = new Set<string>()): void => {
-    if (ancestors.has(name) || ancestors.size >= 16) throw new Error('静态组存在循环或依赖过深。')
-    if (name !== 'GLOBAL' && reservedProfileTargets.has(name)) {
-      if (testingDelay && request.delay && builtins.has(name)) select(name)
-      return
-    }
-    if (data.nodes.has(name)) {
-      select(name)
-      return
-    }
-    const group = data.groups.get(name)
-    if (
-      !group ||
-      !Array.isArray(group.proxies) ||
-      (group.use !== undefined && (!Array.isArray(group.use) || group.use.length > 0)) ||
-      group['include-all'] ||
-      group['include-all-proxies'] ||
-      group['include-all-providers'] ||
-      group.filter ||
-      group['exclude-filter'] ||
-      group['exclude-type']
-    )
-      throw new Error('本次仅支持明确保存的静态节点及静态成员；不解析动态提供者。')
-    if (testingDelay && request.delay) select(name)
-    const next = new Set(ancestors)
-    next.add(name)
-    for (const node of group.proxies) {
-      if (typeof node !== 'string') throw new Error('静态组成员无效。')
-      collect(node, next)
-    }
-  }
   if (request.kind === 'groupDelay') {
-    // Mihomo v1.19.33 config/config.go synthesizes GLOBAL from configured
-    // outbounds. Its static leaf projection is every saved proxy, once; do not
-    // admit DIRECT or resolve provider-dependent groups as new probe egress.
-    if (request.target === 'GLOBAL') {
-      for (const name of data.nodes.keys()) collect(name)
-      if (request.delay) {
-        select('GLOBAL')
-        collect('DIRECT')
-        collect('REJECT')
-        for (const name of data.groups.keys()) select(name)
+    // A nested group is one outbound through its current selection. Its other
+    // children are never separate targets of the parent group's button.
+    const allowed = new Set(directMembers(request.target))
+    if (
+      !request.delay &&
+      [...allowed].filter((name) => data.nodes.has(name)).length > probeMaxNodes
+    )
+      throw new Error(`一次独立探测限1至${probeMaxNodes}个静态节点。`)
+    for (const name of request.delay?.members ?? allowed) {
+      if (!allowed.has(name)) throw new Error('当前代理组成员已变化，请刷新后重试。')
+      if (name === request.target) throw new Error('静态组存在循环。')
+      if (name !== 'GLOBAL' && reservedProfileTargets.has(name)) {
+        if (request.delay && builtins.has(name)) select(name)
+        continue
       }
-    } else {
-      if (!data.groups.has(request.target)) throw new Error('请选择保存的静态组。')
-      collect(request.target)
+      if (!data.nodes.has(name) && !data.groups.has(name))
+        throw new Error('保存配置中没有对应的组成员。')
+      select(name)
     }
   } else {
     if (

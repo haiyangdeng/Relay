@@ -27,6 +27,8 @@ import { parseTunHostFrame } from './wire-json'
 import { projectTunNetwork } from './projection'
 import runtimeCaptureClient from './runtime-capture-client.json'
 import runtimeTelemetryClient from './runtime-telemetry-client.json'
+import proxyGroupsPin from './proxy-groups-client.json'
+import { createProxyGroupChannel } from './proxy-groups'
 import runtimeHistoryClient from './runtime-history-client.json'
 import { createTunRuntimeReader } from './runtime-channel'
 import runtimeRulesClient from './runtime-rules-client.json'
@@ -198,6 +200,7 @@ export function createTunStartDiagnostics(
     'managed.baseline',
     'managed.spawn',
     'managed.readiness',
+    'core.tun.stack.unavailable',
     'session.state',
     'session.bundle',
     'session.baseline',
@@ -623,13 +626,13 @@ export async function stageExecutionV2Prototype(
       Date.now()
     )
   }
-  await live()
   const receipt = structuredClone(execution.receipt)
   // Copy the exact pre-encoded bytes already bound into plan/device evidence.
   const raw = Buffer.from(execution.raw)
   if (resourceHash(raw) !== execution.sha256) throw new Error('execution-v2原始回执摘要不匹配。')
   if (raw.length > 262144) throw new Error('execution-v2回执超过256KiB。')
   validateBoundConfiguration(launch.sourceConfiguration, launch.assets, receipt)
+  // Everything above reads only in-memory bytes. Recheck before the first staging I/O.
   await live()
   if (receipt.profile === 'smart') {
     if (
@@ -854,6 +857,13 @@ export async function openTunNativeHost(
       typeof historyPin.clientSHA256 === 'string' &&
       tunDigest(historyPin.clientSHA256) &&
       historyPin.clientSHA256 === installation.clientSHA256
+  const canProxyGroups =
+    canCapture &&
+    proxyGroupsPin.version === 1 &&
+    proxyGroupsPin.capability === 'proxy-groups-v1' &&
+    typeof proxyGroupsPin.clientSHA256 === 'string' &&
+    tunDigest(proxyGroupsPin.clientSHA256) &&
+    proxyGroupsPin.clientSHA256 === installation.clientSHA256
   let resourceInbox: TunResourceInbox | undefined
   try {
     resourceInbox = canResources ? await createTunResourceInbox() : undefined
@@ -1237,8 +1247,9 @@ export async function openTunNativeHost(
     if (exited && (await recovered())) return
     await revoke()
   }
-  const dispose = channel.dispose.bind(channel)
-  channel.dispose = async () => {
+  const dispose = channel.dispose.bind(channel),
+    disposeReleased = channel.disposeReleased?.bind(channel)
+  const closeTransport = async (resourcesOnly = false): Promise<void> => {
     smartToolsChannel?.invalidate()
     let stage = 'channel'
     try {
@@ -1272,8 +1283,15 @@ export async function openTunNativeHost(
         await rulesChannel.whenIdle()
         rulesChannel.invalidate()
       }
-      const stateSaved = execution?.smartState ? await saveSmartState() : true
-      if (!(exited && (await recovered().catch(() => false)))) await dispose()
+      const stateSaved = resourcesOnly
+        ? false
+        : execution?.smartState
+          ? await saveSmartState()
+          : true
+      if (resourcesOnly) {
+        if (!disposeReleased) throw new Error('本次宿主不支持仅释放自有资源。')
+        await disposeReleased()
+      } else if (!(exited && (await recovered().catch(() => false)))) await dispose()
       stage = 'staging'
       if (stateSaved && (!execution?.smartState || channel.smartStateDisposition() === 'removed')) {
         if (execution?.smartState) {
@@ -1298,6 +1316,8 @@ export async function openTunNativeHost(
       await diagnosticsWritten.catch(() => {})
     }
   }
+  channel.dispose = () => closeTransport()
+  if (disposeReleased) channel.disposeReleased = () => closeTransport(true)
   register(channel)
   const launchArgument = execution
     ? canSmartTools
@@ -1316,6 +1336,21 @@ export async function openTunNativeHost(
               : '--tun-session'
   // Only the three complete managed capability combinations can use v2.
   // A new binary hash alone never silently upgrades a legacy capture launch.
+  const pipeCount =
+    canSmartTools || canProviders
+      ? 11
+      : execution?.smartState || canResources
+        ? 9
+        : canRules
+          ? 7
+          : canCapture
+            ? 5
+            : 3
+  const stdio: ('pipe' | 'ignore')[] = Array(pipeCount).fill('pipe')
+  if (canProxyGroups) {
+    while (stdio.length < 11) stdio.push('ignore')
+    stdio.push('pipe', 'pipe')
+  }
   const child = (adapters.spawn ?? spawn)(
     installation.execution ? managedRoot + '/RelayTunClient' : client,
     [
@@ -1323,39 +1358,30 @@ export async function openTunNativeHost(
         ? `${launchArgument}-runtime-history-v3`
         : canTelemetry
           ? `${launchArgument}-runtime-telemetry-v2`
-          : launchArgument
+          : launchArgument,
+      ...(canProxyGroups ? ['--proxy-groups-v1'] : [])
     ],
     {
-      stdio: canSmartTools
-        ? ['pipe', 'pipe', 'pipe', 'pipe', 'pipe', 'pipe', 'pipe', 'pipe', 'pipe', 'pipe', 'pipe']
-        : execution?.smartState
-          ? ['pipe', 'pipe', 'pipe', 'pipe', 'pipe', 'pipe', 'pipe', 'pipe', 'pipe']
-          : canProviders
-            ? [
-                'pipe',
-                'pipe',
-                'pipe',
-                'pipe',
-                'pipe',
-                'pipe',
-                'pipe',
-                'pipe',
-                'pipe',
-                'pipe',
-                'pipe'
-              ]
-            : canResources
-              ? ['pipe', 'pipe', 'pipe', 'pipe', 'pipe', 'pipe', 'pipe', 'pipe', 'pipe']
-              : canRules
-                ? ['pipe', 'pipe', 'pipe', 'pipe', 'pipe', 'pipe', 'pipe']
-                : canCapture
-                  ? ['pipe', 'pipe', 'pipe', 'pipe', 'pipe']
-                  : ['pipe', 'pipe', 'pipe'],
+      stdio,
       windowsHide: true,
       env: { PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C' }
     }
   )
   processHandle.child = child
+  if (canProxyGroups) {
+    const input = child.stdio.at(11),
+      output = child.stdio.at(12)
+    if (input && 'write' in input && output && 'read' in output)
+      Object.assign(channel, {
+        proxyGroups: createProxyGroupChannel(
+          input,
+          output,
+          binding,
+          installation.clientSHA256,
+          installation.revision
+        )
+      })
+  }
   if (canSmartTools) {
     const input = child.stdio.at(9),
       output = child.stdio.at(10)

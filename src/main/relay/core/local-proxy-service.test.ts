@@ -444,7 +444,8 @@ function fixture() {
         level?: Parameters<typeof localProxyConfiguration>[4],
         assets?: readonly RuntimeAsset[],
         ports?: LocalProxyPorts,
-        pinnedNode?: Record<string, unknown>
+        pinnedNode?: Record<string, unknown>,
+        _selectors?: ReadonlyMap<string, string>
       ) => {
         activeSource = _source
         resolverMode = mode
@@ -871,7 +872,8 @@ describe('Manual local proxy ownership, selection and close consent', () => {
     const started = await f.service.action({ action: 'start', evidenceId: plan.evidenceId })
     expect(started).toMatchObject({ status: 'started', state: { logLevel: 'debug' } })
     expect(f.adapters.confirmStart).toHaveBeenCalledWith(
-      expect.objectContaining({ logLevel: 'debug' })
+      expect.objectContaining({ logLevel: 'debug' }),
+      undefined
     )
     expect(f.adapters.start.mock.calls[0][7]).toBe('debug')
     await expect(f.service.prepareReload({ ...request, logLevel: 'info' })).rejects.toThrow(
@@ -1169,7 +1171,8 @@ describe('Manual local proxy ownership, selection and close consent', () => {
       undefined,
       undefined,
       { http: 18191, socks: 0, mixed: 0, redir: 0 },
-      undefined
+      undefined,
+      new Map()
     )
     await expect(
       f.service.action({ action: 'start', evidenceId: plan.evidenceId, resolverMode: 'off' })
@@ -1559,6 +1562,7 @@ describe('Private Main-only Smart state source binding and retirement', () => {
     expect(failed.status).toBe('failed')
     expect(failed.state.traffic).toBe('inactive')
     expect(failed.state.owned).toBe(false)
+    expect(failed.state.warnings[0]).toContain('校验配置并启动普通代理核心')
     expect(failed.state.warnings.join(' ')).toContain('保存结果未确认')
     expect(f.stop).toHaveBeenCalledOnce()
     expect(f.release).toHaveBeenCalledOnce()
@@ -2041,10 +2045,39 @@ describe('ordinary multiport service lifecycle', () => {
       probe.mockImplementation(async (value) => value !== occupied)
       const plan = await f.service.prepare({ profile: f.selection, httpPort: ports.mixed, ports })
       expect(plan.canStart).toBe(false)
+      expect(plan.warnings[0]).toContain(`${protocol} ${occupied}`)
       expect(f.adapters.acquire).not.toHaveBeenCalled()
       expect(f.adapters.start).not.toHaveBeenCalled()
     }
   )
+  it('requires fresh TCP, UDP, lease and evidence after a transient port conflict', async () => {
+    const f = fixture()
+    const requested = { profile: f.selection, httpPort: ports.mixed, ports }
+    f.adapters.confirmStart.mockResolvedValue(true)
+    f.adapters.portAvailableUDP.mockImplementation(async (port) => port !== ports.mixed)
+    const blocked = await f.service.prepare(requested)
+    expect(blocked.canStart).toBe(false)
+    expect(f.service.state()).toMatchObject({
+      phase: 'blocked',
+      hasRecord: false,
+      owned: false,
+      traffic: 'inactive'
+    })
+    await expect(
+      f.service.action({ action: 'start', evidenceId: blocked.evidenceId })
+    ).rejects.toThrow()
+    f.adapters.portAvailable.mockClear()
+    f.adapters.portAvailableUDP.mockReset().mockResolvedValue(true)
+    const fresh = await f.service.prepare(requested)
+    expect(fresh.canStart).toBe(true)
+    expect(f.adapters.inspect).toHaveBeenCalledTimes(2)
+    expect(f.adapters.portAvailable.mock.calls.flat().sort()).toEqual([18192, 18194, 18195])
+    expect(f.adapters.portAvailableUDP.mock.calls.flat().sort()).toEqual([18192, 18194])
+    expect(fresh.evidenceId).not.toBe(blocked.evidenceId)
+    expect((await f.service.action({ action: 'start', evidenceId: fresh.evidenceId })).status).toBe(
+      'started'
+    )
+  })
   it('rejects persistent multiport before consulting adapters', async () => {
     const f = fixture()
     await expect(
@@ -2114,7 +2147,7 @@ describe('ordinary multiport service lifecycle', () => {
 
 describe('Persisted dedicated node service admission', () => {
   const dedicated = { httpPort: 18193, socksPort: 18190, route: 'Node' }
-  const make = () => {
+  const make = (readSelectors?: (profileId: string) => Promise<Map<string, string>>) => {
     const f = reloadFixture()
     const node = (
       analyzeProfile(profileRuntimeSource).data?.proxies as Record<string, unknown>[]
@@ -2124,6 +2157,7 @@ describe('Persisted dedicated node service admission', () => {
     f.service = createLocalProxyService({
       ...f.adapters,
       confirmReload: f.confirmReload,
+      readSelectors,
       resolvePinnedNode
     })
     f.adapters.confirmStart.mockResolvedValue(true)
@@ -2166,6 +2200,89 @@ describe('Persisted dedicated node service admission', () => {
       (await f.service.action({ action: 'start', evidenceId: prepared.evidenceId })).status
     ).toBe('started')
     expect(f.adapters.start.mock.calls[0][10]).toEqual(f.pin.node)
+  })
+  it('restores the new profile’s own saved group member after an ordinary hot reload', async () => {
+    const secondId = '00000000-0000-0000-0000-000000000002'
+    const readSelectors = vi.fn(
+      async (id: string) => new Map([['Group', id === secondId ? 'DIRECT' : 'Node']])
+    )
+    const f = make(readSelectors)
+    const prepared = await f.service.prepare({ profile: f.selection, httpPort: 18191 })
+    expect(
+      (await f.service.action({ action: 'start', evidenceId: prepared.evidenceId })).status
+    ).toBe('started')
+    f.stored.profile = { ...f.stored.profile, id: secondId }
+    const plan = await f.service.prepareReload({
+      profile: { ...f.selection, id: secondId },
+      httpPort: 18191
+    })
+    f.confirmReload.mockResolvedValue(true)
+    const result = await f.service.reload({ evidenceId: plan.evidenceId })
+    expect(result.status).toBe('reloaded')
+    expect(result.state.groups.find((group) => group.name === 'Group')?.now).toBe('DIRECT')
+    const [bytes] = f.reload.mock.calls[0]
+    expect(profileHash(bytes)).toBe(plan.runtimeSHA256)
+    expect(JSON.parse(bytes)['proxy-groups'][0]).toMatchObject({
+      name: 'Group',
+      proxies: ['Node', 'DIRECT'],
+      'default-selected': 'DIRECT'
+    })
+    expect(readSelectors.mock.calls.map(([id]) => id)).toEqual([
+      f.selection.id,
+      f.selection.id,
+      secondId,
+      secondId
+    ])
+    expect(f.adapters.start).toHaveBeenCalledOnce()
+    expect(f.stop).not.toHaveBeenCalled()
+  })
+  it('binds the saved member in the actual ordinary launch arguments and keeps dedicated listeners pinned', async () => {
+    const saved = new Map([['Group', 'DIRECT']])
+    const f = make(async () => saved)
+    const plan = await f.service.prepare({ profile: f.selection, httpPort: 18191, dedicated })
+    const result = await f.service.action({ action: 'start', evidenceId: plan.evidenceId })
+    expect(result.status).toBe('started')
+    const [source, port, , mode, listener, , , level, assets, ports, pin, launchSelections] =
+      f.adapters.start.mock.calls[0]
+    const { configuration } = localProxyConfiguration(
+      source,
+      port,
+      mode,
+      listener,
+      level,
+      assets,
+      ports,
+      pin,
+      launchSelections
+    )
+    expect(profileHash(configuration)).toBe(plan.runtimeSHA256)
+    const built = JSON.parse(configuration)
+    expect(built['proxy-groups'][0]).toMatchObject({
+      proxies: ['Node', 'DIRECT'],
+      'default-selected': 'DIRECT'
+    })
+    expect(built.listeners.map((entry: { proxy: string }) => entry.proxy)).toEqual(['Node', 'Node'])
+    expect(source).toBe(profileRuntimeSource)
+  })
+  it('rejects superseded selector defaults before starting a listener or committing a reload', async () => {
+    const saved = new Map([['Group', 'DIRECT']])
+    const f = make(async () => new Map(saved))
+    const request = { profile: f.selection, httpPort: 18191 }
+    const cold = await f.service.prepare(request)
+    saved.set('Group', 'Node')
+    expect((await f.service.action({ action: 'start', evidenceId: cold.evidenceId })).status).toBe(
+      'failed'
+    )
+    expect(f.adapters.start).not.toHaveBeenCalled()
+    const fresh = await f.service.prepare(request)
+    expect((await f.service.action({ action: 'start', evidenceId: fresh.evidenceId })).status).toBe(
+      'started'
+    )
+    const change = await f.service.prepareReload(request)
+    saved.set('Group', 'DIRECT')
+    f.confirmReload.mockResolvedValue(true)
+    expect((await f.service.reload({ evidenceId: change.evidenceId })).status).toBe('failed')
+    expect(f.reload).not.toHaveBeenCalled()
   })
   it('switches the ordinary profile on the same process while retaining the fixed node and listener plan', async () => {
     const f = make()

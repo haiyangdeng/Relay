@@ -73,6 +73,7 @@ final class RelayTunAppBundle {
     private var cleanupDirectories = Set<String>()
     private var deleted = Set<String>()
     private var recoveryRecord: (directory: stat, file: stat, sha256: String)?
+    private var releaseRecord: (directory: stat, file: stat, sha256: String)?
     private let smartSourceLock = NSLock()
     private(set) var smartStateFiles: RelayTunSmartStateFiles?
     private(set) var smartStateHandoff: RelayTunSmartStateHandoff?
@@ -822,14 +823,14 @@ final class RelayTunAppBundle {
         try RelayTunRuleProviderProbeWorkspace(projection: projection, corePin: corePin).workspace
     }
     private func verifySource() throws {
-        smartSourceLock.lock(); let recoveryRecord = self.recoveryRecord; smartSourceLock.unlock()
-        guard Self.same(try Self.plainDirectory(source), recoveryRecord?.directory ?? sourceIdentity) else { throw Failure.changed }
+        smartSourceLock.lock(); let recoveryRecord = self.recoveryRecord, releaseRecord = self.releaseRecord; smartSourceLock.unlock()
+        guard Self.same(try Self.plainDirectory(source), releaseRecord?.directory ?? recoveryRecord?.directory ?? sourceIdentity) else { throw Failure.changed }
         if let executionReceipt {
             guard let sourceHandle = executionSourceHandle, let fileHandle = executionFileHandle,
                   let identity = executionFileIdentity else { throw Failure.changed }
             var held = stat()
             guard fstat(sourceHandle.fileDescriptor, &held) == 0,
-                  Self.same(held, recoveryRecord?.directory ?? sourceIdentity) else { throw Failure.changed }
+                  Self.same(held, releaseRecord?.directory ?? recoveryRecord?.directory ?? sourceIdentity) else { throw Failure.changed }
             let execution = try Self.read(source + "/execution.json", maximum: RelayTunExecutionReceiptV2.maximumReceiptBytes,
                                           held: (sourceHandle.fileDescriptor, fileHandle.fileDescriptor))
             guard Self.same(execution.1, identity), Self.digest(execution.0) == executionReceipt.rawSHA256 else { throw Failure.changed }
@@ -837,6 +838,10 @@ final class RelayTunAppBundle {
         if let recoveryRecord {
             let read = try Self.read(source + "/recovery.json", maximum: 4096)
             guard Self.same(read.1, recoveryRecord.file), Self.digest(read.0) == recoveryRecord.sha256 else { throw Failure.changed }
+        }
+        if let releaseRecord {
+            let read = try Self.read(source + "/release.json", maximum: 4096)
+            guard Self.same(read.1, releaseRecord.file), Self.digest(read.0) == releaseRecord.sha256 else { throw Failure.changed }
         }
         let sourceConfig = try Self.read(source + "/config.json", maximum: 16 * 1024 * 1024)
         guard sourceConfig.0 == configuration,
@@ -888,6 +893,45 @@ final class RelayTunAppBundle {
               after.st_uid == getuid(), after.st_nlink == 1, after.st_size == bytes.count else { throw Failure.changed }
         let closedRecord = (try Self.plainDirectory(source), after, Self.digest(bytes))
         smartSourceLock.lock(); recoveryRecord = closedRecord; smartSourceLock.unlock()
+    }
+    /// Separate, write-once proof of owned retirement. It never upgrades a
+    /// prior uncertain recovery record or permits deleting private evidence.
+    /// Failed writes/fsync preserve partial files and refuse success; neither
+    /// partial files nor unknown existing files are adopted on a later retry.
+    func recordReleasedResources() throws {
+        try verifySource()
+        let parent = open(source, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard parent >= 0 else { throw Failure.changed }; defer { Darwin.close(parent) }
+        var directory = stat()
+        guard fstat(parent, &directory) == 0, directory.st_dev == sourceIdentity.st_dev,
+              directory.st_ino == sourceIdentity.st_ino, directory.st_uid == getuid(),
+              directory.st_mode & 0o7777 == 0o700 else { throw Failure.changed }
+        var record = binding.json
+        record["version"] = 1
+        record["baseline"] = ["networkSHA256": baseline.networkSHA256, "protectionSHA256": baseline.protectionSHA256]
+        record["status"] = "resources-released"
+        record["ownedRecoveryRetained"] = false
+        record["restorationVerified"] = false
+        record["reason"] = "external-protection-changed"
+        let bytes = try JSONSerialization.data(withJSONObject: record, options: [.sortedKeys, .withoutEscapingSlashes])
+        guard bytes.count <= 4096 else { throw Failure.invalid }
+        let file = openat(parent, "release.json", O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard file >= 0 else { throw Failure.conflict }; defer { Darwin.close(file) }
+        guard fchmod(file, 0o600) == 0 else { throw Failure.invalid }
+        try bytes.withUnsafeBytes { raw in
+            var offset = 0
+            while offset < raw.count {
+                let count = Darwin.write(file, raw.baseAddress!.advanced(by: offset), raw.count - offset)
+                if count < 0, errno == EINTR { continue }
+                guard count > 0 else { throw Failure.changed }; offset += count
+            }
+        }
+        var after = stat()
+        guard fsync(file) == 0, fsync(parent) == 0, fstat(file, &after) == 0,
+              after.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG), after.st_mode & 0o7777 == 0o600,
+              after.st_uid == getuid(), after.st_nlink == 1, after.st_size == bytes.count else { throw Failure.changed }
+        let closedRecord = (try Self.plainDirectory(source), after, Self.digest(bytes))
+        smartSourceLock.lock(); releaseRecord = closedRecord; smartSourceLock.unlock()
     }
     enum FinalDisposition { case removed, retainedEvidence }
     /// Called only after the caller positively reaped its own Core and freshly

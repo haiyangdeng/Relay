@@ -13,6 +13,41 @@ const text = (value: unknown): value is string =>
   !!value.trim() &&
   value.length <= 256 &&
   stripProfileControls(value) === value
+export function projectProxyGroups(
+  nodes: Map<string, unknown>,
+  runtime: Item,
+  mode: unknown,
+  includeHidden: boolean
+) {
+  if (mode === 'direct') return []
+  const names = Array.isArray(runtime['proxy-groups'])
+    ? runtime['proxy-groups'].map((g) => (object(g) ? g.name : undefined))
+    : []
+  if (!names.includes('GLOBAL')) names.push('GLOBAL')
+  if (mode === 'global') {
+    const index = names.indexOf('GLOBAL')
+    names.splice(index, 1)
+    names.unshift('GLOBAL')
+  }
+  return names
+    .map((name) => {
+      const group = typeof name === 'string' ? nodes.get(name) : undefined
+      if (!object(group)) throw new Error('实际代理组缺失；没有删减后继续。')
+      return group
+    })
+    .filter((group) => includeHidden || !group.hidden)
+    .map((group) => {
+      if (!object(group) || !Array.isArray(group.all)) throw new Error('实际组成员未确认。')
+      return {
+        ...group,
+        all: group.all.map((name) => {
+          if (typeof name !== 'string' || !nodes.has(name))
+            throw new Error('实际组成员缺少节点记录；没有删减成员。')
+          return nodes.get(name)
+        })
+      }
+    })
+}
 const channels = new Set([
   'getControledMihomoConfig',
   'patchControledMihomoConfig',
@@ -55,25 +90,23 @@ export function createClashBackend(adapters: {
   beforeProfileChange?(): Promise<void>
 }) {
   let selected: RelayProfileSelection | undefined
-  let loaded = false,
-    loading: Promise<void> | undefined,
+  let loading: Promise<void> | undefined,
     profileChanging = false,
     selectionEpoch = 0
   const selectionWaiters: (() => void)[] = []
   const selectionIdle = (): void => {
     if (!profileChanging && !loading) selectionWaiters.splice(0).forEach((resolve) => resolve())
   }
-  const loadSelection = (): Promise<void> => {
-    if (loaded || adapters.local.state().owned) return Promise.resolve()
+  const loadSelection = (force = false): Promise<void> => {
+    // First launch can precede an import. Cache a real selection, never its absence.
+    if (profileChanging || (!force && selected) || adapters.local.state().owned)
+      return Promise.resolve()
     if (loading) return loading
     const epoch = selectionEpoch
     loading = (async () => {
       const value = await adapters.readSelection?.()
       if (value) await adapters.profiles.read(value)
-      if (epoch === selectionEpoch) {
-        selected = value
-        loaded = true
-      }
+      if (epoch === selectionEpoch) selected = value
     })().finally(() => {
       loading = undefined
       selectionIdle()
@@ -128,10 +161,10 @@ export function createClashBackend(adapters: {
         throw new Error('当前配置选择或实例尚未结束。')
       ++selectionEpoch
       selected = undefined
-      loaded = false
       adapters.notify()
     },
     isBusy: (): boolean => profileChanging || !!loading,
+    selectionVersion: (): number | undefined => (profileChanging ? undefined : selectionEpoch),
     whenIdle: (): Promise<void> =>
       profileChanging || loading
         ? new Promise((resolve) => selectionWaiters.push(resolve))
@@ -147,7 +180,7 @@ export function createClashBackend(adapters: {
       if (channel === 'getProfileConfig') {
         if (args.length > 1 || (args[0] !== undefined && typeof args[0] !== 'boolean'))
           throw new Error('配置列表参数无效。')
-        await loadSelection()
+        await loadSelection(args[0] === true)
         const list = await adapters.profiles.list()
         return { current: currentId(), items: list.profiles.map(profileItem) }
       }
@@ -222,7 +255,6 @@ export function createClashBackend(adapters: {
               throw new Error('热载结果未确认，保留本次实例和证据；没有自动重启。')
           } else await adapters.beforeProfileChange?.()
           selected = { id: stored.profile.id, sha256: stored.profile.sha256 }
-          loaded = true
           try {
             await adapters.rememberSelection?.(selected)
           } finally {
@@ -342,33 +374,7 @@ export function createClashBackend(adapters: {
           for (const node of provider.proxies)
             if (object(node) && text(node.name)) nodes.set(node.name, node)
         }
-        const names = Array.isArray(live.runtime['proxy-groups'])
-          ? live.runtime['proxy-groups'].map((g) => (object(g) ? g.name : undefined))
-          : []
-        if (!names.includes('GLOBAL')) names.push('GLOBAL')
-        if (live.config.mode === 'global') {
-          const index = names.indexOf('GLOBAL')
-          names.splice(index, 1)
-          names.unshift('GLOBAL')
-        }
-        return names
-          .map((name) => {
-            const group = typeof name === 'string' ? nodes.get(name) : undefined
-            if (!object(group)) throw new Error('实际代理组缺失；没有删减后继续。')
-            return group
-          })
-          .filter((group) => args[0] === true || !group.hidden)
-          .map((group) => {
-            if (!object(group) || !Array.isArray(group.all)) throw new Error('实际组成员未确认。')
-            return {
-              ...group,
-              all: group.all.map((name) => {
-                if (typeof name !== 'string' || !nodes.has(name))
-                  throw new Error('实际组成员缺少节点记录；没有删减成员。')
-                return nodes.get(name)
-              })
-            }
-          })
+        return projectProxyGroups(nodes, live.runtime, live.config.mode, args[0] === true)
       }
       throw new Error('本次请求未完成。')
     }

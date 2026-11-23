@@ -181,13 +181,22 @@ function nativeFixture(change?: (response: Record<string, unknown>) => Record<st
         restored: ['stopped', 'absent', 'restored']
       }
       const response =
-        raw.action === 'dispose' || raw.action === 'revokeActivation'
+        raw.action === 'dispose' ||
+        raw.action === 'disposeReleased' ||
+        raw.action === 'revokeActivation'
           ? {
               version: 1,
               id: raw.id,
               action: raw.action,
               ...identity,
-              [raw.action === 'dispose' ? 'closed' : 'revoked']: true
+              [raw.action === 'revokeActivation' ? 'revoked' : 'closed']: true,
+              ...(raw.action === 'disposeReleased'
+                ? {
+                    restorationVerified: false,
+                    reason: 'external-protection-changed',
+                    stateDisposition: 'retained-evidence'
+                  }
+                : {})
             }
           : {
               version: 1,
@@ -221,6 +230,37 @@ function nativeFixture(change?: (response: Record<string, unknown>) => Record<st
   }
 }
 describe('Production TUN launcher private bundle and persistent control wiring', () => {
+  it('retains the private staged evidence when releasing owned resources after external proxy changes', async () => {
+    const c = checkedManagedCandidate('local-geodata-v1'),
+      f = nativeFixture()
+    const host = await openTunNativeHost(
+      c.installed,
+      baseline,
+      c.runtime,
+      c.identity,
+      c.launch,
+      vi.fn(),
+      vi.fn(),
+      { readInstallation: async () => c.installed, spawn: f.spawn, execution: c.execution }
+    )
+    const directory = String(f.frames[0].directory)
+    try {
+      await host.stopCore()
+      await host.disposeReleased?.()
+      expect(f.frames.map((frame) => frame.action)).toEqual([
+        'bootstrap',
+        'initialize',
+        'stopCore',
+        'disposeReleased'
+      ])
+      expect(await readFile(directory + '/source.json', 'utf8')).toBe(c.launch.sourceConfiguration)
+      expect(await readFile(directory + '/execution.json', 'utf8')).toBe(c.execution.raw)
+      expect((await lstat(directory)).mode & 0o7777).toBe(0o700)
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
   it.each(['stable', 'alpha', 'local-geodata-v1'] as const)(
     'hands exact %s wire3 bytes to the separate v2 flag without Geo/provider write lanes',
     async (profile) => {
@@ -263,6 +303,25 @@ describe('Production TUN launcher private bundle and persistent control wiring',
       expect(uncertain).not.toHaveBeenCalled()
     }
   )
+  it('rejects corrupt in-memory receipt bytes before rechecking the core or spawning', async () => {
+    const c = checkedManagedCandidate('alpha'),
+      f = nativeFixture(),
+      execution = { ...c.execution, raw: c.execution.raw + ' ' }
+    await expect(
+      openTunNativeHost(
+        c.installed,
+        baseline,
+        { ...c.runtime, checkedExecution: execution },
+        c.identity,
+        c.launch,
+        vi.fn(),
+        vi.fn(),
+        { readInstallation: async () => c.installed, spawn: f.spawn, execution }
+      )
+    ).rejects.toThrow('原始回执摘要')
+    expect(execution.recheck).not.toHaveBeenCalled()
+    expect(f.spawn).not.toHaveBeenCalled()
+  })
   it.each(['missing', 'wrong-core', 'legacy', 'stale'] as const)(
     'refuses %s execution before spawning a Native host',
     async (defect) => {
@@ -510,6 +569,15 @@ describe('Production TUN launcher private bundle and persistent control wiring',
       }
     }
   )
+  it('accepts the fixed missing TUN stack diagnostic without forwarding core output', () => {
+    const report = vi.fn(),
+      consume = createTunStartDiagnostics(report)
+    for (const byte of Buffer.from('RELAY_TUN_START_FAILURE core.tun.stack.unavailable\n'))
+      consume(Buffer.from([byte]))
+    consume(Buffer.from('gVisor is not included in this build, private-node private-token\n'))
+    consume(Buffer.from('RELAY_TUN_START_FAILURE core.tun.stack.unavailable private-token\n'))
+    expect(report.mock.calls).toEqual([['core.tun.stack.unavailable']])
+  })
   it('discards unknown fields, response values and credentials in detailed diagnostics', () => {
     const report = vi.fn(),
       consume = createTunStartDiagnostics(report)

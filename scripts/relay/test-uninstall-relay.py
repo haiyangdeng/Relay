@@ -46,7 +46,7 @@ case "$2:$3" in
 esac
 ''',
             '/usr/bin/codesign': 'exit 0',
-            '/usr/bin/xcode-select': 'exit 0',
+            '/usr/bin/xcode-select': '[ "${RELAY_NO_CLT:-}" != yes ]',
             '/usr/sbin/pkgutil': '''
 if [ "$1" = --forget ]; then
     [ "${RELAY_KEEP_RECEIPT:-}" != yes ] || exit 0
@@ -376,6 +376,19 @@ esac
         self.assertIn('旧核心会话记录或进程状态已变化', self.run_uninstall(accepted=True, expected=1))
         self.assertTrue(self.app.is_dir() and self.session.is_dir())
         self.assertFalse(self.archived_session.exists() or self.trace.exists())
+
+    def test_shell_tun_remover_needs_no_command_line_tools(self):
+        self.component(self.tun, 'uninstall.py', 'core-managed-v2')
+        self.env['RELAY_NO_CLT'] = 'yes'
+        self.run_uninstall(accepted=True)
+        self.assertFalse(self.tun.exists())
+
+    def test_private_variant_core_prevents_uninstall_without_stopping_it(self):
+        self.app_bundle()
+        self.env['RELAY_PROCESSES'] = str(self.state / 'Variants/variants/core-fixture/darwin-arm64/mihomo')
+        self.run_uninstall('--check', expected=1)
+        self.assertTrue(self.app.exists())
+        self.assertFalse(self.trace.exists())
 
     def test_busy_tun_keeps_app_and_proxy(self):
         self.app_bundle()

@@ -164,35 +164,44 @@ describe('Relay sidebar shortcuts', () => {
     ).rejects.toThrow('已变化')
     expect(f.invoke.mock.calls.map(([channel]) => channel)).not.toContain('relayLocalProxyReload')
   })
-  it('uses saved system proxy settings and only enabled network services, with guarded preparation', async () => {
+  it('uses the verified HTTP listener and commits once on the very first click', async () => {
     const report = {
       canApply: true,
       canRestore: false,
       status: 'inactive',
       services: [
-        { id: 'a', enabled: true },
-        { id: 'b', enabled: false }
+        { id: 'wifi', enabled: true },
+        { id: 'disabled', enabled: false }
       ]
     }
-    const completed = { ...report, status: 'applied', recordID: 'owned-record', canRestore: true }
+    const completed = { ...report, status: 'applied', recordID: 'record' }
     const invoke = vi.fn(async (channel: string, ..._args: unknown[]): Promise<unknown> => {
-      if (channel === 'relayLocalProxyState') return state
-      if (channel === 'relaySystemProxyDraftRead')
-        return { document: defaultSystemProxyDraft(), revision: '', exists: false }
-      if (channel === 'relaySystemProxyInspect') return report
-      if (channel === 'relaySystemProxyPrepare')
-        return { action: 'apply', evidenceId: 'plan', report }
-      if (channel === 'relaySystemProxyExecute')
-        return { status: 'applied', report: completed, warnings: [] }
-      throw Error('Unexpected ' + channel)
+      switch (channel) {
+        case 'relaySystemProxyInspect':
+          return report
+        case 'relaySystemProxyDraftRead':
+          return { document: defaultSystemProxyDraft(), revision: '', exists: false }
+        case 'relayEnsureSystemProxyListener':
+          return { httpPort: 7892, mixedPort: 7890 }
+        case 'relaySystemProxyPrepare':
+          return { action: 'apply', evidenceId: 'plan', report }
+        case 'relaySystemProxyExecute':
+          return { status: 'applied', report: completed, warnings: [] }
+        default:
+          throw Error('Unexpected ' + channel)
+      }
     })
-    expect(await sidebarSystemProxy(true, invoke)).toBe(completed)
-    expect(invoke).toHaveBeenCalledWith('relaySystemProxyPrepare', {
-      ...defaultSystemProxyDraft(),
-      port: 18191,
-      serviceIDs: ['a']
-    })
-    expect(invoke).toHaveBeenCalledWith('relaySystemProxyExecute', { evidenceId: 'plan' })
+    await expect(sidebarSystemProxy(true, invoke)).resolves.toEqual(completed)
+    expect(invoke.mock.calls).toEqual([
+      ['relaySystemProxyInspect'],
+      ['relaySystemProxyDraftRead'],
+      ['relayEnsureSystemProxyListener'],
+      [
+        'relaySystemProxyPrepare',
+        { ...defaultSystemProxyDraft(), port: 7892, serviceIDs: ['wifi'] }
+      ],
+      ['relaySystemProxyExecute', { evidenceId: 'plan' }]
+    ])
   })
   it('computes rates only across comparable samples; unknown, reset, stale, and changed cores are blank', () => {
     const prior = { id: 'a', at: 1000, upload: 100, download: 500 },
@@ -228,114 +237,75 @@ describe('Relay sidebar shortcuts', () => {
       ])
     }
   })
-  it('refuses system takeover while the owned core is pending, uncertain, or stopping', async () => {
-    for (const changed of [{ pending: true }, { uncertain: true }, { phase: 'stopping' }]) {
-      const invoke = vi.fn(async (channel: string): Promise<unknown> => {
-        if (channel === 'relayLocalProxyState') return { ...state, ...changed }
-        if (channel === 'relaySystemProxyDraftRead')
-          return { document: defaultSystemProxyDraft(), revision: '', exists: false }
-        if (channel === 'relaySystemProxyInspect') return { canApply: true }
-        throw Error('Unexpected mutation ' + channel)
-      })
-      await expect(sidebarSystemProxy(true, invoke)).rejects.toThrow('状态需要核对')
-      expect(invoke.mock.calls.some(([channel]) => channel === 'relaySystemProxyPrepare')).toBe(
-        false
-      )
-    }
-  })
-  it('checks an unobserved enable intent and avoids rewriting an already owned active proxy', async () => {
-    for (const status of ['active', 'applied']) {
-      const invoke = vi.fn(async (channel: string): Promise<unknown> => {
-        if (channel === 'relaySystemProxyInspect') return { status, recordID: 'owned-record' }
-        throw Error('Unexpected mutation ' + channel)
-      })
-      expect(await sidebarSystemProxy(true, invoke)).toEqual({ status, recordID: 'owned-record' })
+  it('rechecks a cached on switch without toggling a proxy already restored elsewhere', async () => {
+    for (const status of ['inactive', 'restored']) {
+      const report = { status, canRestore: false, services: [] }
+      const invoke = vi.fn(async () => report)
+      expect(await sidebarSystemProxy(false, invoke)).toBe(report)
       expect(invoke.mock.calls).toEqual([['relaySystemProxyInspect']])
     }
   })
-  it('starts the selected idle configuration before the single explicit system-proxy application', async () => {
-    const f = startupFixture()
-    await sidebarSystemProxy(true, f.invoke)
-    expect(f.invoke).toHaveBeenCalledWith('relayLocalProxyPrepare', {
-      profile: { id: 'profile', sha256: 'source' },
-      httpPort: 18191,
-      resolverMode: 'profile',
-      lifetime: 'main'
-    })
-    const calls = f.invoke.mock.calls.map(([channel]) => channel)
-    expect(calls.indexOf('relayLocalProxyAction')).toBeLessThan(
-      calls.indexOf('relaySystemProxyPrepare')
-    )
-    expect(calls.filter((channel) => channel === 'relaySystemProxyExecute')).toHaveLength(1)
-    expect(calls).not.toContain('relayLocalProxyReload')
-    expect(calls).not.toContain('relayTunStart')
+  it('refuses a fresh conflict even when the visible card accepted the click to recheck', async () => {
+    const report = { status: 'conflict', recordID: 'record', canRestore: false, services: [] }
+    const invoke = vi.fn(async () => report)
+    await expect(sidebarSystemProxy(true, invoke)).rejects.toThrow('系统代理状态需要核对')
+    expect(invoke.mock.calls).toEqual([['relaySystemProxyInspect']])
   })
-  it.each(['unavailable', 'blocked', 'uncertain', 'changed-selection', 'cancelled-view'])(
-    'never applies system settings after %s prevents confirming the selected core',
+  it.each([true, false])(
+    'checks the listener even with an active record, cancelling a duplicate write only with matching target evidence (%s)',
+    async (alreadyApplied) => {
+      const report = {
+        status: 'active',
+        recordID: 'owned-record',
+        canRestore: true,
+        canApply: true,
+        services: [{ id: 'wifi', enabled: true }],
+        warnings: []
+      }
+      const invoke = vi.fn(async (channel: string): Promise<unknown> => {
+        if (channel === 'relaySystemProxyInspect') return report
+        if (channel === 'relaySystemProxyDraftRead')
+          return { document: defaultSystemProxyDraft(), revision: '', exists: false }
+        if (channel === 'relayEnsureSystemProxyListener') return { httpPort: 7892, mixedPort: 7890 }
+        if (channel === 'relaySystemProxyPrepare')
+          return { action: 'apply', evidenceId: 'plan', alreadyApplied, report }
+        if (channel === 'relaySystemProxyCancel') return
+        if (channel === 'relaySystemProxyExecute')
+          return { status: 'applied', report, warnings: [] }
+        throw Error('Unexpected ' + channel)
+      })
+      expect(await sidebarSystemProxy(true, invoke)).toBe(report)
+      expect(invoke.mock.calls.map(([channel]) => channel)).toEqual([
+        'relaySystemProxyInspect',
+        'relaySystemProxyDraftRead',
+        'relayEnsureSystemProxyListener',
+        'relaySystemProxyPrepare',
+        alreadyApplied ? 'relaySystemProxyCancel' : 'relaySystemProxyExecute'
+      ])
+    }
+  )
+  it.each(['no-profile', 'unavailable', 'cancelled-view'])(
+    'does not write system settings after listener resolution fails: %s',
     async (failure) => {
-      const f = startupFixture(failure)
-      await expect(sidebarSystemProxy(true, f.invoke, () => f.current())).rejects.toThrow()
-      expect(f.invoke.mock.calls.map(([channel]) => channel)).not.toContain(
-        'relaySystemProxyPrepare'
-      )
-      expect(f.invoke.mock.calls.map(([channel]) => channel)).not.toContain(
-        'relaySystemProxyExecute'
-      )
-      if (failure !== 'uncertain')
-        expect(f.invoke.mock.calls.map(([channel]) => channel)).not.toContain(
-          'relayLocalProxyAction'
-        )
+      let current = true
+      const invoke = vi.fn(async (channel: string) => {
+        if (channel === 'relaySystemProxyInspect')
+          return { status: 'inactive', services: [{ id: 'wifi', enabled: true }] }
+        if (channel === 'relaySystemProxyDraftRead')
+          return { document: defaultSystemProxyDraft(), revision: '', exists: false }
+        if (channel === 'relayEnsureSystemProxyListener') {
+          if (failure === 'no-profile') throw Error('请先导入订阅。')
+          if (failure === 'cancelled-view') current = false
+          return { httpPort: failure === 'unavailable' ? 0 : 7892 }
+        }
+        throw Error('Unexpected ' + channel)
+      })
+      await expect(sidebarSystemProxy(true, invoke, () => current)).rejects.toThrow()
+      expect(invoke.mock.calls.map(([channel]) => channel)).toEqual([
+        'relaySystemProxyInspect',
+        'relaySystemProxyDraftRead',
+        'relayEnsureSystemProxyListener'
+      ])
     }
   )
 })
-
-function startupFixture(failure?: string) {
-  let started = false,
-    prepared = false,
-    current = true
-  const report = {
-    status: 'inactive',
-    canApply: true,
-    canRestore: false,
-    services: [{ id: 'a', enabled: true }]
-  }
-  const invoke = vi.fn(async (channel: string, ..._args: unknown[]): Promise<unknown> => {
-    if (channel === 'relaySystemProxyInspect') return report
-    if (channel === 'relaySystemProxyDraftRead')
-      return { document: defaultSystemProxyDraft(), revision: '', exists: false }
-    if (channel === 'relayLocalProxyState')
-      return started
-        ? { ...state, uncertain: failure === 'uncertain' }
-        : {
-            ...state,
-            phase: 'idle',
-            owned: false,
-            hasRecord: false,
-            traffic: 'inactive'
-          }
-    if (channel === 'getProfileConfig')
-      return {
-        current: failure === 'changed-selection' && prepared ? 'other' : 'profile',
-        items: []
-      }
-    if (channel === 'relayProfileList')
-      return { profiles: failure === 'unavailable' ? [] : [{ id: 'profile', sha256: 'source' }] }
-    if (channel === 'relayLocalProxyPlanRead')
-      return { document: { httpPort: 18191, resolverMode: 'profile' }, revision: '', exists: false }
-    if (channel === 'changeCurrentProfile') return
-    if (channel === 'relayLocalProxyPrepare') {
-      prepared = true
-      if (failure === 'cancelled-view') current = false
-      return { canStart: failure !== 'blocked', evidenceId: 'start', warnings: ['port occupied'] }
-    }
-    if (channel === 'relayLocalProxyAction') {
-      started = true
-      return { status: 'started', state }
-    }
-    if (channel === 'relaySystemProxyPrepare')
-      return { action: 'apply', evidenceId: 'apply', report }
-    if (channel === 'relaySystemProxyExecute') return { status: 'applied', warnings: [] }
-    throw Error('Unexpected ' + channel)
-  })
-  return { invoke, current: () => current }
-}

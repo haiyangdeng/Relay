@@ -57,6 +57,24 @@ describe('renderer first-content admission', () => {
     expect(f.failed).not.toHaveBeenCalled()
   })
 
+  it('dismisses a timeout notice only on a verified ready signal and ignores a stale frame', async () => {
+    vi.useFakeTimers()
+    const f = fixture()
+    const dismiss = vi.fn()
+    f.failed.mockReturnValue(dismiss)
+    await vi.advanceTimersByTimeAsync(100)
+    f.webContents.emit(
+      'ipc-message',
+      { sender: f.webContents, senderFrame: {} },
+      'rendererFirstContentReady'
+    )
+    expect(dismiss).not.toHaveBeenCalled()
+    f.signal()
+    f.signal()
+    f.window.emit('closed')
+    expect(dismiss).toHaveBeenCalledOnce()
+  })
+
   it.each(['load-failed', 'preload-failed', 'renderer-gone'] as const)(
     'settles %s without reload, retry, window destruction or session cleanup',
     async (reason) => {
@@ -128,14 +146,18 @@ describe('renderer first-content admission', () => {
   it('blocks a late ready if a fatal failure follows the already reported timeout', async () => {
     vi.useFakeTimers()
     const f = fixture()
+    const dismiss = vi.fn()
+    f.failed.mockReturnValue(dismiss)
     await vi.advanceTimersByTimeAsync(100)
     f.webContents.emit('preload-error')
     f.signal()
     expect(f.ready).not.toHaveBeenCalled()
+    expect(dismiss).not.toHaveBeenCalled()
     expect(f.failed).toHaveBeenCalledExactlyOnceWith('content-timeout')
     f.webContents.emit('did-start-navigation', { isMainFrame: true, isSameDocument: false })
     f.signal()
     expect(f.ready).toHaveBeenCalledOnce()
+    expect(dismiss).toHaveBeenCalledOnce()
     expect(await f.startup.firstContent).toBe(false)
   })
 

@@ -19,6 +19,7 @@ sources=(
   "$project_dir/native/tun/RelayTunCoreHost.swift"
   "$project_dir/native/tun/RelayTunCoreReadiness.swift"
   "$project_dir/native/tun/RelayTunLiveCore.swift"
+  "$project_dir/native/tun/RelayTunRuntimeCapture.swift"
   "$project_dir/native/tun/RelayTunRuntimeRules.swift"
   "$project_dir/native/tun/RelayTunRuntimeResources.swift"
 )

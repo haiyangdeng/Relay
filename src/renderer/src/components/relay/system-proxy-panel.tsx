@@ -6,6 +6,7 @@ import {
   defaultPacScript,
   defaultSystemBypass,
   type SystemProxyReport,
+  type SystemProxyState,
   type SystemProxySettings
 } from '../../../../shared/relay/system-proxy'
 import {
@@ -13,16 +14,18 @@ import {
   systemProxyDraftRecord,
   type SystemProxyDraftRecord
 } from '../../../../shared/relay/system-proxy-draft'
+import { errorMessage } from '../../utils/error-message'
 import {
   submitSystemProxy,
   canPrepareSystemProxy,
+  canSwitchSystemProxy,
+  systemProxyListenerPort,
   systemProxyPortFromCore,
   selectedSystemProxyServices,
   rememberSystemProxyServices,
   readSystemProxyServices
 } from './system-proxy-actions'
 import './network-settings.css'
-import { ensureSelectedProxy } from './proxy-library-actions'
 
 const labels: Record<SystemProxyReport['status'], string> = {
   inactive: 'Relay 未接管',
@@ -59,13 +62,16 @@ export function RelaySystemProxyPanel({
   const [report, setReport] = useState<SystemProxyReport>()
   const [notice, setNotice] = useState('')
   const [pending, setPending] = useState(false)
+  const [remotePending, setRemotePending] = useState(false)
   const [reading, setReading] = useState(false)
+  const [queuedEnable, setQueuedEnable] = useState<number>()
   const [readFailed, setReadFailed] = useState(false)
   const [draftRecord, setDraftRecord] = useState<SystemProxyDraftRecord>()
   const [draftDirty, setDraftDirty] = useState(false)
   const [draftNotice, setDraftNotice] = useState('')
   const [refreshVersion, setRefreshVersion] = useState(0)
   const draftEpoch = useRef(0)
+  const reportEpoch = useRef(0)
   const operation = useRef(false),
     attempted = useRef(false),
     mounted = useRef(true),
@@ -122,23 +128,25 @@ export function RelaySystemProxyPanel({
     }
   }, [])
   const run = async (
-    action: 'inspect' | 'apply' | 'restore',
+    action: 'inspect' | 'enable' | 'apply' | 'restore',
     discardDraft = false
   ): Promise<void> => {
     if (operation.current || busy) return
     operation.current = true
+    ++reportEpoch.current
     setPending(true)
     setReading(action === 'inspect')
     onBusy(true)
     setNotice(action === 'inspect' ? '' : '正在应用本次系统代理操作…')
     const epoch = draftEpoch.current
     const current = (): boolean => mounted.current && epoch === draftEpoch.current
-    const invoke = async (channel: string, input?: unknown): Promise<unknown> => {
+    const invoke = async (channel: string, ...args: unknown[]): Promise<unknown> => {
       if (!current()) throw new Error('本次页面操作已失效。')
-      const result = await window.electron.ipcRenderer.invoke(channel, input)
+      const result = await window.electron.ipcRenderer.invoke(channel, ...args)
       if (!current()) throw new Error('本次页面操作已失效。')
       return result
     }
+    let prepared = false
     try {
       if (action === 'inspect' && (!draftDirty || discardDraft)) {
         const epoch = draftEpoch.current
@@ -159,14 +167,22 @@ export function RelaySystemProxyPanel({
         }
       }
       if (action !== 'inspect') {
-        const core = action === 'apply' ? await ensureSelectedProxy(invoke, current) : undefined
+        const corePort =
+          action !== 'restore'
+            ? await systemProxyListenerPort(
+                invoke,
+                current,
+                settings,
+                portEdited.current ? settings.port : undefined
+              )
+            : undefined
         const result = await submitSystemProxy(
           action,
           {
             ...settings,
-            port: systemProxyPortFromCore(settings.port, portEdited.current, core?.httpPort),
+            port: systemProxyPortFromCore(settings.port, portEdited.current, corePort),
             serviceIDs:
-              action === 'apply' && report
+              action !== 'restore' && report
                 ? selectedSystemProxyServices(
                     report,
                     readSystemProxyServices() ?? defaultSettings?.serviceIDs
@@ -176,6 +192,7 @@ export function RelaySystemProxyPanel({
           },
           invoke,
           (plan) => {
+            prepared = true
             if (mounted.current) setReport(plan.report)
           }
         )
@@ -204,12 +221,15 @@ export function RelaySystemProxyPanel({
       const value = (await invoke('relaySystemProxyInspect')) as SystemProxyReport
       if (mounted.current) {
         setReport(value)
+        setRemotePending(false)
         setReadFailed(false)
       }
-    } catch {
-      if (mounted.current) {
-        setReadFailed(true)
-        setNotice('状态未确认，请刷新后核对恢复记录。')
+    } catch (error) {
+      if (current()) {
+        // Listener startup can fail before any system-proxy mutation. Keep
+        // the controls usable, e.g. after the first profile is imported.
+        setReadFailed(action === 'inspect' || prepared)
+        setNotice(errorMessage(error, '系统代理操作未完成。'))
       }
     } finally {
       operation.current = false
@@ -228,6 +248,37 @@ export function RelaySystemProxyPanel({
     window.addEventListener('relay-sidebar-network-changed', changed)
     return () => window.removeEventListener('relay-sidebar-network-changed', changed)
   }, [])
+  useEffect(() => {
+    if (!active) return
+    const generation = reportEpoch
+    const unsubscribe = window.electron.ipcRenderer.on('controledMihomoConfigUpdated', () => {
+      if (operation.current) return
+      const version = ++generation.current
+      const epoch = draftEpoch.current
+      void window.electron.ipcRenderer
+        .invoke('relaySystemProxyState')
+        .then((value) => {
+          const state = value as SystemProxyState | undefined
+          if (
+            !state ||
+            version !== generation.current ||
+            epoch !== draftEpoch.current ||
+            operation.current
+          )
+            return
+          setRemotePending(state.pending)
+          if (state.observed && !state.pending && state.report) {
+            setReport(state.report)
+            setReadFailed(false)
+          }
+        })
+        .catch(() => {})
+    })
+    return () => {
+      ++generation.current
+      unsubscribe()
+    }
+  }, [active])
   const runRef = useRef(run)
   runRef.current = run
   useEffect(() => {
@@ -240,6 +291,33 @@ export function RelaySystemProxyPanel({
       void runRef.current('inspect')
     }
   }, [active, busy, pending, refreshVersion])
+  // A first click is valid while the initial read is discovering available
+  // services. Consume the intent once the report and saved settings arrive.
+  useEffect(() => {
+    if (queuedEnable === undefined) return
+    if (!active || queuedEnable !== draftEpoch.current) {
+      setQueuedEnable(undefined)
+      return
+    }
+    if (pending || busy || operation.current) return
+    setQueuedEnable(undefined)
+    if (readFailed || !report || !draftRecord) return
+    if (report.recordID && (report.status === 'active' || report.status === 'applied')) return
+    if (!canSwitchSystemProxy(report, readSystemProxyServices() ?? defaultSettings?.serviceIDs)) {
+      setNotice('系统代理状态需要核对，请检查网络服务和恢复记录。')
+      return
+    }
+    void runRef.current('enable')
+  }, [
+    queuedEnable,
+    active,
+    busy,
+    pending,
+    draftRecord,
+    readFailed,
+    report,
+    defaultSettings?.serviceIDs
+  ])
   const saveDraft = async (): Promise<void> => {
     if (operation.current || busy || !draftRecord || !draftDirty) return
     operation.current = true
@@ -284,7 +362,8 @@ export function RelaySystemProxyPanel({
       onBusy(false)
     }
   }
-  const locked = busy || pending
+  const locked = busy || pending || remotePending
+  const initialRead = active && !report && !readFailed && !remotePending && reading
   const managed = report?.status === 'active' || report?.status === 'applied'
   const canApply =
     !locked &&
@@ -319,15 +398,19 @@ export function RelaySystemProxyPanel({
             应用设置
           </Button>
           <Chip size="sm" variant="flat">
-            {reading
-              ? '正在读取'
-              : readFailed
-                ? '状态待核对'
-                : report
-                  ? canApply && (report.status === 'pending' || report.status === 'conflict')
-                    ? '可重新启用'
-                    : labels[report.status]
-                  : '状态未获取'}
+            {queuedEnable !== undefined
+              ? '正在开启'
+              : reading
+                ? '正在读取'
+                : pending
+                  ? '处理中'
+                  : readFailed
+                    ? '状态待核对'
+                    : report
+                      ? canApply && (report.status === 'pending' || report.status === 'conflict')
+                        ? '可重新启用'
+                        : labels[report.status]
+                      : '状态未获取'}
           </Chip>
           <Button
             isIconOnly
@@ -363,8 +446,22 @@ export function RelaySystemProxyPanel({
             size="sm"
             aria-label="Relay 系统代理"
             isSelected={managed}
-            isDisabled={locked || readFailed || (managed ? !report?.canRestore : !canApply)}
-            onValueChange={(enabled) => void run(enabled ? 'apply' : 'restore')}
+            isDisabled={
+              queuedEnable !== undefined ||
+              (!initialRead &&
+                (locked ||
+                  readFailed ||
+                  !report ||
+                  (!managed && !draftRecord) ||
+                  !canSwitchSystemProxy(
+                    report,
+                    readSystemProxyServices() ?? defaultSettings?.serviceIDs
+                  )))
+            }
+            onValueChange={(enabled) => {
+              if (initialRead && enabled) setQueuedEnable(draftEpoch.current)
+              else void run(enabled ? 'enable' : 'restore')
+            }}
           />
         </div>
         <fieldset disabled={locked}>

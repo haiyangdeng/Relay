@@ -117,6 +117,32 @@ private enum Injected: Error { case failure }
             check("actual snapshot race or unknown ABI fails closed without retry", error is RelayTunTCPListener.Failure)
         }
         do {
+            for enabled in [false, true] {
+                var request = [Int32](repeating: 0, count: 2), response = request
+                guard pipe(&request) == 0, pipe(&response) == 0,
+                      let channel = RelayTunRuntimeCapture.Channel(input: request[0], output: response[1], proxyGroups: enabled)
+                      else { throw Injected.failure }
+                defer { _ = channel.invalidateAndDrain(); Darwin.close(request[1]); Darwin.close(response[0]) }
+                channel.start(binding: binding, clientSHA256: clientSHA, installationRevision: revision, proxies: { action, context, reply in
+                    guard case .select("选择 / 组", "B") = action else { reply(.unavailable); return }
+                    do {
+                        try context.bindOwner({}); try context.bindPublication({ check in try check() })
+                        reply(.sampled(Data("{}".utf8)))
+                    } catch { reply(.unavailable) }
+                }, capture: { _, reply in reply(.unavailable) })
+                let hello = try line(response[0])
+                var message = binding; message["version"] = enabled ? 4 : 1; message["id"] = 1
+                message["action"] = "select"; message["group"] = "选择 / 组"; message["member"] = "B"
+                var frame = try JSONSerialization.data(withJSONObject: message); frame.append(10); try write(request[1],frame)
+                if enabled {
+                    let reply = try line(response[0])
+                    check("dedicated group pipe accepts a scoped Unicode selection and confirms it",
+                          hello["capability"] as? String == "proxy-groups-v1" && reply["status"] as? String == "groups" &&
+                          reply["groupsBase64"] as? String == Data("{}".utf8).base64EncodedString())
+                } else {
+                    check("ordinary read capability refuses proxy selection frames", closed(response[0]))
+                }
+            }
             for scenario in ["capture", "bad-binding", "duplicate-key", "late", "response-peer-closed"] {
                 var request = [Int32](repeating: 0, count: 2), response = request
                 guard pipe(&request) == 0, pipe(&response) == 0,

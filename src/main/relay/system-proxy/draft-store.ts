@@ -12,6 +12,7 @@ export class SystemProxyDraftStore {
   readonly path: string
   private readonly file: SimplePrivateDocumentFile<SystemProxyDraft>
   private pending = false
+  private reading?: Promise<SystemProxyDraftRecord>
   private readonly waiters: (() => void)[] = []
   constructor(context: RelayStateContext) {
     this.file = new SimplePrivateDocumentFile(
@@ -24,6 +25,9 @@ export class SystemProxyDraftStore {
   }
   isBusy(): boolean {
     return this.pending
+  }
+  isReading(): boolean {
+    return !!this.reading
   }
   whenIdle(): Promise<void> {
     return this.pending ? new Promise((resolve) => this.waiters.push(resolve)) : Promise.resolve()
@@ -41,13 +45,18 @@ export class SystemProxyDraftStore {
       this.waiters.splice(0).forEach((resolve) => resolve())
     }
   }
-  read(assertCurrent: () => void = () => {}): Promise<SystemProxyDraftRecord> {
-    return this.perform(async () => {
+  async read(assertCurrent: () => void = () => {}): Promise<SystemProxyDraftRecord> {
+    assertCurrent()
+    if (this.pending && !this.reading) throw new Error('系统代理默认设置操作尚未结束。')
+    const operation = this.reading ?? this.perform(() => this.file.read())
+    this.reading = operation
+    try {
+      const record = await operation
       assertCurrent()
-      const record = await this.file.read()
-      assertCurrent()
-      return record
-    })
+      return structuredClone(record)
+    } finally {
+      if (this.reading === operation) this.reading = undefined
+    }
   }
   save(
     raw: unknown,

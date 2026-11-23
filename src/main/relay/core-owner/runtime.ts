@@ -14,13 +14,25 @@ import { openCoreOwnerWorkDirectory } from './work-directory'
 
 export function persistentCoreConfiguration(
   source: string,
-  port: number
+  port: number,
+  selectors?: ReadonlyMap<string, string>
 ): ReturnType<typeof localProxyConfiguration> {
-  const built = localProxyConfiguration(source, port, 'off'),
+  const built = localProxyConfiguration(
+      source,
+      port,
+      'off',
+      undefined,
+      undefined,
+      [],
+      undefined,
+      undefined,
+      selectors
+    ),
     value = JSON.parse(built.configuration)
   if (
     built.dedicated ||
     built.resolution.enabled ||
+    value['proxy-groups'].length > 80 ||
     built.groups.some(
       (group) => group.type === 'smart' || group.dynamic || group.providers?.length
     ) ||
@@ -515,9 +527,10 @@ export function createCoreOwnerRuntime(context: RelayStateContext, nativeExecuta
       source: string,
       port: number,
       register: OwnedCoreCleanupRegistration,
-      assertIntent: () => void = () => {}
+      assertIntent: () => void = () => {},
+      selectors?: ReadonlyMap<string, string>
     ): Promise<RelayOwnedCore> {
-      const built = persistentCoreConfiguration(source, port),
+      const built = persistentCoreConfiguration(source, port, selectors),
         held = current()
       if (
         !originalReservation ||

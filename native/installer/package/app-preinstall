@@ -17,6 +17,9 @@ for directory in / /Applications; do
         case "$(/usr/bin/stat -f '%g' "$directory")" in 0|80) ;; *) fail 'Applications directory has an untrusted writable group';; esac
     fi
 done
+scripts=$(CDPATH= cd -P "$(/usr/bin/dirname "$0")" && /bin/pwd -P)
+"$scripts/install-transaction" prepare "$@"
+trap 'result=$?; trap - EXIT; if [ "$result" != 0 ]; then "$scripts/install-transaction" rollback || true; fi; exit "$result"' EXIT
 for target in /Applications/Relay.app \
     '/Library/Application Support/Relay/SystemProxy' \
     '/Library/Application Support/Relay/Tun' \
@@ -41,7 +44,7 @@ inventory=$(/usr/sbin/pkgutil --pkgs) || fail 'package inventory unavailable'
 while IFS= read -r installed; do
     case "$installed" in
         local.relay.network.app|local.relay.network.system-proxy.v1|local.relay.network.tun.network-executor-v1|local.relay.network.tun.feasibility|local.relay.network.tun.core-managed-v1|local.relay.network.tun.core-managed-v2)
-            fail "已有 Relay 安装记录：${installed}。请先运行 Relay 卸载工具。"
+            "$scripts/install-transaction" allows-receipt "$installed" || fail "已有 Relay 安装记录：${installed}。请先运行 Relay 卸载工具。"
             ;;
     esac
 done <<EOF
@@ -68,3 +71,5 @@ while IFS= read -r process; do
 done <<EOF
 $processes
 EOF
+
+trap - EXIT

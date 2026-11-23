@@ -41,6 +41,14 @@ export function localResolverMode(value: unknown): LocalResolverMode {
   throw new Error('本次DNS模式无效。')
 }
 
+export interface RelayProxyPageOwner {
+  kind: 'ordinary' | 'tun-managed'
+  instanceId: string
+  configurationRevision: string
+  profileId: string
+  mode: RelayCoreMode
+}
+
 export interface LocalProxyGroup {
   name: string
   members: string[]
@@ -80,6 +88,25 @@ export interface LocalProxyState {
   pid?: number
   dedicated?: DedicatedListenerSummary
 }
+export function relayProxyCanPrepare(
+  state?: Pick<
+    LocalProxyState,
+    'owned' | 'pending' | 'uncertain' | 'hasRecord' | 'traffic' | 'phase'
+  >
+): boolean {
+  // A blocked observation is also produced by a temporary port conflict.
+  // Explicit preparation always rechecks the current lease and every listener.
+  return !!(
+    state &&
+    state.owned === false &&
+    state.pending === false &&
+    state.uncertain === false &&
+    state.hasRecord === false &&
+    state.traffic === 'inactive' &&
+    ['unknown', 'idle', 'blocked', 'failed'].includes(state.phase)
+  )
+}
+
 export interface LocalProxyPreparation {
   evidenceId: string
   profile: RelayStoredProfile

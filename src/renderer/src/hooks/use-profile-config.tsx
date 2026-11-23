@@ -1,4 +1,5 @@
 import React, { ReactNode, useCallback, useRef } from 'react'
+import type { KeyedMutator } from 'swr'
 import { useTranslation } from 'react-i18next'
 import { showError } from '@renderer/utils/error-display'
 import {
@@ -20,7 +21,7 @@ const { Provider, useConfig } = createConfigContext<IProfileConfig>({
 interface ProfileConfigContextType {
   profileConfig: IProfileConfig | undefined
   setProfileConfig: (config: IProfileConfig) => Promise<void>
-  mutateProfileConfig: () => void
+  mutateProfileConfig: KeyedMutator<IProfileConfig>
   addProfileItem: (item: Partial<IProfileItem>) => Promise<void>
   updateProfileItem: (item: IProfileItem) => Promise<void>
   removeProfileItem: (id: string) => Promise<void>

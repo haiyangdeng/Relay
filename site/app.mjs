@@ -129,6 +129,10 @@ function downloadableAsset(release, asset, repository) {
   }
 }
 
+function appVersion(release) {
+  return release.version.replace(/-build\.\d+$/, '')
+}
+
 let manifest
 const picker = document.querySelector('#release-version')
 function renderRelease(version) {
@@ -143,7 +147,11 @@ function renderRelease(version) {
     const button = card.querySelector('.download-button')
     const checksum = card.querySelector('.checksum')
     const metadata = card.querySelector('.asset-meta')
-    button.replaceChildren(document.createTextNode(url ? `下载 V${release.version}` : '待验证发布'))
+    button.replaceChildren(
+      document.createTextNode(
+        url ? `下载构建 ${asset.buildVersion ?? release.buildVersion}` : '待验证发布'
+      )
+    )
     button.removeAttribute('href')
     button.setAttribute('aria-disabled', String(!url))
     button.tabIndex = url ? 0 : -1
@@ -160,10 +168,14 @@ function renderRelease(version) {
       metadata.textContent = '安装包生成后，将在此提供下载及 SHA-256。'
     }
   })
+  if (repository) {
+    document.querySelector('#release-notes-link').href =
+      `${repository}/releases/tag/v${release.version}`
+  }
   document.querySelector('#minimum-os').textContent = `需要 ${release.minimumOS}`
   document.querySelector('#release-description').textContent = ready
-    ? `V${release.version} · ${release.publishedAt.slice(0, 10)} 发布`
-    : `V${release.version} 安装包待验证后发布。`
+    ? `V${appVersion(release)} · ${release.publishedAt.slice(0, 10)} 发布`
+    : `V${appVersion(release)} 安装包待验证后发布。`
   document.querySelector('#release-status span:last-child').textContent =
     ready === cards.length
       ? '已发布 · 请按 Mac 芯片类型选择版本'
@@ -171,7 +183,7 @@ function renderRelease(version) {
         ? '部分安装包已发布 · 其余架构仍待验证'
         : '待验证发布 · 当前没有可下载的安装包'
   document.querySelector('.release-notes summary span:first-child').textContent =
-    `V${release.version} 版本内容`
+    `V${appVersion(release)} 版本内容`
   document.querySelector('#release-notes-list').replaceChildren(
     ...release.notes.map((note) => {
       const li = document.createElement('li')
@@ -196,7 +208,12 @@ function validManifest(value) {
         ['pending', 'published'].includes(r.status) &&
         typeof r.minimumOS === 'string' &&
         Array.isArray(r.assets) &&
-        r.assets.every((a) => a && ['arm64', 'x64'].includes(a.arch)) &&
+        r.assets.every(
+          (a) =>
+            a &&
+            ['arm64', 'x64'].includes(a.arch) &&
+            /^[1-9]\d*$/.test(a.buildVersion ?? r.buildVersion ?? '')
+        ) &&
         new Set(r.assets.map((a) => a.arch)).size === r.assets.length &&
         Array.isArray(r.notes) &&
         r.notes.every((n) => typeof n === 'string')
@@ -217,8 +234,8 @@ fetch('./releases.json', { cache: 'no-cache' })
     const available = current.assets.filter((asset) =>
       downloadableAsset(current, asset, githubRepository(manifest.repositoryUrl))
     ).length
-    document.querySelector('.header-cta').firstChild.textContent = `V${current.version} `
-    document.querySelector('.release-pill').textContent = `V${current.version}`
+    document.querySelector('.header-cta').firstChild.textContent = `V${appVersion(current)} `
+    document.querySelector('.release-pill').textContent = `V${appVersion(current)}`
     document.querySelector('#release-strip-note').textContent = available
       ? '按 Mac 芯片类型选择对应安装包。'
       : '安装包将在验证完成后提供。'
@@ -227,7 +244,9 @@ fetch('./releases.json', { cache: 'no-cache' })
       .replaceChildren(
         document.createTextNode('基于开源，共同改进。'),
         document.createElement('br'),
-        document.createTextNode(`GPL-3.0 · V${current.version}${available ? '' : ' 发布准备版'}`)
+        document.createTextNode(
+          `GPL-3.0 · V${appVersion(current)}${available ? '' : ' 发布准备版'}`
+        )
       )
     picker.replaceChildren(
       ...manifest.releases.map((release) => {
@@ -236,7 +255,7 @@ fetch('./releases.json', { cache: 'no-cache' })
         const downloadable = release.assets.some((asset) =>
           downloadableAsset(release, asset, githubRepository(manifest.repositoryUrl))
         )
-        option.textContent = `V${release.version} · ${downloadable ? '已发布' : '待验证'}`
+        option.textContent = `V${appVersion(release)} · ${downloadable ? release.publishedAt.slice(0, 10) : '待验证'}`
         return option
       })
     )

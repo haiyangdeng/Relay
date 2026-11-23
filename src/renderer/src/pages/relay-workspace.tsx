@@ -7,6 +7,8 @@ import { RelayUIPreferencesPanel } from '@renderer/components/relay/ui-preferenc
 import { RelayOwnedResetPanel } from '@renderer/components/relay/owned-reset-panel'
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
+import useSWR from 'swr'
+import { relayProxyPageOwner } from '@renderer/utils/ipc'
 import {
   getRelayWorkspacePanel,
   RELAY_WORKSPACE_PANELS,
@@ -38,6 +40,7 @@ import { RelaySubscriptionsDashboard } from '@renderer/components/relay/subscrip
 import { relayProfileRead } from '@renderer/components/relay/profile-read-queue'
 import {
   activateCachedProfile,
+  chooseActiveTunProfile,
   relayProxyRunning
 } from '@renderer/components/relay/proxy-library-actions'
 import { RelaySubscriptionSourcesPanel } from '@renderer/components/relay/subscription-sources-panel'
@@ -166,6 +169,20 @@ export default function RelayWorkspace(): React.JSX.Element {
   const navigate = useNavigate()
   const pageRef = useRef<HTMLDivElement>(null)
   const activePanel = getRelayWorkspacePanel(location.search)
+  const profilePanel = ['profiles', 'profile-library', 'rule-providers', 'core'].includes(
+    activePanel
+  )
+  const {
+    data: profileOwner,
+    error: profileOwnerError,
+    mutate: refreshProfileOwner
+  } = useSWR(
+    profilePanel ? 'relayProxyPageOwner' : null,
+    async () => (await relayProxyPageOwner()) ?? null,
+    { revalidateOnFocus: false, errorRetryCount: 0 }
+  )
+  const managedOwner =
+    !profileOwnerError && profileOwner?.kind === 'tun-managed' ? profileOwner : undefined
   const requestedModule = new URLSearchParams(location.search).get('module')
   const simpleModule =
     requestedModule && Object.hasOwn(SIMPLE_MODULES, requestedModule)
@@ -195,7 +212,7 @@ export default function RelayWorkspace(): React.JSX.Element {
     [tunUnconfirmed, setTunUnconfirmed] = useState(false),
     [completeEvidenceId, setCompleteEvidenceId] = useState<string>()
   const runtimeGistBusy = operationBusy || simplePending || !!tunState?.pending || tunUnconfirmed
-  const runtimeGistTunSessionId =
+  const activeTunSessionId =
     tunState?.owned &&
     tunState.phase === 'active' &&
     tunState.traffic === 'forwarding' &&
@@ -205,6 +222,13 @@ export default function RelayWorkspace(): React.JSX.Element {
       : undefined
   const busy =
     operationBusy || simplePending || !!tunState?.owned || !!tunState?.pending || tunUnconfirmed
+  const profileSelectionBusy =
+    operationBusy ||
+    simplePending ||
+    !!tunState?.pending ||
+    !!profileOwnerError ||
+    (profilePanel && profileOwner === undefined) ||
+    (!profileOwner && !!tunState?.owned && !activeTunSessionId)
   const [error, setError] = useState('')
   const [activity, setActivity] = useState('')
   const [observation, setObservation] = useState<RelayObservation>()
@@ -246,7 +270,9 @@ export default function RelayWorkspace(): React.JSX.Element {
     }
     if (
       profileInventory ||
-      busy ||
+      (activePanel === 'profile-library' || activePanel === 'rule-providers'
+        ? profileSelectionBusy
+        : busy) ||
       inventoryReading.current ||
       inventoryAttempt.current === activePanel
     )
@@ -260,7 +286,7 @@ export default function RelayWorkspace(): React.JSX.Element {
         inventoryReading.current = false
         setBusy(false)
       })
-  }, [activePanel, profileInventory, busy, refreshProfileInventory])
+  }, [activePanel, profileInventory, busy, profileSelectionBusy, refreshProfileInventory])
   const preferredProfile =
     profileInventory?.profiles.find((profile) => profile.id === profileConfig?.current) ??
     profileInventory?.profiles[0]
@@ -793,7 +819,8 @@ export default function RelayWorkspace(): React.JSX.Element {
     action: 'prepare' | 'save' | 'list' | 'choose',
     selection?: RelayProfileSelection
   ): Promise<void> => {
-    if (profileOperation.current || (action === 'choose' && (busy || !selection))) return
+    if (profileOperation.current || (action === 'choose' && (profileSelectionBusy || !selection)))
+      return
     profileOperation.current = true
     const ticket = ++profileEpoch.current
     const current = (): boolean => workspaceMounted.current && ticket === profileEpoch.current
@@ -846,6 +873,19 @@ export default function RelayWorkspace(): React.JSX.Element {
         )
         setProfileNotice('已读取独立配置副本。')
       } else if (selection) {
+        const tun = await chooseActiveTunProfile(
+          selection,
+          (channel, ...args) => window.electron.ipcRenderer.invoke(channel, ...args),
+          managedOwner?.instanceId ?? activeTunSessionId
+        )
+        if (tun) {
+          if (current()) {
+            await refreshProfileOwner(tun, { revalidate: false })
+            void mutateProfileConfig()
+            setProfileNotice('虚拟网卡已使用所选配置。')
+          }
+          return
+        }
         await window.electron.ipcRenderer.invoke('changeCurrentProfile', selection)
         const observed = (await window.electron.ipcRenderer.invoke(
           'getProfileConfig'
@@ -870,7 +910,7 @@ export default function RelayWorkspace(): React.JSX.Element {
   }
 
   const activateProfile = async (profile: RelayStoredProfile): Promise<void> => {
-    if (profileOperation.current || localOperations.current || busy)
+    if (profileOperation.current || localOperations.current || profileSelectionBusy)
       throw new Error('请等待当前操作完成')
     profileOperation.current = true
     ++localOperations.current
@@ -881,9 +921,21 @@ export default function RelayWorkspace(): React.JSX.Element {
     setRuntimePreparation(undefined)
     setRuntimeChecked(undefined)
     setLocalPreparation(undefined)
-    setLocalState((previous) => (previous ? { ...previous, pending: true } : previous))
     let readbackFailed = false
+    let ordinary = false
     try {
+      const tun = await chooseActiveTunProfile(
+        profile,
+        (channel, ...args) => window.electron.ipcRenderer.invoke(channel, ...args),
+        managedOwner?.instanceId ?? activeTunSessionId
+      )
+      if (tun) {
+        if (sequence !== localSequence.current) throw new Error('代理状态已变化')
+        await refreshProfileOwner(tun, { revalidate: false })
+        return
+      }
+      ordinary = true
+      setLocalState((previous) => (previous ? { ...previous, pending: true } : previous))
       const saved = relayProxyRunning(localState)
         ? undefined
         : await saveLocalPlan(() => workspaceMounted.current && sequence === localSequence.current)
@@ -904,22 +956,23 @@ export default function RelayWorkspace(): React.JSX.Element {
       if (sequence !== localSequence.current) throw new Error('代理状态已变化')
       setLocalState(state)
     } finally {
-      try {
-        const state = (await window.electron.ipcRenderer.invoke(
-          'relayLocalProxyState'
-        )) as LocalProxyState
-        readbackFailed =
-          sequence !== localSequence.current ||
-          !relayProxyRunning(state) ||
-          state.profileId !== profile.id
-        if (sequence === localSequence.current) setLocalState(state)
-      } catch {
-        readbackFailed = true
-        if (sequence === localSequence.current) {
-          setLocalState((previous) => (previous ? { ...previous, uncertain: true } : previous))
-          setLocalNotice('配置启用后的状态未确认，请在内核设置中重新读取。')
+      if (ordinary)
+        try {
+          const state = (await window.electron.ipcRenderer.invoke(
+            'relayLocalProxyState'
+          )) as LocalProxyState
+          readbackFailed =
+            sequence !== localSequence.current ||
+            !relayProxyRunning(state) ||
+            state.profileId !== profile.id
+          if (sequence === localSequence.current) setLocalState(state)
+        } catch {
+          readbackFailed = true
+          if (sequence === localSequence.current) {
+            setLocalState((previous) => (previous ? { ...previous, uncertain: true } : previous))
+            setLocalNotice('配置启用后的状态未确认，请在内核设置中重新读取。')
+          }
         }
-      }
       profileOperation.current = false
       --localOperations.current
       setProfilePending(false)
@@ -995,15 +1048,20 @@ export default function RelayWorkspace(): React.JSX.Element {
     const unsubscribe = window.electron.ipcRenderer.on('groupsUpdated', () => {
       invalidated = true
       void read()
+      if (profilePanel) void refreshProfileOwner()
     })
+    const unsubscribeTun = profilePanel
+      ? window.electron.ipcRenderer.on('relayTunUpdated', () => void refreshProfileOwner())
+      : undefined
     void read()
     const timer = localBlocking ? setInterval(() => void read(), 1000) : undefined
     return () => {
       active = false
       if (timer) clearInterval(timer)
       unsubscribe()
+      unsubscribeTun?.()
     }
-  }, [localBlocking])
+  }, [localBlocking, profilePanel, refreshProfileOwner])
 
   const prepareLocalProxy = async (profile: RelayStoredProfile): Promise<void> => {
     if (localOperations.current) return
@@ -1630,7 +1688,7 @@ export default function RelayWorkspace(): React.JSX.Element {
           </div>
         )}
         <RelayWorkspaceSection panels={['overview']} active={activePanel}>
-          <RelayOverviewPanel status={status} local={localState} />
+          <RelayOverviewPanel status={status} active={activePanel === 'overview'} />
         </RelayWorkspaceSection>
         <RelayWorkspaceSection panels={['settings']} active={activePanel}>
           <RelayUIPreferencesPanel busy={busy} onBusy={setBusy} />
@@ -1662,7 +1720,7 @@ export default function RelayWorkspace(): React.JSX.Element {
           <RelayBackupAccountPanel
             busy={runtimeGistBusy}
             remoteBusy={busy}
-            tunSessionId={runtimeGistTunSessionId}
+            tunSessionId={activeTunSessionId}
             onBusy={setBusy}
             onInvalidate={() => {
               setAccountRemotePreparation({})
@@ -1695,13 +1753,13 @@ export default function RelayWorkspace(): React.JSX.Element {
         <RelayWorkspaceSection panels={['runtime-share']} active={activePanel}>
           <RelayRuntimeGistPanel
             busy={runtimeGistBusy}
-            tunSessionId={runtimeGistTunSessionId}
+            tunSessionId={activeTunSessionId}
             onBusy={setBusy}
             externalPreparation={accountRuntimePreparation}
           />
           <RelayRuntimeGistSyncPanel
             busy={runtimeGistBusy}
-            tunSessionId={runtimeGistTunSessionId}
+            tunSessionId={activeTunSessionId}
             onBusy={setBusy}
           />
         </RelayWorkspaceSection>
@@ -1917,15 +1975,17 @@ export default function RelayWorkspace(): React.JSX.Element {
             inventory={profileInventory}
             currentSelection={profileConfig?.current ?? null}
             activeProfileId={
-              localState?.owned &&
+              managedOwner?.profileId ??
+              (localState?.owned &&
               localState.phase === 'running' &&
               localState.traffic === 'listening' &&
               !localState.uncertain &&
               !localState.pending
                 ? localState.profileId
-                : undefined
+                : undefined)
             }
-            busy={busy || profilePending || runtimePending}
+            busy={busy || !!managedOwner || profilePending || runtimePending}
+            selectionBusy={profileSelectionBusy || profilePending || runtimePending}
             onBusy={setBusy}
             onRefresh={refreshProfileInventory}
             onChoose={activateProfile}
@@ -1964,7 +2024,8 @@ export default function RelayWorkspace(): React.JSX.Element {
             preparation={profilePreparation}
             inventory={profileInventory}
             notice={profileNotice}
-            busy={busy || profilePending || runtimePending}
+            busy={busy || !!managedOwner || profilePending || runtimePending}
+            selectionBusy={profileSelectionBusy || profilePending || runtimePending}
             onPrepare={() => void profileAction('prepare')}
             onSave={() => void profileAction('save')}
             onList={() => void profileAction('list')}
@@ -1974,12 +2035,13 @@ export default function RelayWorkspace(): React.JSX.Element {
             }
             currentSelection={profileConfig?.current ?? null}
             activeProfileId={
-              localState?.owned &&
+              managedOwner?.profileId ??
+              (localState?.owned &&
               localState.phase === 'running' &&
               !localState.uncertain &&
               !localState.pending
                 ? localState.profileId
-                : undefined
+                : undefined)
             }
           />
           <RelayRuntimePanel
@@ -2055,8 +2117,8 @@ export default function RelayWorkspace(): React.JSX.Element {
         </RelayWorkspaceSection>
         <RelayWorkspaceSection panels={['tun']} active={activePanel}>
           <RelayTunPanel
-            active={activePanel === 'tun' && !!profileInventory}
-            preferredProfileId={preferredProfile?.id}
+            active={activePanel === 'tun'}
+            profileConfig={profileConfig}
             onConfigurationChange={() => setCompleteEvidenceId(undefined)}
             completeEvidenceId={completeEvidenceId}
             busy={
@@ -2066,7 +2128,15 @@ export default function RelayWorkspace(): React.JSX.Element {
               !!localState?.pending ||
               !!desktopState?.pending
             }
-            activationBlocked={!!coreBlocking || !!localBlocking || !!desktopBlocking}
+            activationBlocked={
+              !!coreBlocking ||
+              !!desktopBlocking ||
+              localPending ||
+              !!localState?.pending ||
+              !!localState?.uncertain ||
+              (!!localState?.owned &&
+                (localState.phase !== 'running' || localState.traffic !== 'listening'))
+            }
             onBusy={setBusy}
             onState={setTunState}
             onUnconfirmed={setTunUnconfirmed}
@@ -2081,7 +2151,7 @@ export default function RelayWorkspace(): React.JSX.Element {
             defaultSettings={{
               port: relayProxyRunning(localState) ? (localState?.httpPort ?? localPort) : localPort
             }}
-            busy={busy}
+            busy={operationBusy || simplePending || !!tunState?.pending || tunUnconfirmed}
             onBusy={setBusy}
           />
         </RelayWorkspaceSection>
@@ -2166,7 +2236,7 @@ export default function RelayWorkspace(): React.JSX.Element {
             ordinaryConfigurationRevision={
               localState?.phase === 'running' ? localState.configurationRevision : undefined
             }
-            tunSessionId={runtimeGistTunSessionId}
+            tunSessionId={activeTunSessionId}
             busy={
               operationBusy ||
               localPending ||

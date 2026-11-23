@@ -2,6 +2,71 @@ import Foundation
 import Darwin
 import Security
 
+/// Only a fixed upstream failure is retained. Unknown output, node names,
+/// credentials and raw log lines never leave this bounded in-memory scanner.
+struct RelayTunCoreStartDiagnosticScanner {
+    private static let missingStack = Data("gVisor is not included in this build, rebuild with -tags with_gvisor".utf8)
+    private var tail = Data()
+    private(set) var code: String?
+    var retainedByteCount: Int { tail.count }
+    mutating func append(_ bytes: Data) {
+        guard code == nil else { return }
+        // The pipe reader supplies bounded chunks; keep this primitive bounded
+        // as well so large fixture/input fragments cannot grow retained memory.
+        for offset in stride(from: 0, to: bytes.count, by: 4096) {
+            let combined = tail + bytes.subdata(in: offset..<min(offset + 4096, bytes.count))
+            if combined.range(of: Self.missingStack) != nil {
+                code = "core.tun.stack.unavailable"; tail.removeAll(); return
+            }
+            tail = Data(combined.suffix(Self.missingStack.count - 1))
+        }
+    }
+}
+
+/// Drain both output streams independently of startup polling, including after
+/// success. A noisy child cannot block on a full pipe or create an unbounded log.
+private final class RelayTunCoreStartDiagnostics {
+    private let source: DispatchSourceRead
+    private let reader: Int32
+    private(set) var writer: Int32
+    private let lock = NSLock()
+    private var scanner = RelayTunCoreStartDiagnosticScanner()
+    init() throws {
+        var descriptors: [Int32] = [-1, -1]
+        guard pipe(&descriptors) == 0 else { throw RelayTunOwnedChild.Failure.launch }
+        let output = fcntl(descriptors[1], F_DUPFD_CLOEXEC, 10)
+        Darwin.close(descriptors[1])
+        guard output >= 0,
+              fcntl(descriptors[0], F_SETFD, FD_CLOEXEC) == 0,
+              fcntl(descriptors[0], F_SETFL, O_NONBLOCK) == 0 else {
+            Darwin.close(descriptors[0]); if output >= 0 { Darwin.close(output) }
+            throw RelayTunOwnedChild.Failure.launch
+        }
+        reader = descriptors[0]; writer = output
+        source = DispatchSource.makeReadSource(fileDescriptor: reader, queue: DispatchQueue(label: "relay.tun.core-diagnostics"))
+        source.setEventHandler { [weak self] in self?.drain() }
+        let input = reader
+        source.setCancelHandler { Darwin.close(input) }
+        source.resume()
+    }
+    deinit { closeWriter(); source.cancel() }
+    func closeWriter() { if writer >= 0 { Darwin.close(writer); writer = -1 } }
+    var code: String? { lock.lock(); defer { lock.unlock() }; return scanner.code }
+    private func drain() {
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        for _ in 0..<16 {
+            let count = Darwin.read(reader, &buffer, buffer.count)
+            if count > 0 {
+                lock.lock(); scanner.append(Data(buffer.prefix(count))); lock.unlock()
+            } else if count < 0 && errno == EINTR { continue }
+            else {
+                if count == 0 || (errno != EAGAIN && errno != EWOULDBLOCK) { source.cancel() }
+                return
+            }
+        }
+    }
+}
+
 /// An in-memory capability for exactly one successful posix_spawn. It never
 /// adopts a stored PID or searches by process name. No JSON/App entry point is
 /// provided; the complete fixed-resource/configuration and consent gate must
@@ -28,6 +93,8 @@ final class RelayTunOwnedChild {
     private var ownershipLost = false
     private var stopping = false
     private var forced = false
+    private var diagnostics: RelayTunCoreStartDiagnostics?
+    var startupDiagnostic: String? { diagnostics?.code }
     private init(pid: pid_t, effectiveUID: uid_t = getuid()) { self.pid = pid; self.effectiveUID = effectiveUID }
 
     /// Reuses the exact-child ownership/reaping path. Mihomo receives no TUN
@@ -50,12 +117,15 @@ final class RelayTunOwnedChild {
         }
         let directory = try privateDirectory(launch.directory)
         try verify()
-        return try withManagedActions(installationLock: installationLock, directory: launch.directory) { actions, attributes in
+        let diagnostics = try RelayTunCoreStartDiagnostics()
+        defer { diagnostics.closeWriter() }
+        return try withManagedActions(installationLock: installationLock, directory: launch.directory, diagnostics: diagnostics) { actions, attributes in
             try sameDirectory(launch.directory, directory); try verify(); try sameDirectory(launch.directory, directory)
             let arguments = [launch.executable, "-d", launch.directory, "-f", launch.directory + "/config.yaml",
                              "-ext-ctl-unix", launch.directory + "/api.sock"]
-            let child = try spawnOwned(executable: launch.executable, arguments: arguments, environment: launch.managedEnvironment,
+            let child = try spawnOwned(executable: launch.executable, arguments: arguments, environment: launch.managedEnvironment + ["RELAY_MANAGED_TUN_HANDOFF=1"],
                 actions: &actions, attributes: &attributes, effectiveUID: 0, beforeSpawn: execution?.beforeSpawn)
+            child.diagnostics = diagnostics
             register(child)
             try child.verifyIdentity()
             return child
@@ -64,6 +134,7 @@ final class RelayTunOwnedChild {
 
     /// The same descriptor mapping is exercised by the inert child fixture.
     private static func withManagedActions<T>(installationLock: Int32, directory: String,
+        diagnostics: RelayTunCoreStartDiagnostics? = nil,
         body: (inout posix_spawn_file_actions_t?, inout posix_spawnattr_t?) throws -> T) throws -> T {
         let retained = fcntl(installationLock, F_DUPFD_CLOEXEC, 10)
         guard retained >= 0 else { throw Failure.launch }; defer { Darwin.close(retained) }
@@ -80,7 +151,11 @@ final class RelayTunOwnedChild {
               posix_spawnattr_setsigmask(&attributes, &mask) == 0,
               posix_spawnattr_setsigdefault(&attributes, &defaults) == 0 else { throw Failure.launch }
         for fd: Int32 in [0, 1, 2] {
-            guard posix_spawn_file_actions_addopen(&actions, fd, "/dev/null", fd == 0 ? O_RDONLY : O_WRONLY, 0) == 0 else { throw Failure.launch }
+            if fd != 0, let diagnostics {
+                guard posix_spawn_file_actions_adddup2(&actions, diagnostics.writer, fd) == 0 else { throw Failure.launch }
+            } else {
+                guard posix_spawn_file_actions_addopen(&actions, fd, "/dev/null", fd == 0 ? O_RDONLY : O_WRONLY, 0) == 0 else { throw Failure.launch }
+            }
         }
         guard posix_spawn_file_actions_adddup2(&actions, retained, 3) == 0,
               posix_spawn_file_actions_addclose(&actions, retained) == 0,
@@ -439,17 +514,20 @@ final class RelayTunOwnedChild {
                       register: (RelayTunOwnedChild) -> Void,
                       afterRegister: () throws -> Void = {}) throws -> RelayTunOwnedChild {
         try ordinaryUID()
-        guard ["wait", "exit", "ignore", "inspect", "peer"].contains(mode) else { throw Failure.launch }
+        guard ["wait", "exit", "ignore", "inspect", "peer", "diagnostic"].contains(mode) else { throw Failure.launch }
         _ = try privateDirectory(directory)
         var path = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
         guard proc_pidpath(getpid(), &path, UInt32(path.count)) > 0 else { throw Failure.launch }
         let executable = String(cString: path)
         try RelayTunDescriptor.checkPlainPath(URL(fileURLWithPath: executable))
         if let installationLock {
-            return try withManagedActions(installationLock: installationLock, directory: directory) { actions, attributes in
+            let diagnostics = try RelayTunCoreStartDiagnostics()
+            defer { diagnostics.closeWriter() }
+            return try withManagedActions(installationLock: installationLock, directory: directory, diagnostics: diagnostics) { actions, attributes in
                 let child = try spawnOwned(executable: executable, arguments: [executable, "--inert-owned-child", mode],
                     environment: ["PATH=/usr/bin:/bin", "LANG=C", "LC_ALL=C", "HOME=" + directory, "TMPDIR=" + directory],
                     actions: &actions, attributes: &attributes, effectiveUID: identityEffectiveUID ?? getuid(), beforeSpawn: beforeSpawn)
+                child.diagnostics = diagnostics
                 register(child)
                 try afterRegister()
                 if identityEffectiveUID != nil { try child.verifyIdentity() }

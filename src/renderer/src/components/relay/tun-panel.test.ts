@@ -6,8 +6,15 @@ import type {
   TunSessionState,
   TunStatus
 } from '../../../../shared/relay/tun'
+import { systemProxyListenerPort } from './system-proxy-actions'
 import { createTunRendererApi } from './tun-api'
-import { createTunPanelController, type TunPanelSnapshot } from './tun-controller'
+import {
+  createTunPanelController,
+  activeTunSwitch,
+  tunSwitchProgress,
+  tunStoppingNotice,
+  type TunPanelSnapshot
+} from './tun-controller'
 import { RelayTunControls } from './tun-panel'
 
 const completeId = '11111111-1111-4111-8111-111111111111',
@@ -110,6 +117,22 @@ function fixture(
 }
 
 describe('TUN controls and opaque renderer flow', () => {
+  it('uses only the verified listener for system HTTP and SOCKS under TUN', async () => {
+    const invoke = vi.fn(async (channel: string) => {
+      if (channel !== 'relayEnsureSystemProxyListener') throw new Error('Unexpected IPC')
+      return { httpPort: 7890, mixedPort: 7893 }
+    })
+    expect(
+      await systemProxyListenerPort(invoke, () => true, { mode: 'manual', socks: false })
+    ).toBe(7890)
+    expect(await systemProxyListenerPort(invoke, () => true, { mode: 'manual', socks: true })).toBe(
+      7893
+    )
+    expect(invoke.mock.calls).toEqual([
+      ['relayEnsureSystemProxyListener'],
+      ['relayEnsureSystemProxyListener']
+    ])
+  })
   it('does not offer an unprepared, expired or source-mismatched start', () => {
     for (const html of [
       render(),
@@ -248,6 +271,71 @@ describe('TUN controls and opaque renderer flow', () => {
       )
     ).toBe(false)
     expect(f.invoke).toHaveBeenLastCalledWith('relayTunStatus')
+  })
+  it('preserves a released-tunnel recovery failure across refresh and explicitly resumes only the ordinary core', async () => {
+    const f = fixture()
+    const ordinaryRecovery = { sessionId, phase: 'failed' as const, reason: 'listener' as const }
+    let observed: TunStatus = { ...status(restored), ordinaryRecovery }
+    f.invoke.mockImplementation(async (channel) => {
+      if (channel === 'relayTunStatus') return observed
+      if (channel === 'relayTunRecoverOrdinary') {
+        observed = status(restored)
+        return { status: 'restored', state: { ...restored, warnings: ['普通代理已恢复。'] } }
+      }
+      throw Error('Unexpected mutation')
+    })
+    await f.control.run('status')
+    const html = render(f.control.snapshot())
+    expect(html).toContain('恢复普通代理')
+    expect(html).toContain('普通代理待恢复')
+    expect(html).not.toContain('本次核心、设备及网络恢复已确认')
+    f.control.hostChanged()
+    await vi.waitFor(() => expect(f.control.snapshot().pending).toBe(false))
+    expect(f.control.snapshot().notice).toContain('普通代理恢复未确认')
+    await f.control.run('recover')
+    expect(f.invoke).toHaveBeenCalledWith('relayTunRecoverOrdinary', { sessionId })
+    expect(f.control.snapshot().status?.ordinaryRecovery).toBeUndefined()
+    expect(f.invoke.mock.calls.map(([name]) => name)).not.toContain('relayTunStop')
+  })
+  it('holds the shared closing indication through ordinary proxy restoration and preserves its final outcome', async () => {
+    const f = fixture()
+    await f.control.run('prepare')
+    await f.control.run('start')
+    let finish!: (value: unknown) => void, finishStatus!: (value: unknown) => void
+    f.invoke.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve
+        })
+    )
+    f.invoke.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishStatus = resolve
+        })
+    )
+    const phases: boolean[] = []
+    const unsubscribe = tunSwitchProgress.subscribe(() =>
+      phases.push(tunSwitchProgress.read() === 'stop')
+    )
+    try {
+      const operation = f.control.run('stop')
+      f.control.hostChanged()
+      expect(f.control.snapshot().notice).toBe(tunStoppingNotice)
+      expect(render({ status: status(restored) })).toContain(tunStoppingNotice)
+      expect(render({ status: status(restored) })).not.toContain('网络恢复已确认')
+      const incomplete = 'TUN 已关闭；普通代理恢复未确认，可从系统代理开关重新连接。'
+      finish({ status: 'restored', state: { ...restored, warnings: [incomplete] } })
+      await vi.waitFor(() => expect(finishStatus).toBeTypeOf('function'))
+      expect(tunSwitchProgress.read()).toBe('stop')
+      expect(render(f.control.snapshot())).toContain(tunStoppingNotice)
+      finishStatus(status(restored))
+      await operation
+      expect(phases).toEqual([true, false])
+      expect(f.control.snapshot().notice).toBe(incomplete)
+    } finally {
+      unsubscribe()
+    }
   })
   it.each(['restored', 'uncertain', 'unavailable'] as const)(
     'reconciles queued stop notifications with %s status without replaying the stop',
@@ -506,6 +594,51 @@ describe('Current-profile TUN toggle', () => {
     expect(missing).toContain('RelayTun-CoreManaged-v2-local-geodata-v1.pkg')
     expect(missing).toContain('刷新授权状态')
     expect(render({ status: status(active) })).toContain('已开启')
+  })
+  it('unbinds only the matching visible-panel shortcut on replacement and unmount', () => {
+    const initial = { checked: false, disabled: false, setEnabled: vi.fn() }
+    const replacement = { checked: true, disabled: false, setEnabled: vi.fn() }
+    const oldCleanup = activeTunSwitch.bind(initial)
+    const cleanup = activeTunSwitch.bind(replacement)
+    oldCleanup()
+    try {
+      activeTunSwitch.read()?.setEnabled(false)
+      expect(initial.setEnabled).not.toHaveBeenCalled()
+      expect(replacement.setEnabled).toHaveBeenCalledExactlyOnceWith(false)
+    } finally {
+      cleanup()
+    }
+    expect(activeTunSwitch.read()).toBeUndefined()
+  })
+  it('serialises enable from independent panel and sidebar controllers during preparation', async () => {
+    let complete!: (id: string) => void
+    const sidebar = fixture({
+      prepareEvidence: () =>
+        new Promise((resolve) => {
+          complete = resolve
+        })
+    })
+    const panel = fixture()
+    sidebar.invoke.mockImplementation(async (channel) => {
+      if (channel === 'relayTunPrepare') return plan
+      if (channel === 'relayTunStatus') return status({ ...idle, phase: 'prepared' })
+      if (channel === 'relayTunStart') return { status: 'started', state: active }
+      throw Error('unexpected channel')
+    })
+    const first = sidebar.control.enable()
+    await vi.waitFor(() => expect(complete).toBeTypeOf('function'))
+    try {
+      await panel.control.enable()
+      expect(panel.invoke).not.toHaveBeenCalled()
+      expect(tunSwitchProgress.read()).toBe('start')
+    } finally {
+      complete(completeId)
+      await first
+    }
+    expect(
+      sidebar.invoke.mock.calls.filter(([channel]) => channel === 'relayTunStart')
+    ).toHaveLength(1)
+    expect(tunSwitchProgress.read()).toBeUndefined()
   })
   it('checks the selected configuration then enables using its exact evidence from one click', async () => {
     const prepareEvidence = vi.fn(async () => completeId)

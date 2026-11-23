@@ -142,12 +142,15 @@ export class LocalProxyPlanStore {
     })
   }
 
-  resolvePinnedNode(
+  async resolvePinnedNode(
     plan: DedicatedListenerPlan,
     sourceProfileId: string,
     capture: () => unknown,
     recheck?: () => Promise<void>
   ): Promise<{ node: Record<string, unknown>; revision: string }> {
+    // A dashboard read cannot invalidate a pinned listener during handoff.
+    // Stay exclusive with writers and re-read the private revision under that gate.
+    while (this.reading) await this.reading
     return this.perform(async () => {
       const previous = await this.file.read()
       if (

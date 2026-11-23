@@ -22,6 +22,8 @@ pinned() {
 [ "${2:-invalid}" = / ] && [ "${3:-invalid}" = / ] || fail 'only the running system volume is supported'
 scripts=$(CDPATH= cd -P "$(/usr/bin/dirname "$0")" && /bin/pwd -P)
 directory "$scripts"
+"$scripts/install-transaction" verify
+trap 'result=$?; trap - EXIT; if [ "$result" != 0 ]; then "$scripts/install-transaction" rollback || true; fi; exit "$result"' EXIT
 root='/Library/Application Support/Relay/Uninstall'
 service=local.relay.network.uninstall
 daemon="/Library/LaunchDaemons/$service.plist"
@@ -66,31 +68,48 @@ retire_staging_link() {
         /bin/rm "$staging" || return 1
     fi
 }
+preserve_removal() {
+    [ "$root_reserved" = 1 ] || return 0
+    for recovery in "$root/intent.json" "$root/finalization.json"; do
+        if present "$recovery"; then
+            [ -f "$recovery" ] && [ ! -L "$recovery" ] &&
+                [ "$(/usr/bin/stat -f '%u:%Lp:%l' "$recovery")" = '0:644:1' ] || exit 1
+            # An accepted Trash intent owns this generation, even if it arrived
+            # while launchd was unregistering the newly published supervisor.
+            "$scripts/install-transaction" retire-backup-for-removal || exit 1
+            echo 'Relay automatic removal has begun; recovery components retained for its completion.' >&2
+            exit "$result"
+        fi
+    done
+}
 cleanup() {
     result=$?
     trap - EXIT
     if [ "$ready" != 1 ]; then
-        if [ "$root_reserved" = 1 ]; then
-            for recovery in "$root/intent.json" "$root/finalization.json"; do
-                if present "$recovery"; then
-                    [ -f "$recovery" ] && [ ! -L "$recovery" ] &&
-                        [ "$(/usr/bin/stat -f '%u:%Lp:%l' "$recovery")" = '0:644:1' ] || exit 1
-                    # The App can be trashed while Installer waits for ready.
-                    # Its accepted removal is now owned by the durable monitor;
-                    # installation rollback must not remove that recovery path.
-                    echo 'Relay automatic removal has begun; recovery components retained for its completion.' >&2
-                    exit "$result"
-                fi
-            done
+        if "$scripts/install-transaction" is-committed >/dev/null 2>&1; then
+            echo 'Relay installation committed; old backup cleanup requires retrying this same Installer. New components were retained.' >&2
+            exit "$result"
         fi
+        preserve_removal
         if [ "$daemon_published" = 1 ]; then
-            /bin/launchctl bootout "system/$service" >/dev/null 2>&1 || true
             if /bin/launchctl print "system/$service" >/dev/null 2>&1; then
-                echo 'Relay uninstall monitor could not be stopped; recovery files retained.' >&2
-                exit 1
+                pinned "$daemon" 644 '@UNINSTALL_DAEMON_SHA256@'
+                /bin/launchctl bootout "system/$service" || exit 1
+                attempts=0
+                while :; do
+                    if /bin/launchctl print "system/$service" >/dev/null 2>&1; then
+                        [ "$attempts" -lt 100 ] || fail 'uninstall monitor still registered; recovery files retained'
+                        /bin/sleep 0.25 || exit 1
+                        attempts=$((attempts + 1))
+                    else
+                        [ "$?" = 113 ] || fail 'uninstall monitor inventory unavailable; recovery files retained'
+                        break
+                    fi
+                done
             else
-                [ "$?" = 113 ] || exit 1
+                [ "$?" = 113 ] || fail 'uninstall monitor inventory unavailable; recovery files retained'
             fi
+            preserve_removal
         fi
         if [ "$root_reserved" = 1 ]; then
             # A failed unlink after no-replace publication leaves exactly these
@@ -98,7 +117,7 @@ cleanup() {
             retire_staging_link "$root/RelayUninstallSupervisor" "$root/.install-supervisor" 755 '@SUPERVISOR_SHA256@' || exit 1
             retire_staging_link "$root/RelayNative" "$root/.install-native" 755 '@NATIVE_SHA256@' || exit 1
             retire_staging_link "$daemon" "$root/.install-daemon" 644 '@UNINSTALL_DAEMON_SHA256@' || exit 1
-            for file in "$root/RelayUninstallSupervisor" "$root/RelayNative" "$root/installation.json" "$root/ready.json" "$root/finalization.json" "$root/.install-supervisor" "$root/.install-native" "$root/.install-daemon" "$daemon"; do
+            for file in "$root/RelayUninstallSupervisor" "$root/RelayNative" "$root/installation.json" "$root/ready.json" "$root/.install-supervisor" "$root/.install-native" "$root/.install-daemon" "$daemon"; do
                 if present "$file"; then
                     [ ! -L "$file" ] && [ "$(/usr/bin/stat -f '%u:%l' "$file")" = '0:1' ] || exit 1
                     /bin/rm "$file" || result=1
@@ -108,7 +127,8 @@ cleanup() {
         fi
         # The verified helper uninstaller only removes this new installation;
         # no App/core has started and no proxy setting was changed here.
-        if [ "$helper_ready" = 1 ]; then "$scripts/uninstall" || result=1; fi
+        if [ "$helper_ready" = 1 ]; then "$scripts/install-transaction" rollback-helper || exit 1; fi
+        "$scripts/install-transaction" rollback || result=1
     fi
     exit "$result"
 }
@@ -117,12 +137,13 @@ trap 'exit 1' HUP INT TERM
 "$scripts/proxy-preinstall" "$@"
 "$scripts/proxy-postinstall" "$@"
 helper_ready=1
+"$scripts/install-transaction" publish-tun
 directory '/Library/Application Support/Relay'
 [ "$(/usr/bin/stat -f '%u' /dev/console)" = "$client_uid" ] || fail 'console user changed during installation'
 [ "$(/usr/bin/plutil -extract clientUID raw -o - '/Library/Application Support/Relay/SystemProxy/installation.json')" = "$client_uid" ] || fail 'proxy helper and uninstall monitor users differ'
 # Atomic reservation and no-replace publication prevent a competing installer
 # or unexpected existing file from changing which executable runs as root.
-/bin/mkdir -m 755 "$root"
+"$scripts/install-transaction" reserve-monitor
 root_reserved=1
 publish() {
     source=$1; destination=$2; permissions=$3; expected=$4; staging=$5
@@ -142,6 +163,7 @@ publish "$scripts/$service.plist" "$daemon" 644 '@UNINSTALL_DAEMON_SHA256@' "$ro
 daemon_published=1
 # Registration verifies the fixed App identity and captures its inode/bookmark.
 "$root/RelayUninstallSupervisor" --register --uid "$client_uid" --home "$client_home"
+"$scripts/install-transaction" record-monitor
 /bin/launchctl bootstrap system "$daemon"
 /bin/launchctl print "system/$service" >/dev/null
 attempt=0
@@ -150,5 +172,12 @@ until "$root/RelayUninstallSupervisor" --verify-ready; do
     [ "$attempt" -lt 10 ] || fail 'uninstall monitor did not acquire the installed App'
     /bin/sleep 1
 done
-ready=1
+if "$scripts/install-transaction" commit; then ready=1; else
+    result=$?
+    if [ "$result" = 75 ]; then
+        ready=1
+        echo 'Relay installation committed; old backup cleanup requires retrying this same Installer. New components were retained.' >&2
+    fi
+    exit "$result"
+fi
 echo 'Relay installed with automatic Trash uninstall monitoring. Network settings are unchanged.'

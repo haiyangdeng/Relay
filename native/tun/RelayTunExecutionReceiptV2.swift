@@ -69,8 +69,8 @@ enum RelayTunExecutionReceiptV2 {
         .init(profile: .alpha, architecture: .x64, version: "alpha-ca8d7c4", sha256: "2249c77fa07e2dae31c4852714f2e10293d11d99927edd002d57359648c68cc6", size: 60970960),
         .init(profile: .smart, architecture: .arm64, version: "alpha-smart-4624551", sha256: "138c416dddf53af64a8cd01508c2e93c338e18c6cc04b0e480932bc819eda061", size: 57972626),
         .init(profile: .smart, architecture: .x64, version: "alpha-smart-4624551", sha256: "935572a8117acb3ab95d7c4235d07b475b8fdb19c1904413c0bb05131d007132", size: 62169184),
-        .init(profile: .localGeodata, architecture: .arm64, version: "relay-geodata-v1p1-3f27", sha256: "e9327b2ce0e5c4405ce2640145339be9e315943bdeb63ffee4b3f4fe18bee419", size: 65185184),
-        .init(profile: .localGeodata, architecture: .x64, version: "relay-geodata-v1p1-3f27", sha256: "1d110d7f958abd22ec011ac466f7451bf22101f8b6338a26a3e9fedcbd62ae26", size: 70035456)
+        .init(profile: .localGeodata, architecture: .arm64, version: "relay-geodata-v1p1-3f27", sha256: "a7dcd3ffe59be033ed1b4000a4ae90acdf2ab41450536e02445692ea124195c2", size: 79861968),
+        .init(profile: .localGeodata, architecture: .x64, version: "relay-geodata-v1p1-3f27", sha256: "bd9f2b38256b05b643f6a33273669b4df2c2b32b5a25db0b8db41a0a0199bc3b", size: 85466544)
     ]
     static let modelPins: [ModelIdentity] = [
         .init(version: "LightGBM-Model-530723858", sha256: "23633022a815fb34e510befe1c176ba50af3ced48f08b172454f4cd6b8327788", size: 9345218),

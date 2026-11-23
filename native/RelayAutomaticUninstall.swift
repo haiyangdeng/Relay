@@ -385,15 +385,25 @@ enum RelayAutomaticUninstall {
     struct PreferenceEnvironment {
         let synchronize: (String) -> Bool
         let keys: (String) throws -> [String]
-        let removeKeys: (String, [String]) -> Void
+        let deleteDomain: (String) throws -> Void
         static let live = Self(synchronize: { domain in
             CFPreferencesSynchronize(domain as CFString, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
         }, keys: { domain in
             guard let raw = CFPreferencesCopyKeyList(domain as CFString, kCFPreferencesCurrentUser, kCFPreferencesAnyHost) else { return [] }
             guard let keys = raw as? [String] else { throw failure() }
             return keys
-        }, removeKeys: { domain, keys in
-            CFPreferencesSetMultiple(nil, keys as CFArray, domain as CFString, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
+        }, deleteDomain: { domain in
+            // Per-key CFPreferences mutations can be pending in cfprefsd even
+            // after a local key-list readback. Use the system defaults client
+            // for the whole domain and wait for its transaction to finish.
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/usr/bin/defaults")
+            task.arguments = ["delete", domain]
+            task.standardOutput = FileHandle.nullDevice
+            task.standardError = FileHandle.nullDevice
+            try task.run()
+            task.waitUntilExit()
+            guard task.terminationReason == .exit, task.terminationStatus == 0 else { throw failure() }
         })
     }
     static func clearPreferences(_ environment: PreferenceEnvironment, assertAuthorized: () throws -> Void) throws {
@@ -402,7 +412,7 @@ enum RelayAutomaticUninstall {
             guard environment.synchronize(domain) else { throw AssistantError("Relay系统偏好同步失败，保留卸载进度。") }
             let keys = try environment.keys(domain)
             try assertAuthorized()
-            environment.removeKeys(domain, keys)
+            if !keys.isEmpty { try environment.deleteDomain(domain) }
             guard environment.synchronize(domain), try environment.keys(domain).isEmpty else {
                 throw AssistantError("Relay系统偏好清理未确认，保留卸载进度。")
             }
@@ -493,11 +503,18 @@ enum RelayAutomaticUninstall {
         let executable = String(cString: physical); free(physical)
         guard executable == installationRoot.appendingPathComponent(executableName).path else { throw failure() }
         let context = authority.context
-        return try await cleanup(CleanupEnvironment(assertAuthorized: authority.revalidate,
+        let result = try await cleanup(CleanupEnvironment(assertAuthorized: authority.revalidate,
             restoreProxy: { try restoreProxy(context) }, restoreDesktop: { try await restoreDesktop(context) },
             retireCore: { try retireCore(context) }, restoreClients: { try restoreClients(context) },
             assertIdle: { try assertIdle(context) }, clearPreferences: { try clearPreferences(authority) }, removeCredentials: removeCredentials, removeTemporaryLease: removeTemporaryLease,
             remove: { try removeOwnedPath($0, home: authority.environment.home, uid: authority.environment.uid) }))
+        try authority.revalidate()
+        for domain in preferenceDomains {
+            guard try !exists(authority.environment.home.appendingPathComponent("Library/Preferences/" + domain + ".plist")) else {
+                throw AssistantError("Relay 偏好文件仍然存在，保留卸载进度。")
+            }
+        }
+        return result
     }
 
     /// Descriptor-relative deletion never follows a cache symlink, accepts a

@@ -31,7 +31,7 @@ const coreProfile = process.env.RELAY_NATIVE_RESOURCE_CORE_PROFILE ?? 'provider-
     coreProfile === 'provider-v1p1'
       ? {
           path: '../artifacts/core-geodata-provider-v1p1-pair-20261102/arm64/mihomo',
-          sha256: 'e9327b2ce0e5c4405ce2640145339be9e315943bdeb63ffee4b3f4fe18bee419',
+          sha256: 'a7dcd3ffe59be033ed1b4000a4ae90acdf2ab41450536e02445692ea124195c2',
           version: 'relay-geodata-v1p1-3f27'
         }
       : coreProfile === 'legacy-v1'

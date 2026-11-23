@@ -1,5 +1,6 @@
 // Intentionally separate from ../index.ts. Importing the upstream entry would
 // register core/system-proxy lifecycle side effects before our preview gate.
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { basename, dirname, join } from 'path'
 import { access, readFile, realpath } from 'fs/promises'
 import { pathToFileURL } from 'url'
@@ -29,18 +30,28 @@ import { mainWindowLogger, setAppLogSizeMiB } from '../utils/logger'
 import { validateCoreAction } from '../../shared/relay/core'
 import {
   localProxyAction,
+  relayProxyCanPrepare,
   localProxyPrepare,
-  type LocalResolverMode
+  type LocalResolverMode,
+  type LocalProxyGroup,
+  type RelayProxyPageOwner
 } from '../../shared/relay/local-proxy'
-import type { RelayProfileSelection } from '../../shared/relay/runtime'
-import { enabledLocalProxyPorts } from '../../shared/relay/local-proxy-ports'
+import { profileSelection, type RelayProfileSelection } from '../../shared/relay/runtime'
+import { canSelectCachedGroupMember } from '../../shared/relay/profiles'
+import { systemProxyInboundPort } from '../../shared/relay/system-proxy'
+import {
+  enabledLocalProxyPorts,
+  localProxyPortsCompatible,
+  localProxyPortsFor
+} from '../../shared/relay/local-proxy-ports'
+import { dedicatedListenersCompatible } from '../../shared/relay/dedicated-listeners'
 import {
   localProxyPlan,
   RELAY_LOCAL_PROXY_PLAN_CHANNELS
 } from '../../shared/relay/local-proxy-plan'
 import { webdavDirectoryEvidence } from '../../shared/relay/backup-directory'
 import { variantImportRequest, type VariantImportRequest } from '../../shared/relay/variant'
-import { tunEvidenceRequest, type TunStatus } from '../../shared/relay/tun'
+import { tunEvidenceRequest, tunSessionRequest, type TunStatus } from '../../shared/relay/tun'
 import { tunRuleChangeRequest, tunRulesReadRequest } from '../../shared/relay/tun-rules'
 import { tunResourceReadRequest, tunResourceReplaceRequest } from '../../shared/relay/tun-resources'
 import {
@@ -59,6 +70,9 @@ import { RELAY_SIMPLE_PUBLICATION_CHANNELS } from '../../shared/relay/simple-pub
 import { getAppInfo as resolveConnectionAppInfo } from '../utils/app-info'
 import type { SubStoreAdvancedStart } from '../../shared/relay/substore'
 import { coreOwnerAction } from '../../shared/relay/core-owner'
+import { createTunHandoff, type TunHandoffContext } from './tun/handoff'
+import { createTunProfileSwitch } from './tun/profile-switch'
+import { tunLocalPlanProjection } from './tun/local-plan-projection'
 import { createOwnedDiagnosticService } from './owned-diagnostics'
 import { createDiagnosticEvidenceReader } from './diagnostic-evidence'
 import {
@@ -230,8 +244,16 @@ import { createProfileRuntimeService } from './profiles/runtime-service'
 import { checkProfileRuntime } from './core/profile-check'
 import { createLocalProxyService } from './core/local-proxy-service'
 import { createProfileStartup } from './core/profile-startup'
+import { createStartupPreferences } from './core/startup-preferences'
+import { applyStartupSystemProxy } from './core/startup-system-proxy'
 import { startLocalProxyCore } from './core/local-proxy-runtime'
-import { probeLocalPort, probeLocalUdpPort, ownsHttpListener, ownsUdpListener } from './core/port'
+import {
+  probeLocalPort,
+  probeLocalUdpPort,
+  ownsHttpListener,
+  ownsUdpListener,
+  waitForTunPlanPorts
+} from './core/port'
 import {
   createCompleteConfigurationService,
   CheckedConfigurationFailure
@@ -854,6 +876,12 @@ app
         return actionWindowAvailable()
       }
     })
+    const switchingContext = new AsyncLocalStorage<symbol>()
+    let switchingToken: symbol | undefined
+    const requireProfileSwitchIdle = (): void => {
+      if (switchingToken && switchingContext.getStore() !== switchingToken)
+        throw new Error('虚拟网卡正在切换配置，请稍后操作。')
+    }
     const requireSubscriptionActorsFinished = (
       allowBackup = false,
       allowUpdates = false,
@@ -864,6 +892,7 @@ app
       probePermit?: typeof isolatedProbePermit,
       subStorePermit?: typeof subStoreNetworkPermit
     ): void => {
+      requireProfileSwitchIdle()
       if (subStoreNetworkBusy && subStorePermit !== subStoreNetworkPermit)
         throw new Error('请先结束Sub-Store独立出口。')
       if (isolatedProbes?.isBlocking() && probePermit !== isolatedProbePermit)
@@ -919,6 +948,8 @@ app
       requireSubscriptionActorsFinished(...args)
     }
     const requireIndependentOperationIdle = (): void => {
+      requireProfileSwitchIdle()
+      if (tunHandoff.isBusy()) throw new Error('核心切换正在进行。')
       if (subStoreNetworkBusy) throw new Error('请先结束Sub-Store独立出口。')
       if (isolatedProbes?.isBlocking()) throw new Error('请先取消并结束独立探测。')
       if (guardManagement?.isBlocking())
@@ -1031,9 +1062,9 @@ app
       assertLibraryBindings: (refs) => overrideLibraryStore.assertBindings(refs),
       script: (script, configuration) =>
         runConfigurationScript(nativePath(), script, configuration),
-      prepare: (request, recheck, enableTun) => {
+      prepare: (request, recheck, enableTun, transform) => {
         if (quitAfterRestore) throw new Error('退出恢复正在进行。')
-        return completeConfiguration.prepare(request, recheck, enableTun)
+        return completeConfiguration.prepare(request, recheck, enableTun, transform)
       }
     })
     const overrideLibrary = createOverrideLibraryService({
@@ -1090,7 +1121,15 @@ app
         return actionWindowAvailable()
       }
     })
+    const startupPreferences = createStartupPreferences(stateContext())
+    const pendingProxyChoices = new Set<Promise<unknown>>()
+    const trackProxyChoice = <T>(operation: Promise<T>): Promise<T> => {
+      pendingProxyChoices.add(operation)
+      return operation.finally(() => pendingProxyChoices.delete(operation))
+    }
     const localProxy = createLocalProxyService({
+      rememberSelector: startupPreferences.select,
+      readSelectors: startupPreferences.selectors,
       beforeRuntimeMutation: async () => {
         await guardManagement?.beforeRuntimeMutation()
         await scopedCLI?.beforeRuntimeMutation()
@@ -1141,7 +1180,8 @@ app
         logLevel,
         runtimeAssets,
         ports,
-        pinnedNode
+        pinnedNode,
+        selectors
       ) =>
         lifetime === 'persistent'
           ? ordinaryCoreOwner.start(
@@ -1149,12 +1189,13 @@ app
               port,
               register,
               (() => {
-                const page = coreOwnerIntent()
+                const page = coreOwnerIntent(false, !tunHandoff.isBusy())
                 return () => {
                   owner.assertLive()
                   page()
                 }
-              })()
+              })(),
+              selectors
             )
           : startLocalProxyCore(
               await localProxyCoreRoot(!!runtimeAssets?.length),
@@ -1172,14 +1213,13 @@ app
               logLevel,
               runtimeAssets,
               ports,
-              pinnedNode
+              pinnedNode,
+              selectors
             ),
-      confirmStart: async (_preparation) => {
+      confirmStart: async (_preparation, assertContext) => {
         const owner = window,
-          live = coreOwnerIntent()
+          live = assertContext ?? coreOwnerIntent(false, !tunHandoff.isBusy())
         if (!owner) return false
-        live()
-
         live()
         return true
       },
@@ -1190,7 +1230,9 @@ app
         return actionWindowAvailable()
       },
       confirmMode: async (_previous, _next) => {
-        return actionWindowAvailable()
+        return (
+          (tunHandoff.isBusy() && !quitAfterRestore && !shellQuitting) || actionWindowAvailable()
+        )
       },
       confirmRule: async (_report) => {
         return actionWindowAvailable()
@@ -1299,7 +1341,14 @@ app
       tunInstallation: TunInstallation | undefined,
       tunObservation: TunNativeInspection | undefined,
       tunHost: TunSessionHost | undefined
+    let trayTunSessionId: string | undefined
     const notifyTun = (): void => {
+      const state = tunSession.state()
+      const sessionId = state.owned && state.phase === 'active' ? state.sessionId : undefined
+      if (sessionId !== trayTunSessionId) {
+        trayTunSessionId = sessionId
+        trayWorkflows?.invalidate()
+      }
       if (window && !window.isDestroyed()) window.webContents.send('relayTunUpdated')
     }
     const tunSession = createTunSessionService({
@@ -1346,10 +1395,15 @@ app
           },
           { execution }
         )
-        const dispose = host.dispose.bind(host)
-        host.dispose = async () => {
-          await dispose()
-          if (tunHost === host) tunHost = undefined
+        // Either successful terminal operation retires this native host.
+        // A denied close must retain it for an explicit recovery attempt.
+        for (const operation of ['dispose', 'disposeReleased'] as const) {
+          const dispose = host[operation]?.bind(host)
+          if (dispose)
+            host[operation] = async () => {
+              await dispose()
+              if (tunHost === host) tunHost = undefined
+            }
         }
         return host
       },
@@ -1374,6 +1428,374 @@ app
       },
       notify: notifyTun
     })
+    const assertTunLocalReady = (): void => {
+      const local = localProxy.state()
+      if (
+        local.pending ||
+        local.uncertain ||
+        (local.owned
+          ? local.phase !== 'running' || local.traffic !== 'listening' || !local.instanceId
+          : local.hasRecord || local.traffic !== 'inactive')
+      )
+        throw new Error('普通代理状态需要核对，不能切换虚拟网卡。')
+    }
+    const requireSystemProxyIdle = (): void => {
+      const state = tunSession.state()
+      requireCompleteIdle(
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        state.owned && state.phase === 'active' && state.sessionId
+          ? { kind: 'tun-managed', sessionId: state.sessionId }
+          : undefined
+      )
+    }
+    const tunConfigurationHandoffs = new Map<string, TunHandoffContext>()
+    const tunHandoff = createTunHandoff({
+      state: () => tunSession.state(),
+      localOwned: () => localProxy.state().owned,
+      notify: notifyTun,
+      systemProxyNeeded: (ports) => systemProxy.needsCoreForHandoff(ports),
+      readSelections: () => tunSession.proxySelections(),
+      start: (input) => tunSession.start(input),
+      stop: (input) => tunSession.stop(input)
+    })
+    const prepareTunConfiguration = async (raw: unknown, firstClick = false) => {
+      const selection = profileSelection(raw),
+        current = coreOwnerIntent()
+      await profileStartup?.cancelAndWait()
+      await waitForProfileInventory(current)
+      requireCompleteIdle()
+      assertTunLocalReady()
+      if (firstClick && !(await coreSelection.read())) {
+        const first = (await listVisibleProfiles(current)).profiles[0]
+        if (first?.id !== selection.id || first.sha256 !== selection.sha256)
+          throw new Error('首份订阅已变化，请核对当前配置。')
+        await preserveDedicatedPin(current)
+        await waitForProfileInventory(current)
+        const eligible = () => {
+          current()
+          requireCompleteIdle()
+          assertTunLocalReady()
+          const local = localProxy.state()
+          if (local.owned && local.profileId !== selection.id)
+            throw new Error('普通代理所用配置已变化。')
+        }
+        await coreSelection.remember(selection, eligible)
+        current()
+        notifyClash()
+      }
+      const initial = localProxy.state()
+      if (initial.owned && initial.instanceId) {
+        const refreshed = await localProxy.action({
+          action: 'refresh',
+          instanceId: initial.instanceId
+        })
+        if (refreshed.status !== 'refreshed') throw new Error('普通代理运行状态读取未确认。')
+      }
+      assertTunLocalReady()
+      const local = localProxy.state(),
+        saved = await localProxyPlanStore.read(current)
+      current()
+      const savedSelectors = local.owned
+        ? undefined
+        : await startupPreferences.selectors(selection.id)
+      const selections: LocalProxyGroup[] = structuredClone(local.groups)
+      const globalSelection = async (): Promise<LocalProxyGroup | undefined> => {
+        if (!local.owned) return undefined
+        const live = await localProxy.inspectLive()
+        const proxies =
+          live && plainConfigurationMap(live.proxies.proxies) ? live.proxies.proxies : undefined
+        const global = proxies?.GLOBAL
+        if (
+          live?.instanceId !== local.instanceId ||
+          !plainConfigurationMap(global) ||
+          global.type !== 'Selector' ||
+          typeof global.now !== 'string' ||
+          !Array.isArray(global.all) ||
+          !global.all.every((item): item is string => typeof item === 'string') ||
+          !global.all.includes(global.now)
+        )
+          throw new Error('全局节点选择读取未确认，保持当前普通代理。')
+        return {
+          name: 'GLOBAL',
+          type: 'select',
+          now: global.now,
+          members: global.all,
+          confirmed: true,
+          selectable: true
+        }
+      }
+      const global = await globalSelection()
+      if (global && !selections.some((group) => group.name === 'GLOBAL')) selections.push(global)
+      if (local.owned && local.profileId !== selection.id)
+        throw new Error('运行配置与所选配置不同，请先核对当前核心。')
+      // Follow the listeners actually serving the user's connections, not an
+      // unapplied port draft saved while that core was running.
+      const plan = local.owned
+        ? localProxyPlan({
+            httpPort: local.httpPort,
+            resolverMode: local.resolution?.mode ?? saved.document.resolverMode,
+            ...(local.ports ? { ports: local.ports } : {}),
+            ...(local.dedicated
+              ? {
+                  dedicated: {
+                    route: local.dedicated.route,
+                    ...(local.dedicated.httpPort === undefined
+                      ? {}
+                      : { httpPort: local.dedicated.httpPort }),
+                    ...(local.dedicated.socksPort === undefined
+                      ? {}
+                      : { socksPort: local.dedicated.socksPort })
+                  }
+                }
+              : {})
+          })
+        : saved.document
+      const fixedGroups = selections.flatMap((group) => {
+        if (group.type === 'select' || !group.fixed) return []
+        if (!group.confirmed || !group.selectable || !group.members.includes(group.fixed))
+          throw new Error('普通代理组的固定节点尚未确认。')
+        return [{ name: group.name, member: group.fixed }]
+      })
+      const stored = await profileStore.read(selection)
+      const pin = plan.dedicated
+        ? await localProxyPlanStore.resolvePinnedNode(plan.dedicated, selection.id, () => {
+            const source = analyzeProfile(stored.text).data
+            return Array.isArray(source?.proxies)
+              ? source.proxies.find(
+                  (node) => plainConfigurationMap(node) && node.name === plan.dedicated?.route
+                )
+              : undefined
+          })
+        : undefined
+      const recheck = async (): Promise<void> => {
+        current()
+        if (savedSelectors) {
+          const latest = await startupPreferences.selectors(selection.id)
+          if (
+            savedSelectors.size !== latest.size ||
+            [...savedSelectors].some(([group, member]) => latest.get(group) !== member)
+          )
+            throw new Error('准备期间节点选择已变化，请重新开启虚拟网卡。')
+        }
+        if (localProxy.state().owned) {
+          const freshGlobal = await globalSelection()
+          if (
+            global &&
+            (freshGlobal?.now !== global.now ||
+              JSON.stringify(freshGlobal?.members) !== JSON.stringify(global.members))
+          )
+            throw new Error('全局节点选择已变化，请重新切换。')
+        }
+        const selected = await coreSelection.read()
+        if (
+          selected?.id !== selection.id ||
+          selected.sha256 !== selection.sha256 ||
+          (await localProxyPlanStore.read(current)).revision !== saved.revision
+        )
+          throw new Error('配置或启动设置已变化，请重新切换。')
+        current()
+      }
+      let resumeCurrent = coreOwnerIntent(false, false)
+      const resumeEdits = await configurationEditStore.read()
+      const recheckResume = async (): Promise<void> => {
+        await waitForProfileInventory(resumeCurrent)
+        const selected = await coreSelection.read()
+        const edits = await configurationEditStore.read()
+        const latestPlan = await localProxyPlanStore.read(resumeCurrent)
+        if (
+          selected?.id !== selection.id ||
+          selected.sha256 !== selection.sha256 ||
+          edits.revision !== resumeEdits.revision ||
+          edits.exists !== resumeEdits.exists ||
+          latestPlan.revision !== saved.revision
+        )
+          throw new Error('恢复普通代理所需的配置已变化，请核对当前所选配置。')
+        resumeCurrent()
+      }
+      const ordinaryPorts = localProxyPortsFor(plan.httpPort, plan.ports)
+      const tcpPorts = [
+        ...enabledLocalProxyPorts(ordinaryPorts),
+        ...[plan.dedicated?.httpPort, plan.dedicated?.socksPort].filter((p): p is number => !!p)
+      ]
+      const proxyPorts = tcpPorts.filter((port) => port !== ordinaryPorts.redir)
+      let resumedInstance: { id: string; revision?: string } | undefined
+      const resumedOwner = () => {
+        resumeCurrent()
+        const live = localProxy.state()
+        if (
+          !resumedInstance ||
+          live.instanceId !== resumedInstance.id ||
+          live.configurationRevision !== resumedInstance.revision ||
+          live.profileId !== selection.id ||
+          !live.pid ||
+          !live.owned ||
+          live.pending ||
+          live.uncertain ||
+          live.phase !== 'running' ||
+          live.traffic !== 'listening' ||
+          tunSession.state().owned ||
+          !live.ports ||
+          !localProxyPortsCompatible(live.ports, ordinaryPorts) ||
+          !dedicatedListenersCompatible(live.dedicated, plan.dedicated)
+        )
+          throw new Error('普通代理实例或监听设置已变化，请重新核对。')
+        return { id: resumedInstance.id, pid: live.pid, state: live }
+      }
+      const context: TunHandoffContext = {
+        fixedGroups,
+        proxyPorts,
+        mixedPort: plan.ports?.mixed,
+        httpPort: plan.httpPort,
+        instanceId: local.owned ? local.instanceId : undefined,
+        recheck,
+        recheckResume,
+        authorizeStop: () => {
+          resumeCurrent = coreOwnerIntent(false, false)
+        },
+        authorized: () => {
+          try {
+            resumeCurrent()
+            return true
+          } catch {
+            return false
+          }
+        },
+        assertCurrentOwner: () => {
+          assertTunLocalReady()
+          const now = localProxy.state()
+          if (
+            now.owned !== local.owned ||
+            now.instanceId !== local.instanceId ||
+            now.configurationRevision !== local.configurationRevision ||
+            now.mode !== local.mode ||
+            JSON.stringify(
+              now.groups
+                .filter((group) => group.selectable)
+                .map((group) => [
+                  group.name,
+                  group.type === 'select' ? group.now : undefined,
+                  group.fixed
+                ])
+            ) !==
+              JSON.stringify(
+                local.groups
+                  .filter((group) => group.selectable)
+                  .map((group) => [
+                    group.name,
+                    group.type === 'select' ? group.now : undefined,
+                    group.fixed
+                  ])
+              )
+          )
+            throw new Error('本次普通核心已变化，请重新切换。')
+        },
+        stopLocal: async () => {
+          if (!local.instanceId) return true
+          const stopped = await localProxy.action({ action: 'stop', instanceId: local.instanceId })
+          return (
+            stopped.status === 'stopped' &&
+            !localProxy.state().owned &&
+            !localProxy.state().uncertain
+          )
+        },
+        resumeLocal: async (choices) => {
+          const assertResumeOwner = (): void => {
+            resumeCurrent()
+            const state = localProxy.state()
+            if (state.owned || state.pending || state.uncertain || tunSession.state().owned)
+              throw new Error('核心恢复条件未确认，保留现场。')
+          }
+          if (!resumedInstance) {
+            assertResumeOwner()
+            if (!(await waitForTunPlanPorts(plan, assertResumeOwner)))
+              throw new Error('原监听端口尚未释放，不能恢复普通代理。')
+            await recheckResume()
+            assertResumeOwner()
+            const prepared = await localProxy.prepare({
+              profile: selection,
+              ...plan,
+              lifetime: local.lifetime ?? 'main',
+              ...(local.logLevel ? { logLevel: local.logLevel } : {})
+            })
+            await recheckResume()
+            assertResumeOwner()
+            if (!prepared.canStart) throw new Error('普通代理恢复准备未通过，请核对内核状态。')
+            const result = await localProxy.action(
+              { action: 'start', evidenceId: prepared.evidenceId },
+              resumeCurrent
+            )
+            if (result.status !== 'started' || !result.state.instanceId)
+              throw new Error('普通代理恢复未确认，请核对内核状态。')
+            resumedInstance = {
+              id: result.state.instanceId,
+              revision: result.state.configurationRevision
+            }
+          }
+          const resumed = resumedOwner()
+          if (local.mode && resumed.state.mode !== local.mode) {
+            const mode = await localProxy.action({
+              action: 'mode',
+              instanceId: resumed.id,
+              mode: local.mode
+            })
+            if (!['modeChanged', 'refreshed'].includes(mode.status))
+              throw new Error('普通代理已启动，但出站模式恢复未确认。')
+          }
+          // Live selections from TUN take precedence over the previous ordinary core.
+          const members = new Map<string, string | null>()
+          for (const group of selections) {
+            const member = group.type === 'select' ? group.now : group.fixed
+            if (member && group.selectable && group.confirmed) members.set(group.name, member)
+          }
+          for (const choice of choices ?? []) members.set(choice.name, choice.now)
+          for (const [group, member] of members) {
+            const now = resumedOwner().state.groups.find((g) => g.name === group)
+            if (
+              now?.confirmed &&
+              (now.type === 'select' ? now.now : (now.fixed ?? null)) === member
+            )
+              continue
+            const selected = await localProxy.action(
+              member === null
+                ? { action: 'automatic', instanceId: resumed.id, group }
+                : { action: 'select', instanceId: resumed.id, group, member }
+            )
+            if (selected.status !== (member === null ? 'automatic' : 'selected'))
+              throw new Error('普通代理已启动，但节点选择恢复未确认。')
+          }
+          await recheckResume()
+          const { pid } = resumedOwner()
+          const udp = [ordinaryPorts.socks, ordinaryPorts.mixed].filter(Boolean)
+          const ownership = await Promise.all([
+            ...tcpPorts.map((port) => ownsHttpListener(pid, port)),
+            ...udp.map((port) => ownsUdpListener(pid, port))
+          ])
+          if (!ownership.every(Boolean)) throw new Error('普通代理端口归属未确认。')
+          // A redirect listener is verified by process ownership, not by proxy-client traffic.
+          await Promise.all(
+            proxyPorts.map((port) => verifyProxyTarget({ host: '127.0.0.1', port }))
+          )
+          resumedOwner()
+          notifyClash()
+        }
+      }
+      await recheck()
+      const prepared = await configurationEdit.prepareForTun(selection, {
+        transform: (configuration) => ({
+          ...tunLocalPlanProjection(configuration, plan, pin?.node, selections, savedSelectors),
+          ...(local.mode ? { mode: local.mode } : {})
+        }),
+        recheck
+      })
+      tunConfigurationHandoffs.clear()
+      tunConfigurationHandoffs.set(prepared.evidenceId, context)
+      return prepared
+    }
     const geoScheduler = createGeoSourceScheduler({
       origins: resourceOrigins,
       canRun: () =>
@@ -1478,14 +1900,19 @@ app
         if (!installed)
           return {
             session: tunSession.state(),
+            ordinaryRecovery: tunHandoff.ordinaryRecovery(),
             helper: 'missing',
             warnings: [
               'Mihomo 自管 TUN 权限组件尚未安装。请按自用版说明安装与当前用户及版本匹配的组件，再重新检查。App 不会自动安装组件。'
             ]
           }
         const observed = await inspectTunNative(installed)
+        const httpPort = tunHandoff.proxyPort()
         return {
+          mixedPort: tunHandoff.mixedPort(),
+          ...(httpPort === undefined ? {} : { httpPort }),
           session: tunSession.state(),
+          ordinaryRecovery: tunHandoff.ordinaryRecovery(),
           helper:
             observed.helper.state === 'ready'
               ? 'ready'
@@ -1500,6 +1927,7 @@ app
       } catch {
         return {
           session: tunSession.state(),
+          ordinaryRecovery: tunHandoff.ordinaryRecovery(),
           helper: 'unconfirmed',
           warnings: ['TUN辅助程序或网络环境检查未通过；请核对本次安装候选与恢复记录。']
         }
@@ -1561,26 +1989,6 @@ app
     powerMonitor.on('resume', onResume)
     const coreSelection = createCoreSelectionService({
       profiles: profileStore,
-      defaults: async () => {
-        const inventory = await profileStore.list(),
-          sources = await subscriptionSourceStore.list(),
-          linked = new Set(
-            sources.sources.flatMap((source) => source.versions.map((v) => v.profile.id))
-          )
-        // Match the subscription dashboard: local main profiles, then the
-        // newest saved version of each subscription; never its older versions.
-        return [
-          ...inventory.profiles.filter((profile) => !linked.has(profile.id)),
-          ...sources.sources.flatMap((source) => {
-            const latest = source.versions.at(-1)?.profile
-            return latest
-              ? inventory.profiles.filter(
-                  (profile) => profile.id === latest.id && profile.sha256 === latest.sha256
-                )
-              : []
-          })
-        ].map(({ id, sha256 }) => ({ id, sha256 }))
-      },
       read: () => readCoreSelectionNative(nativePath(), stateContext()),
       save: (selection, revision) =>
         saveCoreSelectionNative(nativePath(), stateContext(), selection, revision)
@@ -1640,6 +2048,17 @@ app
       confirm: async (_plan, reason) =>
         (automaticUninstallRequested && reason === 'quit') || actionWindowAvailable()
     })
+    const executeUserSystemProxy = async (input: unknown) => {
+      if (quitAfterRestore || shellQuitting) throw new Error('退出期间不能切换系统代理。')
+      return trackProxyChoice(
+        systemProxy.execute(input).then(async (result) => {
+          if (result.status === 'applied') tunHandoff.clearOrdinaryRecovery()
+          if (result.status === 'applied' || result.status === 'restored')
+            await startupPreferences.systemProxy(result.status === 'applied')
+          return result
+        })
+      )
+    }
     const diagnostics = createDiagnosticService({
       ownedObserve: () => ownedDiagnostics.observe(),
       observe: (settings) =>
@@ -1736,7 +2155,7 @@ app
         (!local.owned && local.hasRecord) ||
         (local.owned && !local.profileId) ||
         tun.pending ||
-        !['idle', 'prepared', 'restored'].includes(tun.phase) ||
+        !['idle', 'prepared', 'restored', 'released'].includes(tun.phase) ||
         tun.owned
       const ownerRevision = resourceHash(
         Buffer.from(
@@ -1860,7 +2279,7 @@ app
           observed.existingTunnel ||
           tun.owned ||
           tun.pending ||
-          !['idle', 'prepared', 'restored'].includes(tun.phase)
+          !['idle', 'prepared', 'restored', 'released'].includes(tun.phase)
         )
           throw new Error('当前没有TUN截流的事实未确认，独立探测没有启动。')
         return JSON.stringify({
@@ -1930,8 +2349,13 @@ app
     })
     let quitAfterRestore = false,
       backupRendererEpoch = 0,
+      systemProxyReadEpoch = 0,
       quitDrainSequence = 0,
       ordinaryQuitRequested = false
+    const invalidateRendererEpochs = (): void => {
+      ++backupRendererEpoch
+      ++systemProxyReadEpoch
+    }
     const reopenSimpleAfterCancelledQuit = (): void => {
       const sequence = quitDrainSequence,
         generation = restartCoordinator?.state().generation
@@ -2044,6 +2468,7 @@ app
             completeConfiguration.requestClose(),
             plugins.requestClose()
           ])
+          await Promise.allSettled(pendingProxyChoices)
           await Promise.all([
             code.whenIdle(),
             recovery.whenIdle(),
@@ -2500,7 +2925,7 @@ app
             observation.network.existingTunnel !== 'none' ||
             tun.owned ||
             tun.pending ||
-            !['idle', 'prepared', 'restored'].includes(tun.phase)
+            !['idle', 'prepared', 'restored', 'released'].includes(tun.phase)
           )
             throw new Error('没有TUN截流的事实未确认。')
           return JSON.stringify({
@@ -2665,10 +3090,11 @@ app
     })
     restartCoordinator = restart
     const stopTunSession = (input: unknown) => {
+      requireProfileSwitchIdle()
       runtimeGist.cancel()
       if (runtimeGistSync.state().owner?.source?.kind === 'tun-managed')
         void runtimeGistSync.stop('ownerChanged')
-      return tunSession.stop(input)
+      return tunHandoff.stop(tunSessionRequest(input))
     }
     const floatingGeometry = createWindowGeometryService({
       kind: 'floating',
@@ -2720,7 +3146,9 @@ app
           const tun = tunSession.state()
           // An owned/changing TUN failure must remain unavailable; do not label
           // ordinary traffic as if it came from the selected TUN source.
-          return tun.owned || tun.pending || !['idle', 'prepared', 'restored'].includes(tun.phase)
+          return tun.owned ||
+            tun.pending ||
+            !['idle', 'prepared', 'restored', 'released'].includes(tun.phase)
             ? tunSession.readTraffic(signal)
             : localProxy.readTraffic(signal)
         },
@@ -2765,7 +3193,9 @@ app
           tun:
             !tun.pending && tun.owned && tun.phase === 'active' && tun.traffic === 'forwarding'
               ? true
-              : !tun.pending && !tun.owned && ['idle', 'prepared', 'restored'].includes(tun.phase)
+              : !tun.pending &&
+                  !tun.owned &&
+                  ['idle', 'prepared', 'restored', 'released'].includes(tun.phase)
                 ? false
                 : undefined
         }
@@ -2845,6 +3275,98 @@ app
       }
     })
     invalidateFloatingTraffic = () => shellHost.invalidateFloatingTraffic()
+    const prepareSelectedTun = async (expected?: RelayProfileSelection) => {
+      await profileStartup?.cancelAndWait()
+      const current = coreOwnerIntent()
+      const idle = (): void => {
+        current()
+        requireCompleteIdle()
+        if (core.isBlocking() || clashBackend.isBusy())
+          throw new Error('请先结束独立核心或配置操作。')
+        assertTunLocalReady()
+      }
+      await waitForProfileInventory(current)
+      idle()
+      const selection = await coreSelection.read()
+      idle()
+      if (!selection) throw new Error('没有可用配置，请先导入或选择配置。')
+      if (expected && (selection.id !== expected.id || selection.sha256 !== expected.sha256))
+        throw new Error('所选配置已变化，未启用虚拟网卡。')
+      const plan = await prepareTunConfiguration(selection)
+      idle()
+      if (plan.profileId !== selection.id || !plan.readyForParserCheck)
+        throw new Error(plan.warnings.join(' ') || '当前配置缺少本地资源，未启用虚拟网卡。')
+      const checked = await completeConfiguration.check({ evidenceId: plan.evidenceId })
+      idle()
+      if (checked.status !== 'passed' || checked.configurationSHA256 !== plan.configurationSHA256)
+        throw new Error(checked.warnings.join(' ') || '当前配置检查未通过，未启用虚拟网卡。')
+      const selected = await coreSelection.read()
+      idle()
+      if (selected?.id !== selection.id || selected.sha256 !== selection.sha256)
+        throw new Error('所选配置已变化，未启用虚拟网卡。')
+      const prepared = await prepareTunSession({ evidenceId: plan.evidenceId })
+      try {
+        idle()
+        const after = await coreSelection.read()
+        idle()
+        if (after?.id !== selection.id || after.sha256 !== selection.sha256)
+          throw new Error('所选配置已变化，未启用虚拟网卡。')
+        return prepared
+      } catch (error) {
+        tunSession.cancel({ evidenceId: prepared.evidenceId })
+        throw error
+      }
+    }
+    const startSelectedTun = (input: { evidenceId: string }) => {
+      requireCompleteIdle()
+      if (core.isBlocking() || clashBackend.isBusy())
+        throw new Error('独立核心或配置操作正在进行。')
+      assertTunLocalReady()
+      return tunHandoff.start(input)
+    }
+    const cancelSelectedTun = (input: { evidenceId: string }): void => {
+      requireProfileSwitchIdle()
+      tunHandoff.cancel(input.evidenceId)
+      tunSession.cancel(input)
+    }
+    const profileSwitch = createTunProfileSwitch({
+      owner: () => tunSession.proxyPageOwner(),
+      state: () => tunSession.state(),
+      local: () => localProxy.state(),
+      ordinaryRecovery: () => tunHandoff.ordinaryRecovery(),
+      readSelection: () => coreSelection.read(),
+      readProfile: (selection) => profileStore.read(selection),
+      choose: (selection) => clashBackend.invoke('changeCurrentProfile', [selection]),
+      prepare: prepareSelectedTun,
+      cancel: cancelSelectedTun,
+      start: startSelectedTun,
+      stop: stopTunSession
+    })
+    const switchTunProfile = (selection: RelayProfileSelection, owner: RelayProxyPageOwner) => {
+      requireProfileSwitchIdle()
+      if (pendingProxyChoices.size) throw new Error('请等待当前代理操作完成后再切换配置。')
+      const token = Symbol('TUN profile switch')
+      switchingToken = token
+      const operation = switchingContext.run(token, async () => {
+        const live = coreOwnerIntent()
+        await profileStartup?.cancelAndWait()
+        await waitForProfileInventory(live)
+        live()
+        requireCompleteIdle(false, false, false, false, false, false, {
+          kind: 'tun-managed',
+          sessionId: owner.instanceId
+        })
+        if (clashBackend.isBusy() || core.isBlocking())
+          throw new Error('请等待当前代理操作完成后再切换配置。')
+        await profileSwitch.run(selection, owner, live)
+      })
+      const settled = operation.finally(() => {
+        switchingToken = undefined
+        notifyTun()
+        notifyClash()
+      })
+      return trackProxyChoice(settled)
+    }
     const shellActions = createShellActions({
       assertAvailable: () => {
         if (
@@ -2860,12 +3382,14 @@ app
         )
           throw new Error('退出或备份恢复正在进行。')
       },
-      assertIdle: (action, sessionId) => {
+      assertIdle: async (action, sessionId) => {
         if (action === 'triggerTun' && sessionId)
           requireCompleteIdle(false, false, false, false, false, false, {
             kind: 'tun-managed',
             sessionId
           })
+        else if (action === 'triggerSysProxy')
+          await waitForSystemProxyReadiness(coreOwnerIntent(false, false))
         else requireCompleteIdle()
       },
       showWindow: () => shellHost.showWindow(),
@@ -2888,74 +3412,24 @@ app
       },
       systemProxy: {
         ...systemProxy,
+        execute: executeUserSystemProxy,
+        inspect: () => readSystemProxyForClick(coreOwnerIntent(false, false)),
         prepareApply: async (report) => {
-          await profileStartup?.cancelAndWait()
-          const current = coreOwnerIntent()
-          current()
-          requireCompleteIdle()
+          const current = coreOwnerIntent(false, false)
+          const { httpPort, mixedPort } = await ensureSystemProxyListener(current)
           const saved = await systemProxyDraft.read(current)
           current()
-          let state = localProxy.state()
-          if (!state.owned) {
-            if (
-              state.pending ||
-              state.uncertain ||
-              state.hasRecord ||
-              state.traffic !== 'inactive' ||
-              !['unknown', 'idle', 'failed'].includes(state.phase)
-            )
-              throw new Error('当前代理状态需要核对，未启用系统代理。')
-            const selection = await coreSelection.read()
-            current()
-            if (!selection) throw new Error('没有可用配置，请先导入或选择配置。')
-            const savedPlan = await localProxyPlanStore.read(current)
-            const plan = await localProxy.prepare({
-              profile: selection,
-              ...savedPlan.document,
-              lifetime: 'main'
-            })
-            current()
-            if (!plan.canStart)
-              throw new Error(plan.warnings.join(' ') || '当前配置或端口尚未就绪。')
-            const selected = await coreSelection.read()
-            current()
-            if (selected?.id !== selection.id || selected.sha256 !== selection.sha256)
-              throw new Error('所选配置已变化，未启动旧配置。')
-            if ((await localProxyPlanStore.read(current)).revision !== savedPlan.revision)
-              throw new Error('启动设置已变化，请重新操作。')
-            const result = await performLocalProxyAction(
-              { action: 'start', evidenceId: plan.evidenceId },
-              current
-            )
-            current()
-            if (result.status !== 'started') throw new Error('配置启动未确认，系统代理未更改。')
-            state = localProxy.state()
-            if (state.profileId !== selection.id)
-              throw new Error('运行配置已变化，系统代理未更改。')
-          }
-          if (
-            state.pending ||
-            state.uncertain ||
-            !state.owned ||
-            state.phase !== 'running' ||
-            state.traffic !== 'listening' ||
-            !state.httpPort
-          )
-            throw new Error('本次自有HTTP监听未确认，系统代理未更改。')
-          const fresh = await systemProxyDraft.read(current)
-          current()
-          if (fresh.revision !== saved.revision) throw new Error('系统代理设置已变化，请重新操作。')
-          requireCompleteIdle()
+          await waitForSystemProxyReadiness(current)
           const prepared = await systemProxy.prepare({
             ...saved.document,
-            port: state.httpPort,
+            port: systemProxyInboundPort(httpPort, mixedPort, saved.document),
             serviceIDs: report.services
               .filter((service) => service.enabled)
               .map((service) => service.id)
           })
           try {
             current()
-            requireCompleteIdle()
+            await waitForSystemProxyReadiness(current)
             return prepared
           } catch (error) {
             systemProxy.cancel({ evidenceId: prepared.evidenceId })
@@ -2966,56 +3440,9 @@ app
       tun: {
         state: () => tunSession.state(),
         inspect: () => tunSession.inspect(),
-        prepare: async () => {
-          await profileStartup?.cancelAndWait()
-          const current = coreOwnerIntent()
-          const idle = (): void => {
-            current()
-            requireCompleteIdle()
-            if (core.isBlocking() || localProxy.isBlocking() || clashBackend.isBusy())
-              throw new Error(
-                '当前普通代理核心正在运行，请先停用该核心后启用虚拟网卡；没有自动停止或切换。'
-              )
-          }
-          idle()
-          const selection = await coreSelection.read()
-          idle()
-          if (!selection) throw new Error('没有可用配置，请先导入或选择配置。')
-          const plan = await configurationEdit.prepareForTun(selection)
-          idle()
-          if (plan.profileId !== selection.id || !plan.readyForParserCheck)
-            throw new Error(plan.warnings.join(' ') || '当前配置缺少本地资源，未启用虚拟网卡。')
-          const checked = await completeConfiguration.check({ evidenceId: plan.evidenceId })
-          idle()
-          if (
-            checked.status !== 'passed' ||
-            checked.configurationSHA256 !== plan.configurationSHA256
-          )
-            throw new Error(checked.warnings.join(' ') || '当前配置检查未通过，未启用虚拟网卡。')
-          const selected = await coreSelection.read()
-          idle()
-          if (selected?.id !== selection.id || selected.sha256 !== selection.sha256)
-            throw new Error('所选配置已变化，未启用虚拟网卡。')
-          const prepared = await prepareTunSession({ evidenceId: plan.evidenceId })
-          try {
-            idle()
-            const after = await coreSelection.read()
-            idle()
-            if (after?.id !== selection.id || after.sha256 !== selection.sha256)
-              throw new Error('所选配置已变化，未启用虚拟网卡。')
-            return prepared
-          } catch (error) {
-            tunSession.cancel({ evidenceId: prepared.evidenceId })
-            throw error
-          }
-        },
-        start: (input) => {
-          requireCompleteIdle()
-          if (core.isBlocking() || localProxy.isBlocking() || clashBackend.isBusy())
-            throw new Error('当前普通代理核心正在运行，未启用虚拟网卡。')
-          return tunSession.start(input)
-        },
-        cancel: (input) => tunSession.cancel(input),
+        prepare: () => prepareSelectedTun(),
+        start: startSelectedTun,
+        cancel: cancelSelectedTun,
         stop: stopTunSession
       }
     })
@@ -3102,7 +3529,7 @@ app
       proxyInTray: shellWorkflow.state().settings.proxyInTray,
       trayProxyGroupStyle: shellWorkflow.state().settings.trayProxyGroupStyle,
       local: () => localProxy.state(),
-      assertIdle: () => requireCompleteIdle(),
+      assertIdle: () => requireSystemProxyIdle(),
       publish: (items) => shellHost.setWorkflowMenu(items),
       load: async () => {
         const state = localProxy.state()
@@ -3127,6 +3554,11 @@ app
         return { local: localProxy.state(), profiles: inventory.profiles, selectedId }
       },
       chooseProfile: async (selection) => {
+        const owner = tunSession.proxyPageOwner()
+        if (owner) {
+          shellHost.showWindow()
+          return switchTunProfile(selection, owner)
+        }
         await profileStartup?.cancelAndWait()
         requireCompleteIdle()
         shellHost.showWindow()
@@ -3140,9 +3572,7 @@ app
           before.uncertain ||
           (before.owned
             ? before.phase !== 'running' || before.traffic !== 'listening'
-            : before.hasRecord ||
-              before.traffic !== 'inactive' ||
-              !['unknown', 'idle', 'failed'].includes(before.phase))
+            : !relayProxyCanPrepare(before))
         )
           throw new Error('当前核心状态需要核对，未切换配置。')
         await clashBackend.invoke('changeCurrentProfile', [selection])
@@ -3496,7 +3926,7 @@ app
         return actionWindowAvailable()
       }
     })
-    const runtimeGistContext = (): (() => void) => {
+    const runtimeGistContext = (requireVisible = true): (() => void) => {
       const owner = window,
         epoch = backupRendererEpoch,
         frame = (() => {
@@ -3514,7 +3944,7 @@ app
             window === owner &&
             !owner.isDestroyed() &&
             !owner.webContents.isDestroyed() &&
-            owner.isVisible() &&
+            (!requireVisible || owner.isVisible()) &&
             owner.webContents.mainFrame === frame &&
             backupRendererEpoch === epoch &&
             !quitAfterRestore &&
@@ -4067,7 +4497,7 @@ app
       appUpdates?.cancel()
       if (!restartCoordinator?.isFinalQuitInProgress()) restartCoordinator?.quitCancelled()
       onlineThemes?.cancel()
-      ++backupRendererEpoch
+      invalidateRendererEpochs()
       invalidateSimpleRenderer()
       tunSession.invalidateRules()
       tunSession.invalidateResources()
@@ -4087,9 +4517,13 @@ app
       if (localProxy.state().owned) localProxy.acknowledgeRetiredPersistentOwner()
       ordinaryCoreOwner.acknowledgeNoLaunchRetirement()
     }
-    const coreOwnerIntent = (finalQuit = false, requireVisible = true): (() => void) => {
+    const coreOwnerIntent = (
+      finalQuit = false,
+      requireVisible = true,
+      currentEpoch = () => backupRendererEpoch
+    ): (() => void) => {
       const owner = window,
-        epoch = backupRendererEpoch,
+        epoch = currentEpoch(),
         frame = owner?.webContents.mainFrame
       return () => {
         if (
@@ -4100,7 +4534,7 @@ app
           owner.webContents.isDestroyed() ||
           (requireVisible && !owner.isVisible()) ||
           owner.webContents.mainFrame !== frame ||
-          epoch !== backupRendererEpoch ||
+          epoch !== currentEpoch() ||
           (!finalQuit && (quitAfterRestore || shellQuitting))
         )
           throw new Error('持久代理的本次界面授权已失效。')
@@ -4181,7 +4615,7 @@ app
         native.network.existingTunnel !== 'none' ||
         tun.owned ||
         tun.pending ||
-        !['idle', 'restored', 'prepared'].includes(tun.phase) ||
+        !['idle', 'restored', 'prepared', 'released'].includes(tun.phase) ||
         guard !== 'inactive' ||
         sub.recovery ||
         sub.pid ||
@@ -4431,6 +4865,7 @@ app
       'relayProfileNodesRead',
       'relayProfileNodesPrepare',
       'relayProfileGroupsRead',
+      'relayProfileGroupSelect',
       'relayProfileGroupsPrepare',
       'relayProfileRulesRead',
       'relayProfileRulesPrepare',
@@ -4491,8 +4926,10 @@ app
       'relayTunConfigurationPrepare',
       'relayTunPrepare',
       'relayTunStart',
+      'relayTunProfileSwitch',
       'relayTunCancel',
       'relayTunStop',
+      'relayTunRecoverOrdinary',
       'relayTunInspect',
       'relayTunRulesRead',
       'relayTunRuleChange',
@@ -4619,6 +5056,7 @@ app
       'relayCoreOwnerState',
       'relayCoreOwnerAction',
       'quitWithoutCore',
+      'relayProxyPageOwner',
       'relayLocalProxyState',
       ...RELAY_LOCAL_PROXY_PLAN_CHANNELS,
       'relayLocalProxyPrepare',
@@ -4645,6 +5083,7 @@ app
       'relaySystemProxyDraftRead',
       'relaySystemProxyDraftSave',
       'relaySystemProxyInspect',
+      'relayEnsureSystemProxyListener',
       'relaySystemProxyPrepare',
       'relaySystemProxyRestorePrepare',
       'relaySystemProxyExecute',
@@ -4673,12 +5112,121 @@ app
       'quitApp',
       'openDevTools'
     ])
+    const proxyPageOwner = () => {
+      const tun = tunSession.proxyPageOwner()
+      if (tun) return tun
+      const state = localProxy.state()
+      if (
+        tunSession.isBlocking() ||
+        !state.owned ||
+        state.pending ||
+        state.uncertain ||
+        state.phase !== 'running' ||
+        state.traffic !== 'listening' ||
+        !state.instanceId ||
+        !state.configurationRevision ||
+        !state.profileId ||
+        !state.mode
+      )
+        return undefined
+      return {
+        kind: 'ordinary' as const,
+        instanceId: state.instanceId,
+        configurationRevision: state.configurationRevision,
+        profileId: state.profileId,
+        mode: state.mode
+      }
+    }
+    const matchesPageOwner = (owner: RelayProxyPageOwner | undefined, expected: unknown): boolean =>
+      !!owner &&
+      plainConfigurationMap(expected) &&
+      Object.keys(owner).length === Object.keys(expected).length &&
+      Object.entries(owner).every(([key, value]) => expected[key] === value)
+    ipcMain.handle('relayTunProfileSwitch', (event, ...args: unknown[]) => {
+      trusted(event)
+      const input = args[0]
+      if (
+        args.length !== 1 ||
+        !plainConfigurationMap(input) ||
+        Object.keys(input).sort().join(',') !== 'owner,profile' ||
+        !plainConfigurationMap(input.owner)
+      )
+        throw new Error('请选择要切换的配置及当前虚拟网卡会话。')
+      const owner = tunSession.proxyPageOwner()
+      if (!owner || !matchesPageOwner(owner, input.owner))
+        throw new Error('虚拟网卡会话已变化，请刷新代理组。')
+      return switchTunProfile(profileSelection(input.profile), owner)
+    })
+    ipcMain.handle('relayProxyPageOwner', (event, ...args) => {
+      trusted(event)
+      if (args.length) throw new Error('代理组会话查询不接受参数。')
+      return proxyPageOwner()
+    })
     for (const channel of relayUpstreamChannels) {
       if (special.has(channel)) continue
       ipcMain.handle(channel, (event, ...args: unknown[]) => {
         trusted(event)
         if (clashBackend.handles(channel)) {
+          if (['mihomoGroups', 'mihomoChangeProxy', 'mihomoUnfixedProxy'].includes(channel)) {
+            const supplied = args.at(-1)
+            if (plainConfigurationMap(supplied)) {
+              const owner = proxyPageOwner()
+              if (
+                !owner ||
+                !Object.entries(owner).every(([k, v]) => supplied[k] === v) ||
+                tunHandoff.isBusy()
+              )
+                throw new Error('代理核心已切换，请刷新节点列表。')
+              args.pop()
+              if (owner.kind === 'tun-managed') {
+                if (
+                  channel === 'mihomoGroups' &&
+                  args.length <= 1 &&
+                  (args[0] === undefined || typeof args[0] === 'boolean')
+                )
+                  return tunSession.proxyGroups(args[0] === true)
+                if (quitAfterRestore || shellQuitting)
+                  throw new Error('退出期间不能切换 TUN 节点。')
+                requireProfileSwitchIdle()
+                const [group, member] = args
+                const validName = (value: unknown): value is string =>
+                  typeof value === 'string' &&
+                  value.length > 0 &&
+                  Buffer.byteLength(value) <= 1024 &&
+                  !/\p{Cc}/u.test(value)
+                if (!validName(group)) throw new Error('代理组名称无效。')
+                const change =
+                  channel === 'mihomoChangeProxy' && args.length === 2 && validName(member)
+                    ? tunSession.changeProxy({ action: 'select', group, member })
+                    : channel === 'mihomoUnfixedProxy' && args.length === 1
+                      ? tunSession.changeProxy({ action: 'automatic', group })
+                      : undefined
+                if (!change) throw new Error('无效的代理组选取操作。')
+                return trackProxyChoice(
+                  change.then(async () => {
+                    const current = proxyPageOwner()
+                    if (
+                      current?.instanceId === owner.instanceId &&
+                      current.configurationRevision === owner.configurationRevision
+                    )
+                      await startupPreferences.select(
+                        owner.profileId,
+                        group,
+                        channel === 'mihomoChangeProxy' && typeof member === 'string'
+                          ? member
+                          : undefined
+                      )
+                    if (window && !window.isDestroyed()) window.webContents.send('groupsUpdated')
+                  })
+                )
+              }
+            }
+          }
           if (channel === 'changeCurrentProfile') {
+            requireProfileSwitchIdle()
+            const owner = tunSession.proxyPageOwner()
+            if (owner && args.length === 1)
+              return switchTunProfile(profileSelection(args[0]), owner)
             const pending = profileStartup?.cancelAndWait()
             if (pending)
               return pending.then(() => {
@@ -5061,10 +5609,118 @@ app
       requireSubscriptionFinished()
       return profiles.prepareNodeEdit(input)
     })
-    ipcMain.handle('relayProfileGroupsRead', (event, input: unknown) => {
+    ipcMain.handle('relayProfileGroupsRead', async (event, input: unknown) => {
       trusted(event)
-      requireSubscriptionFinished()
-      return profiles.readGroups(input)
+      const owner = tunSession.proxyPageOwner()
+      requireSubscriptionFinished(
+        false,
+        false,
+        false,
+        false,
+        false,
+        owner ? { kind: 'tun-managed', sessionId: owner.instanceId } : undefined
+      )
+      const snapshot = await profiles.readGroups(input)
+      const selectors = await startupPreferences
+        .selectors(snapshot.profile.id)
+        .catch(() => undefined)
+      trusted(event)
+      if (!selectors) return snapshot
+      return {
+        ...snapshot,
+        savedSelectors: [...selectors].filter(([group, member]) =>
+          canSelectCachedGroupMember(snapshot, group, member)
+        )
+      }
+    })
+    let savingCachedGroup = false
+    ipcMain.handle('relayProfileGroupSelect', async (event, input: unknown) => {
+      trusted(event)
+      if (
+        !plainConfigurationMap(input) ||
+        !['group,member,profile', 'group,member,owner,profile'].includes(
+          Object.keys(input).sort().join(',')
+        )
+      )
+        throw new Error('请选择已保存配置中的代理组和成员。')
+      const selection = profileSelection(input.profile)
+      const sourceOwner = 'owner' in input ? proxyPageOwner() : undefined
+      if (
+        'owner' in input &&
+        (!sourceOwner ||
+          sourceOwner.profileId === selection.id ||
+          !matchesPageOwner(sourceOwner, input.owner))
+      )
+        throw new Error('运行配置已变化，请重新选择节点。')
+      requireCompleteIdle(
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        sourceOwner?.kind === 'tun-managed'
+          ? { kind: 'tun-managed', sessionId: sourceOwner.instanceId }
+          : undefined
+      )
+      const { group, member } = input
+      if (
+        typeof group !== 'string' ||
+        typeof member !== 'string' ||
+        !group ||
+        !member ||
+        group.length > 512 ||
+        member.length > 512
+      )
+        throw new Error('代理组或成员无效。')
+      if (savingCachedGroup) throw new Error('请等待当前节点选择保存完成。')
+      const live = coreOwnerIntent(),
+        version = clashBackend.selectionVersion()
+      const current = (): void => {
+        trusted(event)
+        live()
+        const tun = tunSession.state()
+        if (
+          version === undefined ||
+          clashBackend.selectionVersion() !== version ||
+          core.isBlocking() ||
+          tunHandoff.isBusy() ||
+          tunHandoff.ordinaryRecovery() ||
+          (sourceOwner
+            ? !matchesPageOwner(proxyPageOwner(), sourceOwner)
+            : !relayProxyCanPrepare(localProxy.state()) ||
+              ordinaryCoreOwner.isBlocking() ||
+              tun.owned ||
+              tun.pending ||
+              tun.traffic !== 'inactive' ||
+              !['idle', 'prepared', 'released', 'restored'].includes(tun.phase))
+        )
+          throw new Error('代理归属或当前配置已变化，请刷新节点列表。')
+      }
+      const checkSelection = async (): Promise<void> => {
+        current()
+        const selected = await coreSelection.read()
+        current()
+        if (sourceOwner) {
+          if (selected?.id !== sourceOwner.profileId) throw new Error('当前运行配置已变化。')
+          await profileStore.read(selection)
+          current()
+        } else if (selected?.id !== selection.id || selected.sha256 !== selection.sha256)
+          throw new Error('请先选用此配置，再选择节点。')
+      }
+      savingCachedGroup = true
+      try {
+        await checkSelection()
+        const snapshot = await profiles.readGroups(selection)
+        current()
+        if (!canSelectCachedGroupMember(snapshot, group, member))
+          throw new Error('此代理组不支持离线选择该成员。')
+        await startupPreferences.select(selection.id, group, member, current, checkSelection)
+        await checkSelection()
+        return { group, member }
+      } finally {
+        savingCachedGroup = false
+      }
     })
     ipcMain.handle('relayProfileGroupsPrepare', (event, input: unknown) => {
       trusted(event)
@@ -5117,10 +5773,9 @@ app
       if (library.isBusy()) throw new Error('库显示设置正在保存。')
       return library.change(input, current)
     })
-    ipcMain.handle('relayProfileList', async (event, input: unknown) => {
-      trusted(event)
+    const listVisibleProfiles = async (current: () => void, input?: unknown) => {
       const report = await profiles.list(input)
-      trusted(event)
+      current()
       try {
         return {
           ...report,
@@ -5132,6 +5787,10 @@ app
           warnings: [...report.warnings, '库显示设置未确认，当前为原始条目列表；未删除任何资料。']
         }
       }
+    }
+    ipcMain.handle('relayProfileList', (event, input: unknown) => {
+      trusted(event)
+      return listVisibleProfiles(() => trusted(event), input)
     })
     ipcMain.handle('relayProfileRuntimePrepare', (event, input: unknown) => {
       trusted(event)
@@ -5473,6 +6132,8 @@ app
       probePermit?: typeof isolatedProbePermit,
       subStorePermit?: typeof subStoreNetworkPermit
     ): void => {
+      requireProfileSwitchIdle()
+      if (tunHandoff.isBusy()) throw new Error('核心切换正在进行。')
       if (!allowGuard && guardManagement?.isBlocking())
         throw new Error('系统过滤或受限会话尚未收尾。')
       requireSubscriptionFinished(
@@ -5664,8 +6325,12 @@ app
     })
     ipcMain.handle('relayTunConfigurationPrepare', (event, input: unknown) => {
       trusted(event)
-      requireCompleteIdle()
-      return configurationEdit.prepareForTun(input)
+      if (plainConfigurationMap(input) && Object.hasOwn(input, 'intent')) {
+        if (Object.keys(input).sort().join(',') !== 'intent,profile' || input.intent !== 'enable')
+          throw new Error('TUN配置只接受明确启用操作和配置身份。')
+        return prepareTunConfiguration(input.profile, true)
+      }
+      return prepareTunConfiguration(input)
     })
     ipcMain.handle('relayVariantState', (event, input: unknown) => {
       trusted(event)
@@ -5739,8 +6404,8 @@ app
     const prepareTunSession = async (input: unknown) => {
       const request = tunEvidenceRequest(input)
       requireCompleteIdle()
-      if (core.isBlocking() || localProxy.isBlocking() || clashBackend.isBusy())
-        throw new Error('请先结束本次其他自有核心。')
+      if (core.isBlocking() || clashBackend.isBusy()) throw new Error('请先结束本次独立核心。')
+      assertTunLocalReady()
       const installed = await readTunInstallation('core-managed')
       if (!installed) throw new Error('Mihomo自管TUN权限组件尚未安装，当前不能启用。')
       const native = await inspectTunNative(installed)
@@ -5791,7 +6456,13 @@ app
       }
       tunInstallation = installed
       tunObservation = native
+      const handoff = tunConfigurationHandoffs.get(request.evidenceId)
       tunCandidate = {
+        fixedGroups: handoff?.fixedGroups,
+        ...(handoff && !handoff.instanceId
+          ? { readSavedSelectors: () => startupPreferences.selectors(checked.profileId) }
+          : {}),
+        profileId: checked.profileId,
         evidence,
         recheck: async () => {
           try {
@@ -5824,10 +6495,13 @@ app
           }
         }
       }
-      return tunSession.prepare({
+      const prepared = await tunSession.prepare({
         configurationSHA256: checked.configurationSHA256,
         bundleSHA256: checked.bundleSHA256
       })
+      if (handoff) tunHandoff.remember(prepared.evidenceId, handoff)
+      else if (localProxy.state().owned) throw new Error('普通代理切换凭据已失效，请重新准备。')
+      return prepared
     }
     ipcMain.handle('relayTunPrepare', (event, input: unknown) => {
       trusted(event)
@@ -5835,18 +6509,22 @@ app
     })
     ipcMain.handle('relayTunStart', (event, input: unknown) => {
       trusted(event)
-      requireCompleteIdle()
-      if (core.isBlocking() || localProxy.isBlocking() || clashBackend.isBusy())
-        throw new Error('请先结束本次其他自有核心。')
-      return tunSession.start(input)
+      return startSelectedTun(tunEvidenceRequest(input))
     })
     ipcMain.handle('relayTunCancel', (event, input: unknown) => {
       trusted(event)
-      tunSession.cancel(input)
+      return cancelSelectedTun(tunEvidenceRequest(input))
     })
     ipcMain.handle('relayTunStop', (event, input: unknown) => {
       trusted(event)
       return stopTunSession(input)
+    })
+    ipcMain.handle('relayTunRecoverOrdinary', (event, input: unknown) => {
+      trusted(event)
+      requireProfileSwitchIdle()
+      const current = coreOwnerIntent()
+      current()
+      return tunHandoff.recoverOrdinary(tunSessionRequest(input))
     })
     ipcMain.handle('relayTunInspect', (event, input: unknown) => {
       trusted(event)
@@ -5952,25 +6630,139 @@ app
           throw new Error('备份恢复状态未确认，请先完成恢复核对。')
       })
     })
+    const waitForProfileInventory = async (current: () => void): Promise<boolean> => {
+      // First paint also persists the sidebar layout. Let presentation preferences
+      // and read-only inventories settle; network/configuration writes still reject.
+      let waited = false
+      while (
+        uiPreferences.isBusy() ||
+        profiles.isReading() ||
+        subscriptionSources.isListing() ||
+        systemProxy.isInspecting() ||
+        systemProxyDraft.isReading() ||
+        localProxyPlanStore.isReading()
+      ) {
+        current()
+        waited = true
+        await Promise.all([
+          ...(uiPreferences.isBusy() ? [uiPreferences.whenIdle()] : []),
+          ...(profiles.isReading() ? [profiles.whenIdle()] : []),
+          ...(subscriptionSources.isListing() ? [subscriptionSources.whenIdle()] : []),
+          ...(systemProxy.isInspecting() ? [systemProxy.whenIdle()] : []),
+          ...(systemProxyDraft.isReading() ? [systemProxyDraft.whenIdle()] : []),
+          ...(localProxyPlanStore.isReading() ? [localProxyPlanStore.whenIdle()] : [])
+        ])
+      }
+      current()
+      return waited
+    }
+
+    const waitForSystemProxyReadiness = async (current: () => void): Promise<void> => {
+      current()
+      await profileStartup?.whenIdle()
+      await systemProxy.whenIdle()
+      await waitForProfileInventory(current)
+      current()
+      requireSystemProxyIdle()
+    }
+    let inspection: { epoch: number; result: ReturnType<typeof systemProxy.inspect> } | undefined
+    const readSystemProxyForClick = async (checkCaller: () => void) => {
+      checkCaller()
+      // Hiding a window does not change the proxy status being read. Keep
+      // this shared observation independent of the caller that started it.
+      if (inspection?.epoch !== systemProxyReadEpoch) {
+        const live = coreOwnerIntent(false, false, () => systemProxyReadEpoch)
+        inspection = {
+          epoch: systemProxyReadEpoch,
+          result: (async () => {
+            await waitForSystemProxyReadiness(live)
+            live()
+            const report = await systemProxy.inspect()
+            live()
+            return report
+          })()
+        }
+      }
+      const read = inspection
+      try {
+        const report = await read.result
+        checkCaller()
+        return report
+      } finally {
+        if (inspection === read) inspection = undefined
+      }
+    }
+    const ensureSystemProxyListener = async (current = coreOwnerIntent(false, false)) => {
+      await waitForSystemProxyReadiness(current)
+      const tun = tunSession.state()
+      if (tun.owned) {
+        await tunSession.inspect()
+        current()
+        return tunSession.systemProxyListener(tun.sessionId)
+      }
+      if (
+        tun.pending ||
+        !['idle', 'prepared', 'released', 'restored'].includes(tun.phase) ||
+        tun.traffic !== 'inactive'
+      )
+        throw new Error('虚拟网卡状态需要核对。')
+      if (!localProxy.state().owned) {
+        if (!profileStartup) throw new Error('启动服务尚未就绪。')
+        await profileStartup.startOnClick(current)
+      }
+      current()
+      const state = localProxy.state()
+      if (
+        !state.owned ||
+        state.pending ||
+        state.uncertain ||
+        state.phase !== 'running' ||
+        state.traffic !== 'listening' ||
+        !state.httpPort
+      )
+        throw new Error('当前代理的监听未确认。')
+      return { httpPort: state.httpPort, mixedPort: state.ports?.mixed }
+    }
+    ipcMain.handle('relayEnsureSystemProxyListener', (event, ...args: unknown[]) => {
+      trusted(event)
+      if (args.length > 1 || args[0] !== undefined) throw new Error('系统代理启动不接受参数。')
+      const live = coreOwnerIntent()
+      return ensureSystemProxyListener(() => {
+        trusted(event)
+        live()
+      })
+    })
     ipcMain.handle('relaySystemProxyInspect', (event, input: unknown) => {
       trusted(event)
-      requireCompleteIdle()
-      return systemProxy.inspect(input)
+      if (input !== undefined) throw new Error('系统代理检查不接受参数。')
+      return readSystemProxyForClick(() => trusted(event))
     })
-    ipcMain.handle('relaySystemProxyPrepare', (event, input: unknown) => {
+    ipcMain.handle('relaySystemProxyPrepare', async (event, input: unknown) => {
       trusted(event)
-      requireCompleteIdle()
+      const live = coreOwnerIntent()
+      await waitForSystemProxyReadiness(() => {
+        trusted(event)
+        live()
+      })
       return systemProxy.prepare(input)
     })
-    ipcMain.handle('relaySystemProxyRestorePrepare', (event, input: unknown) => {
+    ipcMain.handle('relaySystemProxyRestorePrepare', async (event, input: unknown) => {
       trusted(event)
-      requireCompleteIdle()
+      const live = coreOwnerIntent()
+      await waitForSystemProxyReadiness(() => {
+        trusted(event)
+        live()
+      })
       return systemProxy.prepareRestore(input)
     })
-    ipcMain.handle('relaySystemProxyExecute', (event, input: unknown) => {
+    ipcMain.handle('relaySystemProxyExecute', async (event, input: unknown) => {
       trusted(event)
-      requireCompleteIdle()
-      return systemProxy.execute(input)
+      const live = coreOwnerIntent()
+      await waitForSystemProxyReadiness(() => {
+        trusted(event)
+        live()
+      })
+      return executeUserSystemProxy(input)
     })
     ipcMain.handle('relaySystemProxyState', (event, input: unknown) => {
       trusted(event)
@@ -6240,6 +7032,8 @@ app
       })
     })
     const performLocalProxyAction = (input: unknown, startupContext?: () => void) => {
+      requireProfileSwitchIdle()
+      if (tunHandoff.isBusy()) throw new Error('核心切换正在进行。')
       if (
         configurationEdit.isBusy() ||
         simple.isBusy() ||
@@ -6281,7 +7075,7 @@ app
         throw new Error('请先结束当前核心、桌面或配置操作。')
       const isRuleAction = action.action === 'rules' || action.action === 'rule'
       const pageContext =
-        isRuleAction || action.action === 'start' ? runtimeGistContext() : undefined
+        isRuleAction || action.action === 'start' ? runtimeGistContext(!startupContext) : undefined
       const assertContext = pageContext
         ? (): void => {
             pageContext()
@@ -6317,33 +7111,49 @@ app
         : performLocalProxyAction(input)
     })
     profileStartup = createProfileStartup({
+      waitForPorts: waitForTunPlanPorts,
+      onStarted: (current) =>
+        applyStartupSystemProxy(
+          {
+            enabled: async () => (await startupPreferences.read()).systemProxy,
+            local: () => localProxy.state(),
+            inspect: async () => {
+              await systemProxy.whenIdle()
+              current()
+              return systemProxy.inspect()
+            },
+            draft: async () => (await systemProxyDraft.read(current)).document,
+            prepare: systemProxy.prepare,
+            execute: systemProxy.execute,
+            cancel: systemProxy.cancel
+          },
+          current
+        ),
       readSelection: () => coreSelection.read(),
       readPlan: () => localProxyPlanStore.read(),
       resolveSelection: async (current) => {
         await preserveDedicatedPin(current)
-        return coreSelection.resolveStartup(current)
+        return coreSelection.readPreferred()
       },
       state: () => localProxy.state(),
       context: coreOwnerIntent,
-      waitForInventory: async (current) => {
-        // First content and its inventory IPCs arrive concurrently. Wait for
-        // those read-only lists; writes and all other busy gates still reject.
-        let waited = false
-        while (
-          profiles.isListing() ||
-          subscriptionSources.isListing() ||
-          localProxyPlanStore.isReading()
-        ) {
-          current()
-          waited = true
-          await Promise.all([
-            ...(profiles.isListing() ? [profiles.whenIdle()] : []),
-            ...(subscriptionSources.isListing() ? [subscriptionSources.whenIdle()] : []),
-            ...(localProxyPlanStore.isReading() ? [localProxyPlanStore.whenIdle()] : [])
-          ])
-        }
+      waitForInventory: waitForProfileInventory,
+      selectOnClick: async (current) => {
+        const selected = await coreSelection.readPreferred()
         current()
-        return waited
+        if (selected) return selected
+        const inventory = await profileStore.list()
+        current()
+        const first = inventory.profiles[0]
+        if (!first) return undefined
+        const selection = { id: first.id, sha256: first.sha256 }
+        await waitForProfileInventory(current)
+        current()
+        requireCompleteIdle()
+        // Use the ordinary selection path for its persisted identity, pin and UI notifications.
+        await clashBackend.invoke('changeCurrentProfile', [selection])
+        current()
+        return selection
       },
       prepare: (input) => {
         requireCompleteIdle()
@@ -7216,6 +8026,7 @@ app
     window = new BrowserWindow({
       title: 'Relay',
       show: false,
+      acceptFirstMouse: process.platform === 'darwin',
       frame: startupWindowPreferences.useWindowFrame,
       ...(startupWindowPreferences.useWindowFrame
         ? {}
@@ -7309,7 +8120,7 @@ app
       // the background. Only an explicit app/menu quit enters shutdown below.
       if (!shellQuitting && !internalFinal) {
         event.preventDefault()
-        ++backupRendererEpoch
+        invalidateRendererEpochs()
         invalidateSimpleRenderer()
         tunSession.invalidateRules()
         tunSession.invalidateInteractiveResources()
@@ -7384,7 +8195,7 @@ app
     window.on('closed', () => {
       invalidateSubStoreNetwork()
       onlineThemes?.cancel()
-      ++backupRendererEpoch
+      invalidateRendererEpochs()
       invalidateSimpleRenderer()
       tunSession.invalidateRules()
       tunSession.invalidateResources()
@@ -7497,7 +8308,7 @@ app
       failed: (reason) => {
         if (!restartCoordinator?.isFinalQuitInProgress()) restartCoordinator?.quitCancelled()
         onlineThemes?.cancel()
-        ++backupRendererEpoch
+        invalidateRendererEpochs()
         invalidateSimpleRenderer()
         tunSession.invalidateRules()
         tunSession.invalidateInteractiveResources()
@@ -7513,8 +8324,10 @@ app
         // Keep the same window, native hosts and recovery obligations. Reloading
         // or destroying it would silently run the closed-handler cleanup below.
         shellHost.showWindow()
+        const notice = new AbortController()
         void dialog
           .showMessageBox(startupWindow, {
+            signal: notice.signal,
             type: 'error',
             title: 'Relay 界面未就绪',
             message: 'Relay 界面加载失败。',
@@ -7524,10 +8337,11 @@ app
             cancelId: 1
           })
           .then(({ response }) => {
-            if (response === 0 && !startupWindow.isDestroyed())
+            if (response === 0 && !notice.signal.aborted && !startupWindow.isDestroyed())
               startupWindow.webContents.openDevTools({ mode: 'detach' })
           })
           .catch(() => {})
+        return () => notice.abort()
       }
     })
     const invalidateGuardIntent = (): void => {
@@ -7546,7 +8360,7 @@ app
       artifacts.clear()
       diagnostics.clear()
       code.clear()
-      ++backupRendererEpoch
+      invalidateRendererEpochs()
       backupService.invalidatePending()
     })
     startupWindow.on('closed', invalidateGuardIntent)
@@ -7566,7 +8380,7 @@ app
         code.clear()
         if (!restartCoordinator?.isFinalQuitInProgress()) restartCoordinator?.quitCancelled()
         onlineThemes?.cancel()
-        ++backupRendererEpoch
+        invalidateRendererEpochs()
         invalidateSimpleRenderer(!initialNavigation)
         tunSession.invalidateRules()
         tunSession.invalidateInteractiveResources()

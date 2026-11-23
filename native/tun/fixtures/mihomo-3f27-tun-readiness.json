@@ -1,0 +1,231 @@
+{
+  "cases": [
+    {
+      "apiTun": {
+        "enable": true,
+        "device": "utun42",
+        "stack": "Mixed",
+        "dns-mode": "",
+        "dns-hijack": ["any:53"],
+        "auto-route": true,
+        "auto-detect-interface": true,
+        "mtu": 1500,
+        "inet4-address": ["198.18.0.1/30"],
+        "file-descriptor": 0,
+        "processors-per-channel": 1
+      },
+      "darwinEffectiveDNSMode": "disabled",
+      "name": "omitted",
+      "source": {
+        "allow-lan": false,
+        "dns": {
+          "enable": false
+        },
+        "ipv6": false,
+        "mixed-port": 0,
+        "mode": "rule",
+        "port": 0,
+        "redir-port": 0,
+        "rules": ["MATCH,DIRECT"],
+        "socks-port": 0,
+        "tproxy-port": 0,
+        "tun": {
+          "auto-detect-interface": true,
+          "auto-redirect": false,
+          "auto-route": true,
+          "device": "utun42",
+          "dns-hijack": ["any:53"],
+          "enable": true,
+          "gso": false,
+          "mtu": 1500,
+          "recvmsgx": false,
+          "sendmsgx": false,
+          "stack": "mixed"
+        }
+      }
+    },
+    {
+      "apiTun": {
+        "enable": true,
+        "device": "utun42",
+        "stack": "Mixed",
+        "dns-mode": "",
+        "dns-hijack": ["any:53"],
+        "auto-route": true,
+        "auto-detect-interface": true,
+        "mtu": 1500,
+        "inet4-address": ["198.18.0.1/30"],
+        "file-descriptor": 0,
+        "processors-per-channel": 1
+      },
+      "darwinEffectiveDNSMode": "disabled",
+      "name": "empty",
+      "source": {
+        "allow-lan": false,
+        "dns": {
+          "enable": false
+        },
+        "ipv6": false,
+        "mixed-port": 0,
+        "mode": "rule",
+        "port": 0,
+        "redir-port": 0,
+        "rules": ["MATCH,DIRECT"],
+        "socks-port": 0,
+        "tproxy-port": 0,
+        "tun": {
+          "auto-detect-interface": true,
+          "auto-redirect": false,
+          "auto-route": true,
+          "device": "utun42",
+          "dns-hijack": ["any:53"],
+          "dns-mode": "",
+          "enable": true,
+          "gso": false,
+          "mtu": 1500,
+          "recvmsgx": false,
+          "sendmsgx": false,
+          "stack": "mixed"
+        }
+      }
+    },
+    {
+      "apiTun": {
+        "enable": true,
+        "device": "utun42",
+        "stack": "Mixed",
+        "dns-mode": "disabled",
+        "dns-hijack": ["any:53"],
+        "auto-route": true,
+        "auto-detect-interface": true,
+        "mtu": 1500,
+        "inet4-address": ["198.18.0.1/30"],
+        "file-descriptor": 0,
+        "processors-per-channel": 1
+      },
+      "darwinEffectiveDNSMode": "disabled",
+      "name": "disabled",
+      "source": {
+        "allow-lan": false,
+        "dns": {
+          "enable": false
+        },
+        "ipv6": false,
+        "mixed-port": 0,
+        "mode": "rule",
+        "port": 0,
+        "redir-port": 0,
+        "rules": ["MATCH,DIRECT"],
+        "socks-port": 0,
+        "tproxy-port": 0,
+        "tun": {
+          "auto-detect-interface": true,
+          "auto-redirect": false,
+          "auto-route": true,
+          "device": "utun42",
+          "dns-hijack": ["any:53"],
+          "dns-mode": "disabled",
+          "enable": true,
+          "gso": false,
+          "mtu": 1500,
+          "recvmsgx": false,
+          "sendmsgx": false,
+          "stack": "mixed"
+        }
+      }
+    },
+    {
+      "apiTun": {
+        "enable": true,
+        "device": "utun42",
+        "stack": "Mixed",
+        "dns-mode": "native",
+        "dns-hijack": ["any:53"],
+        "auto-route": true,
+        "auto-detect-interface": true,
+        "mtu": 1500,
+        "inet4-address": ["198.18.0.1/30"],
+        "file-descriptor": 0,
+        "processors-per-channel": 1
+      },
+      "darwinEffectiveDNSMode": "native",
+      "name": "native",
+      "source": {
+        "allow-lan": false,
+        "dns": {
+          "enable": false
+        },
+        "ipv6": false,
+        "mixed-port": 0,
+        "mode": "rule",
+        "port": 0,
+        "redir-port": 0,
+        "rules": ["MATCH,DIRECT"],
+        "socks-port": 0,
+        "tproxy-port": 0,
+        "tun": {
+          "auto-detect-interface": true,
+          "auto-redirect": false,
+          "auto-route": true,
+          "device": "utun42",
+          "dns-hijack": ["any:53"],
+          "dns-mode": "native",
+          "enable": true,
+          "gso": false,
+          "mtu": 1500,
+          "recvmsgx": false,
+          "sendmsgx": false,
+          "stack": "mixed"
+        }
+      }
+    },
+    {
+      "apiTun": {
+        "enable": true,
+        "device": "utun42",
+        "stack": "Mixed",
+        "dns-mode": "hijack",
+        "dns-hijack": ["any:53"],
+        "auto-route": true,
+        "auto-detect-interface": true,
+        "mtu": 1500,
+        "inet4-address": ["198.18.0.1/30"],
+        "file-descriptor": 0,
+        "processors-per-channel": 1
+      },
+      "darwinEffectiveDNSMode": "hijack",
+      "name": "hijack",
+      "source": {
+        "allow-lan": false,
+        "dns": {
+          "enable": false
+        },
+        "ipv6": false,
+        "mixed-port": 0,
+        "mode": "rule",
+        "port": 0,
+        "redir-port": 0,
+        "rules": ["MATCH,DIRECT"],
+        "socks-port": 0,
+        "tproxy-port": 0,
+        "tun": {
+          "auto-detect-interface": true,
+          "auto-redirect": false,
+          "auto-route": true,
+          "device": "utun42",
+          "dns-hijack": ["any:53"],
+          "dns-mode": "hijack",
+          "enable": true,
+          "gso": false,
+          "mtu": 1500,
+          "recvmsgx": false,
+          "sendmsgx": false,
+          "stack": "mixed"
+        }
+      }
+    }
+  ],
+  "provenance": "config.Parse -\u003e listener.LastTunConf -\u003e executor.GetGeneral().Tun -\u003e encoding/json; no ApplyConfig, listener or device creation",
+  "singTunVersion": "v0.4.28",
+  "upstreamCommit": "3f27ef39f8c96bbfbc8b0b9bb10f5c9ef60149d8"
+}

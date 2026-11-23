@@ -1,0 +1,98 @@
+#!/bin/sh
+# The historical uninstall.py filename is retained for installed-client
+# compatibility. This script requires only macOS system tools, never Python.
+set -eu
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export PATH
+fail() { echo "Relay TUN removal refused: $*" >&2; exit 1; }
+digest() { /usr/bin/shasum -a 256 "$1" | /usr/bin/awk '{print $1}'; }
+directory() (
+    [ -d "$1" ] && [ ! -L "$1" ] && [ "$(/usr/bin/stat -f '%u' "$1")" = 0 ] || fail 'unsafe directory'
+    mode=$(/usr/bin/stat -f '%p' "$1")
+    [ "$((0$mode & 06022))" = 0 ] || fail 'writable directory'
+)
+regular() (
+    [ -f "$1" ] && [ ! -L "$1" ] && [ "$(/usr/bin/stat -f '%u:%l' "$1")" = '0:1' ] || fail 'unsafe file'
+    mode=$(/usr/bin/stat -f '%p' "$1")
+    [ "$((0$mode & 07777))" = "$((0$2))" ] || fail 'unsafe file permissions'
+)
+pinned() { regular "$1" "$2"; [ "$(digest "$1")" = "$3" ] || fail 'changed component'; }
+[ "$(/usr/bin/id -u)" = 0 ] && [ "$#" = 2 ] && [ "$1" = --remove ] || fail 'administrator authorization and reviewed manifest digest required'
+reviewed=$2
+case "$reviewed" in ''|*[!a-f0-9]*) fail 'invalid manifest digest';; esac
+[ "${#reviewed}" = 64 ] || fail 'invalid manifest digest'
+root='/Library/Application Support/Relay/TunManaged'
+scripts=$(CDPATH= cd -P "$(/usr/bin/dirname "$0")" && /bin/pwd -P)
+[ "$scripts" = "$root" ] && [ "${0##*/}" = uninstall.py ] || fail 'fixed installed removal entry required'
+for parent in / /Library '/Library/Application Support' '/Library/Application Support/Relay' "$root"; do directory "$parent"; done
+manifest="$root/installation.json"
+regular "$manifest" 644
+[ "$(digest "$manifest")" = "$reviewed" ] || fail 'manifest identity mismatch'
+field() { /usr/bin/plutil -extract "$1" raw -o - "$manifest"; }
+[ "$(field version)" = 2 ] && [ "$(field role)" = core-managed-v2 ] && [ "$(field coreProfile)" = local-geodata-v1 ] || fail 'unknown installation role'
+uid=$(field clientUID)
+case "$uid" in ''|*[!0-9]*) fail 'invalid installation user';; esac
+[ "$uid" -ge 501 ] && [ "$uid" -lt 4294967295 ] || fail 'invalid installation user'
+pinned "$root/uninstall.py" 755 "$(field uninstallerSHA256)"
+pinned "$root/RelayTunClient" 755 "$(field client.sha256)"
+for arch in arm64 x64; do
+    key=$arch; [ "$arch" != x64 ] || key=x86_64
+    directory "$root/Core"; directory "$root/Core/darwin-$arch"
+    pinned "$root/Core/darwin-$arch/mihomo" 4755 "$(field "cores.$key.sha256")"
+done
+regular "$root/busy.lock" 644
+[ "$(/bin/cat "$root/busy.lock")" = 'Relay core-managed TUN v1' ] || fail 'changed lifetime lock'
+inventory=$(/usr/bin/find "$root" -mindepth 1 -print)
+while IFS= read -r entry; do
+    case "${entry#"$root/"}" in
+        installation.json|RelayTunClient|uninstall.py|busy.lock|Core|Core/darwin-arm64|Core/darwin-x64|Core/darwin-arm64/mihomo|Core/darwin-x64/mihomo) ;;
+        *) fail 'unknown component; nothing removed';;
+    esac
+done <<EOF
+$inventory
+EOF
+exec 9<"$root/busy.lock"
+/usr/bin/lockf -s -t 0 9 || fail 'TUN is still active; stop it manually before removal'
+[ "$(/usr/bin/stat -f '%i:%u:%Lp:%l:%z' /dev/fd/9)" = "$(/usr/bin/stat -f '%i:%u:%Lp:%l:%z' "$root/busy.lock")" ] || fail 'lifetime lock replaced'
+# Cache the reviewed fields before retiring installation.json. The lifetime
+# lock also serializes the supported upgrade path; every item must still match
+# its observed identity and bytes immediately before unlink.
+snapshots=''
+for file in installation.json RelayTunClient Core/darwin-arm64/mihomo Core/darwin-x64/mihomo uninstall.py busy.lock; do
+    case "$file" in
+        installation.json) expected="$reviewed"; mode=644;;
+        RelayTunClient) expected=$(field client.sha256); mode=755;;
+        Core/darwin-arm64/mihomo) expected=$(field cores.arm64.sha256); mode=4755;;
+        Core/darwin-x64/mihomo) expected=$(field cores.x86_64.sha256); mode=4755;;
+        uninstall.py) expected=$(field uninstallerSHA256); mode=755;;
+        busy.lock) expected=$(printf 'Relay core-managed TUN v1\n' | /usr/bin/shasum -a 256 | /usr/bin/awk '{print $1}'); mode=644;;
+    esac
+    pinned "$root/$file" "$mode" "$expected"
+    identity=$(/usr/bin/stat -f '%d:%i:%u:%g:%p:%l:%z:%m:%c' "$root/$file")
+    snapshots="${snapshots}${file}|${mode}|${expected}|${identity}
+"
+done
+# Inventory failure precedes all deletion; receipt retirement follows removal.
+receipts=$(/usr/sbin/pkgutil --pkgs) || fail 'receipt inventory unavailable'
+while IFS='|' read -r file mode expected identity; do
+    [ -n "$file" ] || continue
+    pinned "$root/$file" "$mode" "$expected"
+    [ "$(/usr/bin/stat -f '%d:%i:%u:%g:%p:%l:%z:%m:%c' "$root/$file")" = "$identity" ] || fail 'resource replaced; nothing removed'
+done <<EOF
+$snapshots
+EOF
+while IFS='|' read -r file mode expected identity; do
+    [ -n "$file" ] || continue
+    pinned "$root/$file" "$mode" "$expected"
+    [ "$(/usr/bin/stat -f '%d:%i:%u:%g:%p:%l:%z:%m:%c' "$root/$file")" = "$identity" ] || fail 'resource replaced; removal stopped'
+    /bin/rm "$root/$file"
+done <<EOF
+$snapshots
+EOF
+/bin/rmdir "$root/Core/darwin-arm64" "$root/Core/darwin-x64" "$root/Core" "$root"
+while IFS= read -r receipt; do
+    if [ "$receipt" = local.relay.network.tun.core-managed-v2 ]; then /usr/sbin/pkgutil --forget "$receipt" >/dev/null; fi
+done <<EOF
+$receipts
+EOF
+echo 'Relay TUN components removed. User configurations and current network settings were preserved.'

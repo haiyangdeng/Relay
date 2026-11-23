@@ -163,7 +163,11 @@ struct RelayTunCoreReadiness {
         }
         let hijack = actual["dns-hijack"] is NSNull ? [] : actual["dns-hijack"] as? [String]
         try require(hijack == tun["dns-hijack"] as? [String], .dnsHijack)
-        try require(actual["dns-mode"] as? String == (tun["dns-mode"] as? String ?? "disabled"), .dnsMode)
+        // The pinned core serializes the declared option, not sing-tun's
+        // effective Darwin default. Omitted dns-mode remains "" in /configs.
+        guard let intendedDNSMode = (tun["dns-mode"] ?? "") as? String,
+              let actualDNSMode = actual["dns-mode"] as? String,
+              actualDNSMode == intendedDNSMode else { throw Failure.field(.dnsMode) }
     }
     /// All closures capture held capabilities. verify checks the resource,
     /// source file, admitted FD, current consent and child's continued life;
@@ -515,6 +519,57 @@ struct RelayTunCoreReadiness {
             guard lock.try() else { throw Failure.trafficIO(.busy) }; defer { lock.unlock() }
             return try exchange(.traffic, before: deadline, check: check)
         }
+        /// Uses the same held peer and bearer as readiness. Only node presentation
+        /// fields can leave the client; provider URLs and subscription metadata stay here.
+        func proxyGroups(_ action: RelayTunRuntimeCapture.ProxyAction, before deadline: UInt64, check: () throws -> Void) throws -> Data {
+            guard lock.try() else { throw Failure.trafficIO(.busy) }; defer { lock.unlock() }
+            func rows(_ endpoint: Exchange, _ key: String) throws -> [String: Any] {
+                let bytes = try exchange(endpoint, before: deadline, check: check)
+                guard let document = try JSONSerialization.jsonObject(with: bytes) as? [String: Any],
+                      let table = document[key] as? [String: Any] else { throw Failure.invalid }
+                return table
+            }
+            let table = try rows(.proxies, "proxies")
+            func change(_ group: String, _ member: String?) throws {
+                guard let row = table[group] as? [String: Any], let members = row["all"] as? [String],
+                      let type = row["type"] as? String, ["Selector", "URLTest", "Fallback", "LoadBalance", "Smart"].contains(type),
+                      member.map(members.contains) ?? (type != "Selector") else { throw Failure.invalid }
+                _ = try exchange(.proxySelection(group, member), before: deadline, check: check)
+                let after = try rows(.proxies, "proxies")
+                guard let actual = after[group] as? [String: Any] else { throw Failure.invalid }
+                if let member {
+                    guard actual["now"] as? String == member || actual["fixed"] as? String == member else { throw Failure.invalid }
+                } else if let fixed = actual["fixed"] as? String, !fixed.isEmpty { throw Failure.invalid }
+            }
+            switch action {
+            case .select(let group, let member): try change(group, member); return Data("{}".utf8)
+            case .automatic(let group): try change(group, nil); return Data("{}".utf8)
+            case .list: break
+            }
+            // Clash Party resolves provider members absent from the top-level table.
+            let missing = Set(table.values.compactMap { ($0 as? [String: Any])?["all"] as? [String] }.joined()).subtracting(table.keys)
+            let providers = missing.isEmpty ? [:] : try rows(.proxyProviders, "providers")
+            var output: [String: [String: Any]] = [:]
+            func add(_ value: Any, provider: String? = nil) throws {
+                guard let row = value as? [String: Any], let name = row["name"] as? String,
+                      let type = row["type"] as? String, !name.isEmpty else { throw Failure.invalid }
+                if provider != nil && !missing.contains(name) { return }
+                var node: [String: Any] = ["name": name, "type": type, "history": [], "extra": [:]]
+                for key in ["alive","tfo","udp","uot","xudp","mptcp","smux","hidden"] { if let flag = row[key] as? Bool { node[key] = flag } }
+                for key in ["now","fixed","id","provider-name"] { if let text = row[key] as? String { node[key] = text } }
+                if let all = row["all"] as? [String] { node["all"] = all }
+                if let history = row["history"] as? [[String: Any]] { node["history"] = history.suffix(1).map { $0.filter { ["time","delay"].contains($0.key) } } }
+                if node["provider-name"] == nil, let provider { node["provider-name"] = provider }
+                output[name] = node
+            }
+            for value in table.values { try add(value) }
+            for (provider, value) in providers {
+                guard let record = value as? [String: Any] else { throw Failure.invalid }
+                for value in record["proxies"] as? [Any] ?? [] { try add(value, provider: provider) }
+            }
+            try check()
+            return try JSONSerialization.data(withJSONObject: output)
+        }
         func readConnections(before deadline: UInt64, check: () throws -> Void) throws -> Data {
             guard lock.try() else { throw Failure.trafficIO(.busy) }; defer { lock.unlock() }
             let raw = try exchange(.connections, before: deadline, check: check)
@@ -638,6 +693,7 @@ struct RelayTunCoreReadiness {
             _ = try exchange(.smartClear, before: deadline, check: check, prepareWrite: { _, _ in try enterWrite() })
         }
         private enum Exchange {
+            case proxies, proxyProviders, proxySelection(String, String?)
             case readiness(Endpoint), rules, patch(Int, Bool), resources(Data), providers, providerUpdate(String), smartWeights, smartClear, traffic, connections
             var bodyLimit: Int {
                 switch self {
@@ -645,6 +701,8 @@ struct RelayTunCoreReadiness {
                 case .rules: return RelayTunRuntimeRules.tableLimit
                 case .patch: return 0
                 case .resources: return 8192
+                case .proxies, .proxyProviders: return 8 * 1024 * 1024
+                case .proxySelection: return 0
                 case .providers: return 2 * 1024 * 1024
                 case .providerUpdate, .smartClear: return 0
                 case .smartWeights: return RelayTunSmartTools.payloadLimit
@@ -672,6 +730,14 @@ struct RelayTunCoreReadiness {
                     method = "PATCH"; path = "/rules/disable"
                     body = try JSONSerialization.data(withJSONObject: [String(index): disabled], options: [.sortedKeys])
                 case .resources(let value): method = "POST"; path = "/relay/geodata/v1"; body = value
+                case .proxies: method = "GET"; path = "/proxies"; body = Data()
+                case .proxyProviders: method = "GET"; path = "/providers/proxies"; body = Data()
+                case .proxySelection(let name, let member):
+                    guard RelayTunRuntimeCapture.ProxyAction.name(name) != nil else { throw Failure.invalid }
+                    path = "/proxies/" + name.utf8.map { String(format: "%%%02X", $0) }.joined()
+                    if let member {
+                        method = "PUT"; body = try JSONSerialization.data(withJSONObject: ["name": member])
+                    } else { method = "DELETE"; body = Data() }
                 case .providers: method = "GET"; path = "/providers/rules"; body = Data()
                 case .providerUpdate(let name): method = "PUT"; path = try RelayTunCoreReadiness.providerPath(name); body = Data()
                 case .smartWeights: method = "GET"; path = "/group/weights"; body = Data()
@@ -684,6 +750,11 @@ struct RelayTunCoreReadiness {
                 bytes.append(body); return bytes
             }
             func body(_ bytes: Data) throws -> Data {
+                if case .proxySelection = self {
+                    return try RelayTunCoreReadiness.boundedHTTPBody(bytes, limit: 0, statusCodes: ["204"], empty: true)
+                }
+                if case .proxies = self { return try RelayTunCoreReadiness.boundedHTTPBody(bytes, limit: bodyLimit, statusCodes: ["200"], empty: false) }
+                if case .proxyProviders = self { return try RelayTunCoreReadiness.boundedHTTPBody(bytes, limit: bodyLimit, statusCodes: ["200"], empty: false) }
                 if case .connections = self {
                     do { return try RelayTunCoreReadiness.boundedHTTPBody(bytes, limit: bodyLimit, statusCodes: ["200"], empty: false) }
                     catch { throw Failure.trafficHTTP }
@@ -740,7 +811,7 @@ struct RelayTunCoreReadiness {
             withUnsafeMutableBytes(of: &address.sun_path) { $0.copyBytes(from: path.utf8CString.map { UInt8(bitPattern: $0) }) }
             let deadline: UInt64
             switch exchange {
-            case .resources, .providers, .providerUpdate:
+            case .resources, .providers, .providerUpdate, .proxies, .proxyProviders, .proxySelection:
                 guard let outerDeadline else { throw Failure.deadline }; deadline = outerDeadline
             case .traffic, .connections:
                 guard let outerDeadline else { throw Failure.deadline }

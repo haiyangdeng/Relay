@@ -22,6 +22,7 @@ import {
 import { validateCoreMode, type RelayCoreMode } from '../../../shared/relay/core'
 import { compileProfileResolution } from '../profiles/resolution'
 import { compileProfileRuntime } from '../profiles/runtime'
+import { profileSourceForOwnedCore } from './startup-node'
 import { healthURL, SMART_MODEL_CONTROLS } from '../profiles/groups'
 import {
   resourceCheckDefinition,
@@ -43,6 +44,7 @@ import {
   validateDedicatedPortConflicts,
   type LocalProxyPorts
 } from '../../../shared/relay/local-proxy-ports'
+import { mihomoPathSegment } from './mihomo-path'
 import {
   writeProbeOwner,
   registerHeldProbeWorkspace,
@@ -321,7 +323,10 @@ export function ownedCoreConfiguration(
     snifferSettings(parsed.sniffer)
     const geography = localProxyGeography(parsed, runtimeAssets)
     validateLocalProxyGeoAssets(parsed, runtimeAssets)
-    if (!compileProfileRuntime(configuration, geography).configuration)
+    if (
+      !compileProfileRuntime(profileSourceForOwnedCore(parsed, configuration), geography)
+        .configuration
+    )
       throw new Error('节点或动态组受控边界不符。')
     const dns = parsed.dns as Record<string, unknown> | undefined
     if (dns?.enable === true) {
@@ -874,7 +879,7 @@ export async function startOwnedCore(
   }
   const group = async (name: string): Promise<Record<string, unknown>> => {
     if (kind !== 'localProxy' || !validName(name)) throw new Error('组名称或实例类型无效。')
-    return api('GET', '/proxies/' + encodeURIComponent(name))
+    return api('GET', '/proxies/' + mihomoPathSegment(name))
   }
   const select = async (name: string, member: string): Promise<void> => {
     if (
@@ -885,12 +890,12 @@ export async function startOwnedCore(
       !validName(member)
     )
       throw new Error('组或成员无效。')
-    await api('PUT', '/proxies/' + encodeURIComponent(name), JSON.stringify({ name: member }))
+    await api('PUT', '/proxies/' + mihomoPathSegment(name), JSON.stringify({ name: member }))
   }
   const automatic = async (name: string): Promise<void> => {
     if (kind !== 'localProxy' || reloadPending || reloadUncertain || !validName(name))
       throw new Error('组名称无效。')
-    await api('DELETE', '/proxies/' + encodeURIComponent(name))
+    await api('DELETE', '/proxies/' + mihomoPathSegment(name))
   }
   const patchMode = async (mode: RelayCoreMode): Promise<void> => {
     if (kind !== 'localProxy' || reloadPending || reloadUncertain)

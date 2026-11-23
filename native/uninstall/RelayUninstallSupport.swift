@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import CoreFoundation
 import Darwin
 
 // Fixed installation namespace. No user-supplied removal path is accepted.
@@ -152,12 +153,53 @@ final class RelayRemovalCapture: @unchecked Sendable {
     var overflowed: Bool { lock.lock(); defer { lock.unlock() }; return overflow }
 }
 
+// A mount's st_dev may change after reboot. Resolve only the bookmark from
+// the protected registration, then compare its *stored* volume and creation
+// date against the live object. A path-based bookmark resolution alone can
+// return a replacement. The open descriptor pins the verified file identity.
+final class RelayRemovalAppIdentity {
+    let descriptor: Int32
+    let device: UInt64
+    let inode: UInt64
+    private static let keys: Set<URLResourceKey> = [.volumeUUIDStringKey, .creationDateKey]
+    static func bookmark(_ url: URL) throws -> Data {
+        try url.bookmarkData(options: [.minimalBookmark], includingResourceValuesForKeys: keys, relativeTo: nil)
+    }
+    init(bookmark data: Data, registeredInode: UInt64) throws {
+        let error = RelayRemoval.fail("Registered App bookmark does not identify the original directory")
+        guard !data.isEmpty, data.count <= 131072, registeredInode > 0,
+              let stored = CFURLCreateResourcePropertiesForKeysFromBookmarkData(nil, Self.keys.map(\.rawValue) as CFArray, data as CFData)?.takeRetainedValue() as? [String: Any],
+              let volume = stored[URLResourceKey.volumeUUIDStringKey.rawValue] as? String,
+              let volumeUUID = UUID(uuidString: volume),
+              let created = stored[URLResourceKey.creationDateKey.rawValue] as? Date else { throw error }
+        var stale = false
+        let resolved = try URL(resolvingBookmarkData: data, options: [.withoutUI, .withoutMounting], relativeTo: nil, bookmarkDataIsStale: &stale)
+        guard resolved.isFileURL else { throw error }
+        let path = resolved.path
+        let fd = open(path, O_EVTONLY | O_NOFOLLOW | O_DIRECTORY | O_CLOEXEC)
+        guard fd >= 0 else { throw error }
+        do {
+            var opened = stat()
+            guard fstat(fd, &opened) == 0, opened.st_mode & S_IFMT == S_IFDIR, UInt64(opened.st_ino) == registeredInode else { throw error }
+            // A new URL prevents resolved-bookmark resource caching from
+            // returning a stored property in place of a live filesystem read.
+            let values = try URL(fileURLWithPath: path).resourceValues(forKeys: Self.keys)
+            guard let liveVolume = values.volumeUUIDString, UUID(uuidString: liveVolume) == volumeUUID,
+                  values.creationDate == created, let linked = RelayRemoval.info(path),
+                  linked.st_mode & S_IFMT == S_IFDIR, linked.st_dev == opened.st_dev, linked.st_ino == opened.st_ino else { throw error }
+            self.descriptor = fd; self.device = UInt64(opened.st_dev); self.inode = UInt64(opened.st_ino)
+        } catch { close(fd); throw error }
+    }
+    deinit { close(descriptor) }
+    func matches(_ s: stat) -> Bool { UInt64(s.st_dev) == device && UInt64(s.st_ino) == inode && s.st_mode & S_IFMT == S_IFDIR }
+}
+
 struct RelayRemovalInstallation {
     let record: [String: Any]
     let generation: String
     let uid: UInt32
     let home: String
-    let device: UInt64
+    let identity: RelayRemovalAppIdentity?
     let inode: UInt64
     init() throws {
         let finalizing = RelayRemoval.present(RelayRemoval.root + "/finalization.json")
@@ -167,26 +209,43 @@ struct RelayRemovalInstallation {
               let user = getpwuid(uidValue), let directory = user.pointee.pw_dir,
               let home = m["home"] as? String, home == String(cString: directory),
               m["appPath"] as? String == RelayRemoval.app,
-              let device = m["appDevice"] as? UInt64, let inode = m["appInode"] as? UInt64,
+              m["appDevice"] is UInt64, let inode = m["appInode"] as? UInt64, inode > 0,
               let native = m["nativeSHA256"] as? String, let supervisor = m["supervisorSHA256"] as? String,
               try (finalizing || RelayRemoval.hash(RelayRemoval.file(RelayRemoval.native, mode: 0o755)) == native),
               RelayRemoval.hash(try RelayRemoval.file(RelayRemoval.executable, mode: 0o755)) == supervisor else { throw RelayRemoval.fail("Uninstall installation binding mismatch") }
-        self.record = m; self.generation = generation; self.uid = uidValue; self.home = home; self.device = device; self.inode = inode
+        func acquire() throws -> RelayRemovalAppIdentity {
+            guard let text = m["appBookmark"] as? String, let data = Data(base64Encoded: text) else { throw RelayRemoval.fail("Missing App identity bookmark") }
+            return try RelayRemovalAppIdentity(bookmark: data, registeredInode: inode)
+        }
+        if finalizing || RelayRemoval.present(RelayRemoval.root + "/intent.json") {
+            // The installation can already have been emptied from Trash.
+            identity = try? acquire()
+        } else { identity = try acquire() }
+        self.record = m; self.generation = generation; self.uid = uidValue; self.home = home; self.inode = inode
     }
-    func matches(_ s: stat) -> Bool { UInt64(s.st_dev) == device && UInt64(s.st_ino) == inode && s.st_mode & S_IFMT == S_IFDIR }
+    func matches(_ s: stat) -> Bool { identity?.matches(s) == true }
 }
 
 // Durable phase ordering shared by the real monitor and injected failure tests.
 // A failure never advances the checkpoint and never runs a later destructive step.
 enum RelayRemovalLifecycle {
-    static func run(phase initial: String, restoreUser: () throws -> Void,
+    static func run(phase initial: String, prepareLegacyLogin: () throws -> Void = {},
+                    retireNetworkOnLoginFailure: () throws -> Void = {}, restoreUser: () throws -> Void,
                     removeRegistrations: () throws -> Void = {},
                     removeComponents: () throws -> Void, checkpoint: (String) throws -> Void,
                     finish: () throws -> Void) throws {
         guard ["requested", "user-cleaned", "components-cleaned"].contains(initial) else { throw RelayRemoval.fail("Unknown cleanup phase") }
         var phase = initial
         if phase == "requested" {
-            try restoreUser(); try removeRegistrations(); try checkpoint("user-cleaned"); phase = "user-cleaned"
+            let legacy = Result { try prepareLegacyLogin() }
+            try restoreUser()
+            if case .failure(let error) = legacy {
+                // Restored proxy/clients no longer need the network components.
+                // Retain the intent and native worker to finish the login item.
+                try retireNetworkOnLoginFailure()
+                throw error
+            }
+            try removeRegistrations(); try checkpoint("user-cleaned"); phase = "user-cleaned"
         }
         if phase == "user-cleaned" {
             try removeComponents(); try checkpoint("components-cleaned")

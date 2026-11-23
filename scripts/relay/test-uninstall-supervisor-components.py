@@ -81,7 +81,8 @@ struct Fixture {
         let record: [String: Any] = [
             "version": 1, "generation": UUID().uuidString, "clientUID": getuid(),
             "home": String(cString: getpwuid(getuid())!.pointee.pw_dir), "appPath": RelayRemoval.app,
-            "appDevice": UInt64(current.st_dev), "appInode": UInt64(current.st_ino),
+            "appDevice": UInt64(current.st_dev) + 1, "appInode": UInt64(current.st_ino),
+            "appBookmark": try URL(fileURLWithPath: RelayRemoval.app).bookmarkData(options: [.minimalBookmark], includingResourceValuesForKeys: nil, relativeTo: nil).base64EncodedString(),
             "nativeSHA256": RelayRemoval.hash(try RelayRemoval.file(RelayRemoval.native, mode: 0o755)),
             "supervisorSHA256": RelayRemoval.hash(try RelayRemoval.file(RelayRemoval.executable, mode: 0o755))]
         try object(RelayRemoval.root + "/installation.json", record)

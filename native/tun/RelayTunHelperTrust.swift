@@ -16,8 +16,8 @@ struct RelayTunManagedInstallation {
     static let cores = ["arm64": root + "/Core/darwin-arm64/mihomo", "x86_64": root + "/Core/darwin-x64/mihomo"]
     enum CoreProfile { case official, localGeodata }
     static let localGeodataPins = [
-        "arm64": ("e9327b2ce0e5c4405ce2640145339be9e315943bdeb63ffee4b3f4fe18bee419", 65185184),
-        "x86_64": ("1d110d7f958abd22ec011ac466f7451bf22101f8b6338a26a3e9fedcbd62ae26", 70035456)]
+        "arm64": ("a7dcd3ffe59be033ed1b4000a4ae90acdf2ab41450536e02445692ea124195c2", 79861968),
+        "x86_64": ("bd9f2b38256b05b643f6a33273669b4df2c2b32b5a25db0b8db41a0a0199bc3b", 85466544)]
     static var architecture: String {
         #if arch(arm64)
         return "arm64"

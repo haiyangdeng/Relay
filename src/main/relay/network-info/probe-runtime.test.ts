@@ -178,6 +178,9 @@ describe('isolated builtin and selected-group delay', () => {
     f.resolve4.mockResolvedValue(['93.184.216.35'])
     const cleanup = vi.fn(),
       runtime = await snapshot('PROXY', 'groupDelay', cleanup)
+    expect(runtime.nodes).toEqual(['node', 'DIRECT', 'REJECT'])
+    await expect(runtime.delay('PROXY', delay.url)).rejects.toThrow('本次固定静态节点')
+    expect(f.delay).not.toHaveBeenCalled()
     expect(await runtime.delay('node', delay.url)).toBe(42)
     expect(await runtime.delay('DIRECT', delay.url)).toBe(42)
     expect(f.start).toHaveBeenCalledTimes(2)

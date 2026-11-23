@@ -45,18 +45,13 @@ export function RelayTunSettingsEditor({
     }
   }, [])
   const read = async (): Promise<void> => {
-    if (operation.current || busy) return
+    if (operation.current || busy || !preferredProfileId) return
     operation.current = true
     setPending(true)
     onBusy(true)
     try {
       const inventory = await relayProfileRead('relayProfileList')
-      const selected = (await window.electron.ipcRenderer.invoke(
-        'getProfileConfig'
-      )) as IProfileConfig
-      const source =
-        inventory.profiles.find((item) => item.id === (preferredProfileId ?? selected.current)) ??
-        inventory.profiles[0]
+      const source = inventory.profiles.find((item) => item.id === preferredProfileId)
       if (!source) throw Error('没有配置')
       const saved = (await window.electron.ipcRenderer.invoke(
         'relayConfigEditRead'
@@ -152,12 +147,12 @@ export function RelayTunSettingsEditor({
   return (
     <SettingCard>
       <div className="relay-network-toolbar">
-        <h2>TUN 设置{profile ? ` · ${profile.name}` : ''}</h2>
+        <h2>TUN 设置{profile && profile.id === preferredProfileId ? ` · ${profile.name}` : ''}</h2>
         <div className="flex gap-2">
           <Button
             size="sm"
             variant="light"
-            isDisabled={busy || pending || (dirty && !!record && !stale)}
+            isDisabled={busy || pending || !preferredProfileId || (dirty && !!record && !stale)}
             onPress={() => void read()}
           >
             {dirty && (!record || stale) ? '放弃修改并刷新' : '刷新设置'}

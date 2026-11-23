@@ -50,10 +50,17 @@ private enum Injected: Error { case failure }
     }
     private static func child(_ mode: String) -> Never {
         guard getuid() > 0, getuid() == geteuid(), getgid() == getegid(),
-              ["wait", "exit", "ignore", "inspect", "peer"].contains(mode) else { exit(77) }
+              ["wait", "exit", "ignore", "inspect", "peer", "diagnostic"].contains(mode) else { exit(77) }
         if mode == "ignore" { _ = Darwin.signal(SIGTERM, SIG_IGN) }
         else { _ = Darwin.signal(SIGTERM, inertSignal) }
         let environment = ProcessInfo.processInfo.environment, directory = FileManager.default.currentDirectoryPath
+        if mode == "diagnostic" {
+            // Larger than the pipe capacity: a reader that only drains after
+            // startup would deadlock before this inert child's ready receipt.
+            for _ in 0..<256 { FileHandle.standardOutput.write(Data(repeating: 120, count: 4096)) }
+            FileHandle.standardError.write(Data("private-secret-should-not-escape\ngVisor is not included in this build, ".utf8))
+            FileHandle.standardError.write(Data("rebuild with -tags with_gvisor\n".utf8))
+        }
         if mode == "peer" {
             let descriptor = socket(AF_UNIX, SOCK_STREAM, 0)
             guard descriptor >= 0 else { exit(33) }
@@ -125,6 +132,12 @@ private enum Injected: Error { case failure }
             throw Injected.failure
         }
         func descriptors() -> Set<Int32> { Set((0...255).map(Int32.init).filter { fcntl($0, F_GETFD) >= 0 }) }
+        var scanner = RelayTunCoreStartDiagnosticScanner()
+        scanner.append(Data(repeating: 120, count: 1024 * 1024))
+        check("unknown private core output is discarded with bounded retained bytes", scanner.code == nil && scanner.retainedByteCount < 100)
+        scanner.append(Data("gVisor is not included in this build, ".utf8))
+        scanner.append(Data("rebuild with -tags with_gvisor".utf8))
+        check("split fixed upstream stack error maps only to a public diagnostic code", scanner.code == "core.tun.stack.unavailable" && scanner.retainedByteCount == 0)
         func probeDirectory(_ run: (String, String, Int) throws -> Void) throws {
             var pattern = Array("/private/tmp/relay-provider-probe-\(getuid())-XXXXXX".utf8CString)
             guard mkdtemp(&pattern) != nil else { throw Injected.failure }
@@ -211,10 +224,13 @@ private enum Injected: Error { case failure }
                 var held = open(pathToLock, O_CREAT | O_EXCL | O_RDONLY | O_CLOEXEC, 0o600)
                 guard held >= 0, flock(held, LOCK_EX | LOCK_NB) == 0 else { throw Injected.failure }
                 defer { if held >= 0 { Darwin.close(held) } }
-                let child = try RelayTunOwnedChild.inert(directory: path, mode: "wait", installationLock: held, register: { _ in })
+                let child = try RelayTunOwnedChild.inert(directory: path, mode: "diagnostic", installationLock: held, register: { _ in })
                 defer { _ = try? child.stop() }
                 let report = try ready(path)
                 check("managed mapping inherits only the installation lock at FD3", report["openFDs"] as? [Int] == [3])
+                let diagnosticDeadline = DispatchTime.now().uptimeNanoseconds + 1_000_000_000
+                while child.startupDiagnostic == nil && DispatchTime.now().uptimeNanoseconds < diagnosticDeadline { usleep(1000) }
+                check("managed output is continuously drained and exposes no private log text", child.startupDiagnostic == "core.tun.stack.unavailable")
                 let contender = open(pathToLock, O_RDONLY | O_CLOEXEC)
                 guard contender >= 0 else { throw Injected.failure }
                 defer { Darwin.close(contender) }

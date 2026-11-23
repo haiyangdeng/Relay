@@ -88,6 +88,7 @@ final class RelayTunRuntimeAssetChannel<Replacement, Ticket, Observation> {
     private let execute: (@escaping () -> Void) -> Void
     private let queue = DispatchQueue(label: "local.relay.tun.runtime-resources.pipe"), scope = Scope()
     private let source: DispatchSourceRead
+    private let cancellation = DispatchGroup()
     private var buffer = Data(), started = false, closed = false, lastID = 0
     private var work: Work?, neutral: Work?, timer: DispatchSourceTimer?
     init?(binding: Binding, clientSHA256: String, installationRevision: String, codec: Codec, driver: Driver,
@@ -119,7 +120,10 @@ final class RelayTunRuntimeAssetChannel<Replacement, Ticket, Observation> {
         self.clientSHA256 = clientSHA256; self.installationRevision = installationRevision
         self.execute = execute; duration = UInt64(leaseSeconds) * 1_000_000_000
         source = DispatchSource.makeReadSource(fileDescriptor: input, queue: queue)
-        source.setCancelHandler { [input, output] in Darwin.close(input); Darwin.close(output) }
+        cancellation.enter()
+        source.setCancelHandler { [input, output, cancellation] in
+            Darwin.close(input); Darwin.close(output); cancellation.leave()
+        }
     }
     deinit { scope.revoke(); driver.invalidate(); source.cancel(); if !started { source.resume() } }
     /// AppSession starts this only after writing its initialize ACK. It owns
@@ -139,6 +143,12 @@ final class RelayTunRuntimeAssetChannel<Replacement, Ticket, Observation> {
     func invalidate() {
         scope.revoke(); driver.invalidate()
         queue.async { [weak self] in self?.close() }
+    }
+    /// Called only by the session owner, never by this pipe queue.
+    func invalidateAndDrain() -> Bool {
+        invalidate()
+        queue.sync { if !started { started = true; source.resume() } }
+        return cancellation.wait(timeout: .now() + 2) == .success
     }
     private func close() {
         guard !closed else { return }; closed = true

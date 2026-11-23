@@ -1,18 +1,21 @@
-import type { RelayProfileInventory, RelayStoredProfile } from '../../../../shared/relay/profiles'
+import type { RelayStoredProfile } from '../../../../shared/relay/profiles'
+import { relayProxyCanPrepare } from '../../../../shared/relay/local-proxy'
 import type {
   LocalProxyPreparation,
   LocalProxyResult,
   LocalProxyState,
+  RelayProxyPageOwner,
   LocalResolverMode,
   LocalProxyLifetime,
   LocalCoreLogLevel
 } from '../../../../shared/relay/local-proxy'
 import type { DedicatedListenerPlan } from '../../../../shared/relay/dedicated-listeners'
-import { localProxyPlanRecord } from '../../../../shared/relay/local-proxy-plan'
 import {
   localProxyPortsFor,
   type LocalProxyPorts
 } from '../../../../shared/relay/local-proxy-ports'
+
+export { relayProxyCanPrepare }
 
 type Invoke = (channel: string, ...args: unknown[]) => Promise<unknown>
 type ProfileSelection = Pick<RelayStoredProfile, 'id' | 'sha256'>
@@ -34,19 +37,6 @@ export function relayProxyRunning(state?: LocalProxyState): boolean {
   )
 }
 
-export function relayProxyCanPrepare(state?: LocalProxyState): boolean {
-  // A fresh service starts as unknown. Prepare verifies the lease and ports.
-  return !!(
-    state &&
-    state.owned === false &&
-    state.pending === false &&
-    state.uncertain === false &&
-    state.hasRecord === false &&
-    state.traffic === 'inactive' &&
-    ['unknown', 'idle', 'failed'].includes(state.phase)
-  )
-}
-
 export function relayProxyMatchesProfile(
   state: LocalProxyState | undefined,
   profileId?: string | null
@@ -58,6 +48,22 @@ async function selectPinnedProfile(selection: ProfileSelection, invoke: Invoke):
   await invoke('changeCurrentProfile', selection)
   const confirmed = (await invoke('getProfileConfig')) as IProfileConfig | undefined
   if (confirmed?.current !== selection.id) throw new Error('配置未选用，可能已取消操作。')
+}
+
+export async function chooseActiveTunProfile(
+  selection: ProfileSelection,
+  invoke: Invoke,
+  expectedInstance?: string
+): Promise<RelayProxyPageOwner | undefined> {
+  const owner = (await invoke('relayProxyPageOwner')) as RelayProxyPageOwner | undefined
+  if (expectedInstance && (owner?.kind !== 'tun-managed' || owner.instanceId !== expectedInstance))
+    throw new Error('虚拟网卡会话已变化，请重新选择配置。')
+  if (owner?.kind !== 'tun-managed') return undefined
+  await selectPinnedProfile({ id: selection.id, sha256: selection.sha256 }, invoke)
+  const active = (await invoke('relayProxyPageOwner')) as RelayProxyPageOwner | undefined
+  if (active?.kind !== 'tun-managed' || active.profileId !== selection.id)
+    throw new Error('虚拟网卡运行配置未确认。')
+  return active
 }
 
 export async function chooseCachedProfile(
@@ -122,49 +128,4 @@ export async function activateCachedProfile(
   if (!confirmed || !relayProxyRunning(confirmed) || confirmed.profileId !== pinned.id)
     throw new Error('当前配置尚未确认运行，请打开内核设置核对。')
   return confirmed
-}
-
-// An explicit system-proxy click may prepare Relay's selected local core. This
-// never reloads another owner, adopts a record, or applies system settings.
-export async function ensureSelectedProxy(
-  invoke: Invoke,
-  current: () => boolean
-): Promise<LocalProxyState> {
-  const check = (): void => {
-    if (!current()) throw new Error('当前配置或页面已变化，请重新操作。')
-  }
-  const guarded: Invoke = async (channel, ...args) => {
-    check()
-    const value = await invoke(channel, ...args)
-    check()
-    return value
-  }
-  let state = (await guarded('relayLocalProxyState')) as LocalProxyState
-  if (relayProxyRunning(state)) return state
-  if (!relayProxyCanPrepare(state)) throw new Error('当前代理状态需要核对，请打开内核设置处理。')
-  const config = (await guarded('getProfileConfig')) as IProfileConfig | undefined
-  const inventory = (await guarded('relayProfileList')) as RelayProfileInventory
-  const profile = inventory.profiles.find((row) => row.id === config?.current)
-  if (!profile) throw new Error('没有可用配置，请先导入订阅或本地配置。')
-  const plan = localProxyPlanRecord(await guarded('relayLocalProxyPlanRead')).document
-  const pinned: Invoke = async (channel, ...args) => {
-    if (
-      ['changeCurrentProfile', 'relayLocalProxyPrepare', 'relayLocalProxyAction'].includes(channel)
-    ) {
-      const selected = (await guarded('getProfileConfig')) as IProfileConfig | undefined
-      if (selected?.current !== profile.id) throw new Error('当前配置已变化，请重新操作。')
-    }
-    return guarded(channel, ...args)
-  }
-  const result = await startCachedProxy(profile, plan.httpPort, pinned, plan)
-  if (result.status !== 'started') throw new Error('配置启动未确认，系统代理未更改。')
-  state = (await guarded('relayLocalProxyState')) as LocalProxyState
-  if (
-    !relayProxyMatchesProfile(state, profile.id) ||
-    state.httpPort !== plan.httpPort ||
-    JSON.stringify(localProxyPortsFor(state.httpPort, state.ports)) !==
-      JSON.stringify(localProxyPortsFor(plan.httpPort, plan.ports))
-  )
-    throw new Error('配置运行状态未确认，系统代理未更改。')
-  return state
 }

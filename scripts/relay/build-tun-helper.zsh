@@ -8,6 +8,7 @@ project_dir="${0:A:h:h:h}"
 source_dir="$project_dir/native/tun"
 cache_dir="${RELAY_TUN_HELPER_BUILD_DIR:-$project_dir/.relay-build/tun-helper}"
 capture_pin="${RELAY_TUN_CAPTURE_PIN_OUTPUT:-$project_dir/src/main/relay/tun/runtime-capture-client.json}"
+proxy_groups_pin="${RELAY_TUN_PROXY_GROUPS_PIN_OUTPUT:-$project_dir/src/main/relay/tun/proxy-groups-client.json}"
 rules_pin="${RELAY_TUN_RULES_PIN_OUTPUT:-$project_dir/src/main/relay/tun/runtime-rules-client.json}"
 resources_pin="${RELAY_TUN_RESOURCES_PIN_OUTPUT:-$project_dir/src/main/relay/tun/runtime-resources-client.json}"
 providers_pin="${RELAY_TUN_PROVIDERS_PIN_OUTPUT:-$project_dir/src/main/relay/tun/runtime-rule-providers-client.json}"
@@ -19,7 +20,7 @@ smart_tools_pin="${RELAY_TUN_SMART_TOOLS_PIN_OUTPUT:-}"
 telemetry_pin="${RELAY_TUN_TELEMETRY_PIN_OUTPUT:-}"
 # History v3 remains unavailable unless its real verified build writes this pin.
 history_pin="${RELAY_TUN_HISTORY_PIN_OUTPUT:-}"
-if [[ "$cache_dir" != /* || "$capture_pin" != /* || "$rules_pin" != /* || "$resources_pin" != /* || "$providers_pin" != /* || ( -n "$execution_pin" && "$execution_pin" != /* ) || ( -n "$smart_tools_pin" && "$smart_tools_pin" != /* ) || ( -n "$telemetry_pin" && "$telemetry_pin" != /* ) || ( -n "$history_pin" && "$history_pin" != /* ) ]]; then
+if [[ "$cache_dir" != /* || "$capture_pin" != /* || "$proxy_groups_pin" != /* || "$rules_pin" != /* || "$resources_pin" != /* || "$providers_pin" != /* || ( -n "$execution_pin" && "$execution_pin" != /* ) || ( -n "$smart_tools_pin" && "$smart_tools_pin" != /* ) || ( -n "$telemetry_pin" && "$telemetry_pin" != /* ) || ( -n "$history_pin" && "$history_pin" != /* ) ]]; then
   print -u2 'Helper build and pin outputs must be explicit absolute paths.'
   exit 77
 fi
@@ -72,10 +73,10 @@ for resource in RelayTunHelper RelayTunClient RelayTunUninstall; do
 done
 # A production capability pin comes only from this freshly signed/verified
 # universal client, never from an arbitrary installed manifest declaration.
-python3 - "$cache_dir/RelayTunClient" "$capture_pin" "$rules_pin" "$resources_pin" "$project_dir" "$providers_pin" "$execution_pin" "$smart_tools_pin" "$telemetry_pin" "$history_pin" <<'PYCODE'
+python3 - "$cache_dir/RelayTunClient" "$capture_pin" "$rules_pin" "$resources_pin" "$project_dir" "$providers_pin" "$execution_pin" "$smart_tools_pin" "$telemetry_pin" "$history_pin" "$proxy_groups_pin" <<'PYCODE'
 import hashlib,json,pathlib,sys
 digest=hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest()
-for output,capability in [(sys.argv[2],"runtime-capture-v1"),(sys.argv[3],"runtime-rules-v1")]:
+for output,capability in [(sys.argv[2],"runtime-capture-v1"),(sys.argv[3],"runtime-rules-v1"),(sys.argv[11],"proxy-groups-v1")]:
     value={"version":1,"capability":capability,"clientSHA256":digest}
     pathlib.Path(output).write_text(json.dumps(value,indent=2)+"\n")
 root=pathlib.Path(sys.argv[5])

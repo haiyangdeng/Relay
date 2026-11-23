@@ -50,7 +50,7 @@ export async function verifyCoreExecutable(executable: string, pin: RelayCorePin
       (await realpath(executable)) !== executable
     )
       throw new Error('核心资源类型、权限或路径无效。')
-    const buffer = Buffer.alloc(65536),
+    const buffer = Buffer.alloc(Math.min(pin.size, 1024 * 1024)),
       hash = createHash('sha256')
     let count = 0
     while (true) {

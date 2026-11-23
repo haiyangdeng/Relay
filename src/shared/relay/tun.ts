@@ -70,7 +70,8 @@ export interface TunSessionPreparation extends TunPreparation {
   evidenceId: string
 }
 export interface TunSessionState {
-  phase: 'idle' | 'prepared' | 'starting' | 'active' | 'stopping' | 'restored' | 'uncertain'
+  phase:
+    'idle' | 'prepared' | 'starting' | 'active' | 'stopping' | 'restored' | 'released' | 'uncertain'
   pending: boolean
   owned: boolean
   sessionId?: string
@@ -79,11 +80,22 @@ export interface TunSessionState {
   protectionVerified: false
   warnings: string[]
 }
+export type TunOrdinaryRecovery =
+  | { sessionId: string; phase: 'resuming' }
+  | {
+      sessionId: string
+      phase: 'failed'
+      reason: 'authorization' | 'source' | 'listener' | 'systemProxy'
+    }
 export interface TunSessionResult {
-  status: 'started' | 'restored' | 'cancelled' | 'failed' | 'uncertain'
+  ordinaryRecovery?: TunOrdinaryRecovery
+  status: 'started' | 'restored' | 'released' | 'cancelled' | 'failed' | 'uncertain'
   state: TunSessionState
 }
 export interface TunStatus {
+  ordinaryRecovery?: TunOrdinaryRecovery
+  mixedPort?: number
+  httpPort?: number
   session: TunSessionState
   helper: 'ready' | 'missing' | 'requiresApproval' | 'unavailable' | 'unconfirmed'
   warnings: string[]
@@ -100,6 +112,7 @@ export interface TunIpcApi {
   relayTunStart(request: TunEvidenceRequest): Promise<TunSessionResult>
   relayTunCancel(request: TunEvidenceRequest): Promise<void>
   relayTunStop(request: TunSessionRequest): Promise<TunSessionResult>
+  relayTunRecoverOrdinary(request: TunSessionRequest): Promise<TunSessionResult>
   relayTunInspect(): Promise<TunSessionState>
 }
 const object = (value: unknown): value is Record<string, unknown> =>
@@ -152,6 +165,7 @@ export function tunSessionState(raw: unknown): TunSessionState {
       'active',
       'stopping',
       'restored',
+      'released',
       'uncertain'
     ]) ||
     typeof raw.pending !== 'boolean' ||
@@ -167,6 +181,7 @@ export function tunSessionState(raw: unknown): TunSessionState {
     (raw.phase === 'active' && (!raw.owned || raw.traffic !== 'forwarding')) ||
     (raw.phase === 'restored' &&
       (!raw.restorationVerified || raw.owned || raw.traffic !== 'inactive')) ||
+    (raw.phase === 'released' && (raw.owned || raw.traffic !== 'inactive')) ||
     (raw.owned && ['idle', 'prepared'].includes(raw.phase))
   )
     throw new Error('TUN会话状态缺少有效的所有权、流量或恢复证据。')
@@ -181,16 +196,58 @@ export function tunSessionState(raw: unknown): TunSessionState {
     warnings: [...raw.warnings]
   }
 }
+function recoveryFrom(raw: unknown, session: TunSessionState): TunOrdinaryRecovery | undefined {
+  if (raw === undefined) return undefined
+  if (
+    object(raw) &&
+    !session.owned &&
+    !session.pending &&
+    ['restored', 'released', 'idle', 'prepared'].includes(session.phase) &&
+    uuid(raw.sessionId)
+  ) {
+    if (raw.phase === 'resuming' && keys(raw, ['sessionId', 'phase']))
+      return { sessionId: raw.sessionId, phase: raw.phase }
+    if (
+      raw.phase === 'failed' &&
+      keys(raw, ['sessionId', 'phase', 'reason']) &&
+      (raw.reason === 'authorization' ||
+        raw.reason === 'source' ||
+        raw.reason === 'listener' ||
+        raw.reason === 'systemProxy')
+    )
+      return { sessionId: raw.sessionId, phase: raw.phase, reason: raw.reason }
+  }
+  throw new Error('普通代理交接状态未确认。')
+}
+export function ordinaryRecoveryNotice(recovery: TunOrdinaryRecovery): string {
+  if (recovery.phase === 'resuming') return 'TUN 已关闭，正在恢复普通代理。'
+  const detail = {
+    authorization: '原操作的授权已失效。',
+    source: '原配置或恢复环境的校验未通过。',
+    listener: '普通核心的监听或节点选择尚未恢复。',
+    systemProxy: '当前系统代理的使用状态尚未确认。'
+  }
+  return 'TUN 已关闭，普通代理恢复未确认。' + detail[recovery.reason]
+}
 export function tunStatus(raw: unknown): TunStatus {
+  const port = (value: unknown): value is number =>
+    typeof value === 'number' && Number.isInteger(value) && value >= 1024 && value <= 65535
   if (
     !object(raw) ||
-    !keys(raw, ['session', 'helper', 'warnings']) ||
+    !keys(raw, ['session', 'helper', 'warnings'], ['httpPort', 'mixedPort', 'ordinaryRecovery']) ||
+    (raw.httpPort !== undefined && !port(raw.httpPort)) ||
+    (raw.mixedPort !== undefined && raw.mixedPort !== 0 && !port(raw.mixedPort)) ||
     !choice(raw.helper, ['ready', 'missing', 'requiresApproval', 'unavailable', 'unconfirmed']) ||
     !warnings(raw.warnings)
   )
     throw new Error('TUN辅助组件状态无效。')
+  const state = tunSessionState(raw.session)
+  const ordinaryRecovery = recoveryFrom(raw.ordinaryRecovery, state)
   return {
-    session: tunSessionState(raw.session),
+    ...(port(raw.httpPort) ? { httpPort: raw.httpPort } : {}),
+    ...(port(raw.mixedPort) ? { mixedPort: raw.mixedPort } : {}),
+    session: state,
+    ...(ordinaryRecovery ? { ordinaryRecovery } : {}),
     helper: raw.helper as TunStatus['helper'],
     warnings: [...raw.warnings]
   }
@@ -198,17 +255,25 @@ export function tunStatus(raw: unknown): TunStatus {
 export function tunSessionResult(raw: unknown): TunSessionResult {
   if (
     !object(raw) ||
-    !keys(raw, ['status', 'state']) ||
-    !choice(raw.status, ['started', 'restored', 'cancelled', 'failed', 'uncertain'])
+    !keys(raw, ['status', 'state'], ['ordinaryRecovery']) ||
+    !choice(raw.status, ['started', 'restored', 'released', 'cancelled', 'failed', 'uncertain'])
   )
     throw new Error('TUN操作结果无效。')
   const state = tunSessionState(raw.state)
   if (
     (raw.status === 'started' && (state.phase !== 'active' || state.traffic !== 'forwarding')) ||
-    (raw.status === 'restored' && (!state.restorationVerified || state.owned))
+    (raw.status === 'restored' && (!state.restorationVerified || state.owned)) ||
+    (raw.status === 'released' && state.phase !== 'released')
   )
     throw new Error('TUN操作结果与会话证据不一致。')
-  return { status: raw.status as TunSessionResult['status'], state }
+  const ordinaryRecovery = recoveryFrom(raw.ordinaryRecovery, state)
+  if (ordinaryRecovery && (ordinaryRecovery.phase !== 'failed' || raw.status !== 'failed'))
+    throw new Error('普通代理恢复回执无效。')
+  return {
+    status: raw.status as TunSessionResult['status'],
+    state,
+    ...(ordinaryRecovery ? { ordinaryRecovery } : {})
+  }
 }
 export function tunSessionPreparation(raw: unknown): TunSessionPreparation {
   const digestKeys = [

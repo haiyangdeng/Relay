@@ -22,6 +22,7 @@ final class RelayTunManagedCore {
         var updateRuleProvider: ((String, UInt64, () throws -> Void, () throws -> Void) throws -> Void)? = nil
         var trafficReader: (() throws -> TrafficIO)? = nil
         var smartToolsReader: (() throws -> SmartToolsIO)? = nil
+        var startupDiagnostic: (() -> String?)? = nil
     }
     typealias TrafficFullVerification = (() throws -> Void) throws -> Void
     struct TrafficIO {
@@ -29,6 +30,7 @@ final class RelayTunManagedCore {
         let verifySource: () throws -> Void
         let read: (RelayTunCoreReadiness.Endpoint, UInt64, () throws -> Void) throws -> Data
         let traffic: (UInt64, () throws -> Void) throws -> Data
+        var proxies: ((RelayTunRuntimeCapture.ProxyAction, UInt64, () throws -> Void) throws -> Data)? = nil
         var connections: ((UInt64, () throws -> Void) throws -> Data)? = nil
     }
     struct TrafficLease {
@@ -130,7 +132,10 @@ final class RelayTunManagedCore {
                 }
             }
         } catch {
-            if stage == "managed.readiness", let failure = error as? RelayTunCoreReadiness.Failure {
+            if stage == "managed.readiness", let failure = error as? RelayTunCoreReadiness.Failure,
+               case .field(.enable) = failure, let diagnostic = child?.startupDiagnostic?() {
+                startFailureCode = diagnostic
+            } else if stage == "managed.readiness", let failure = error as? RelayTunCoreReadiness.Failure {
                 startFailureCode = failure.diagnosticCode
             } else { startFailureCode = stage }
             throw error
@@ -333,7 +338,7 @@ final class RelayTunManagedCore {
     /// Minted only on the Session owner queue after activation. A worker gets
     /// immutable facts and the separately locked authenticated reader, never
     /// permission to consult mutable ManagedCore state or hold a system lease.
-    func trafficLease(connections: Bool = false) throws -> TrafficLease {
+    func trafficLease(connections: Bool = false, proxies: RelayTunRuntimeCapture.ProxyAction? = nil) throws -> TrafficLease {
         guard !stopped, !disposed, authorized(), let child,
               let makeReader = child.trafficReader, let makeVerification = driver.trafficVerificationSnapshot,
               case .running = try child.observe() else { throw Failure.revoked }
@@ -360,7 +365,10 @@ final class RelayTunManagedCore {
                                                       resources: resources, execution: execution)
             try check(); try assertOwner()
             let raw: Data
-            if connections {
+            if let proxies {
+                guard let read = io.proxies else { throw Failure.revoked }
+                raw = try read(proxies, deadline, check)
+            } else if connections {
                 guard let read = io.connections else { throw Failure.revoked }
                 raw = try read(deadline, check)
             } else { raw = try io.traffic(deadline, check) }
@@ -406,6 +414,32 @@ final class RelayTunManagedCore {
         try verifyRestored()
         do { try driver.dispose(); disposed = true }
         catch { recoveryFailureCode = "dispose.lock"; throw error }
+    }
+
+    /// Retirement is distinct from restoration. Only a foreign proxy-only
+    /// change may end this owned lifetime without certifying the old baseline.
+    /// The unchanged network digest includes all interfaces, routes and DNS.
+    func disposeReleased(record: () throws -> Void) throws {
+        var stage = "release-owned.state"
+        recoveryFailureCode = nil
+        do {
+            guard stopped, !disposed else { throw Failure.uncertain }
+            stage = "release-owned.child"
+            if let child {
+                guard case .exited = try child.observe() else { throw Failure.uncertain }
+            }
+            // As in stop(), nil is positive never-published-child history.
+            stage = "release-owned.interface"
+            guard try !driver.interfacePresent() else { throw Failure.uncertain }
+            stage = "release-owned.baseline"
+            let current = try driver.baseline()
+            guard current.networkSHA256 == baseline.networkSHA256,
+                  current.protectionSHA256 != baseline.protectionSHA256 else { throw Failure.uncertain }
+            stage = "release-owned.lock"; try driver.dispose()
+            // A failed evidence write is never a successful disposal or exit.
+            stage = "release-owned.record"; try record()
+            disposed = true
+        } catch { recoveryFailureCode = stage; throw error }
     }
 
     static func live(bundle: RelayTunAppBundle, authorized: @escaping () -> Bool) throws -> RelayTunManagedCore {
@@ -509,6 +543,8 @@ final class RelayTunManagedCore {
                                     return try owned.whileRunning { try delegated.trafficReadiness(endpoint, before: deadline, check: check) }
                                 }, traffic: { deadline, check in
                                     try owned.whileRunning { try delegated.readTraffic(before: deadline, check: check) }
+                                }, proxies: { action, deadline, check in
+                                    try owned.whileRunning { try delegated.proxyGroups(action, before: deadline, check: check) }
                                 }, connections: { deadline, check in
                                     try owned.whileRunning { try delegated.readConnections(before: deadline, check: check) }
                                 })
@@ -523,7 +559,7 @@ final class RelayTunManagedCore {
                                 }, clear: { deadline, check, enter in
                                     try owned.whileRunning { try delegated.clearSmartCache(before: deadline, check: check, enterWrite: enter) }
                                 })
-                            }))
+                            }, startupDiagnostic: { owned.startupDiagnostic }))
                     })
             }, interfacePresent: { if_nametoindex(device) != 0 }, baseline: {
                 try RelayTunEnvironmentInspector.baseline(owned: nil, sources: RelayTunEnvironmentInspector.live)

@@ -10,21 +10,25 @@
     "providerFileSerialization": {
       "manifestSHA256": "853ef5ffc7c59f05a7f3d7ecb5454c54e0fbd05931c7d16ab2f8fab5d6b5390d",
       "patchSHA256": "fa6fec94f3a3d40bff3a4545acaa01dd10c86c88147b3a20634b856472d80a8d"
+    },
+    "darwinTunHandoff": {
+      "manifestSHA256": "f6be4330c501685f30527fdc8ad4a95dbc823d85b95732158a14f819ff272165",
+      "patchSHA256": "a08f4fbdd4cea6170b3cc2f1d7387713e58a58908a804369367c5008c47ff0a6"
     }
   },
   "assets": {
     "arm64": {
       "path": "darwin-arm64/mihomo",
-      "sha256": "e9327b2ce0e5c4405ce2640145339be9e315943bdeb63ffee4b3f4fe18bee419",
-      "size": 65185184,
+      "sha256": "a7dcd3ffe59be033ed1b4000a4ae90acdf2ab41450536e02445692ea124195c2",
+      "size": 79861968,
       "cpuType": 16777228
     },
     "x64": {
       "path": "darwin-x64/mihomo",
-      "sha256": "1d110d7f958abd22ec011ac466f7451bf22101f8b6338a26a3e9fedcbd62ae26",
-      "size": 70035456,
+      "sha256": "bd9f2b38256b05b643f6a33273669b4df2c2b32b5a25db0b8db41a0a0199bc3b",
+      "size": 85466544,
       "cpuType": 16777223
     }
   },
-  "implementationRevision": 2
+  "implementationRevision": 3
 }

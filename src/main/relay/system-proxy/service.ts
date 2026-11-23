@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'crypto'
+import { isDeepStrictEqual } from 'node:util'
 import { profileEvidence } from '../../../shared/relay/profiles'
 import {
   systemProxyReport,
@@ -32,8 +33,10 @@ export function createSystemProxyService(adapters: {
   }
   let proof: Proof | undefined,
     report: SystemProxyReport | undefined,
+    applied: { recordID: string; revision: string; settings: SystemProxySettings } | undefined,
     knownRecord: string | undefined,
     busy = false,
+    inspecting = false,
     generation = 0,
     needsRestore = true,
     closing = false
@@ -46,6 +49,7 @@ export function createSystemProxyService(adapters: {
     adapters.notify()
   }
   const markUnknown = (): void => {
+    applied = undefined
     needsRestore = true
     if (report)
       report = {
@@ -56,6 +60,7 @@ export function createSystemProxyService(adapters: {
         canRetireDetached: false,
         quitProxyPorts: undefined,
         currentProxyPorts: undefined,
+        currentLoopbackProxyPorts: undefined,
         currentPacURLHashes: undefined,
         warnings: ['系统代理或恢复记录未确认；当前显示不能作为已应用或已恢复的证据。']
       }
@@ -105,6 +110,13 @@ export function createSystemProxyService(adapters: {
     await pac.close()
     retained.delete(pac)
   }
+  const referencesPac = (
+    current: SystemProxyReport,
+    pac: OwnedPacServer,
+    ports?: number[]
+  ): boolean =>
+    !!current.currentPacURLHashes?.includes(createHash('sha256').update(pac.url).digest('hex')) ||
+    !!ports?.includes(Number(new URL(pac.url).port))
   const releasePacServers = async (
     candidates: OwnedPacServer[],
     observed?: SystemProxyReport
@@ -116,12 +128,7 @@ export function createSystemProxyService(adapters: {
     if (
       !current.currentPacURLHashes ||
       !current.currentProxyPorts ||
-      candidates.some(
-        (pac) =>
-          current.currentPacURLHashes?.includes(
-            createHash('sha256').update(pac.url).digest('hex')
-          ) || current.currentProxyPorts?.includes(Number(new URL(pac.url).port))
-      )
+      candidates.some((pac) => referencesPac(current, pac, current.currentProxyPorts))
     )
       throw new Error('系统代理仍引用本次PAC或引用检查未确认，保留服务供重试。')
     for (const pac of candidates) await dispose(pac)
@@ -183,6 +190,18 @@ export function createSystemProxyService(adapters: {
         report: current,
         ...(settings ? { settings } : {})
       }
+      // An active record may point to an earlier listener or PAC. Only a
+      // matching native revision and our successful apply identify this target.
+      if (
+        applied &&
+        settings &&
+        current.canApply &&
+        ['active', 'applied'].includes(current.status) &&
+        current.recordID === applied.recordID &&
+        current.revision === applied.revision &&
+        isDeepStrictEqual(settings, applied.settings)
+      )
+        output.alreadyApplied = true
       proof = { public: structuredClone(output), native, pac, generation: epoch, at: now() }
       pac = undefined
       return output
@@ -269,6 +288,7 @@ export function createSystemProxyService(adapters: {
       }
       submitted = true
       needsRestore = true
+      applied = undefined
       if (current.pac) retained.add(current.pac)
       const output = accept(await adapters.native(action, current.native, fresh.revision), true)
       if (current.generation !== generation) {
@@ -281,8 +301,18 @@ export function createSystemProxyService(adapters: {
           ]
         }
       }
-      if (action === 'apply' && output.status === 'applied' && output.recordID) {
+      if (
+        action === 'apply' &&
+        output.status === 'applied' &&
+        output.recordID &&
+        current.public.settings
+      ) {
         await releaseRetained(current.pac)
+        applied = {
+          recordID: output.recordID,
+          revision: output.revision,
+          settings: current.public.settings
+        }
         return { status: 'applied', report: output, warnings: output.warnings }
       }
       if (action === 'restore' && output.status === 'restored' && !output.recordID) {
@@ -338,11 +368,13 @@ export function createSystemProxyService(adapters: {
       if (proof?.public.evidenceId === id) clear()
     },
     isBusy: (): boolean => busy || closing,
+    isInspecting: (): boolean => inspecting,
     isBlocking: (): boolean => busy || needsRestore || retained.size > 0,
     whenIdle: (): Promise<void> =>
       busy ? new Promise((resolve) => waiters.push(resolve)) : Promise.resolve(),
     state: () => ({
       pending: busy,
+      inspecting,
       observed: !!report,
       ...(report ? { report: structuredClone(report) } : {}),
       pacServersRetained: retained.size
@@ -351,6 +383,7 @@ export function createSystemProxyService(adapters: {
       if (raw !== undefined) throw new Error('系统代理检查不接受参数。')
       if (busy || closing) throw new Error('请先结束系统代理操作。')
       busy = true
+      inspecting = true
       try {
         const current = accept(await adapters.native('inspect'))
         if (!current.recordID) await releaseRetained(undefined, current)
@@ -359,6 +392,49 @@ export function createSystemProxyService(adapters: {
         markUnknown()
         throw new Error('系统代理状态未确认，保留现场，不自动恢复或重试。')
       } finally {
+        inspecting = false
+        end()
+      }
+    },
+    async needsCoreForHandoff(proxyPorts: readonly number[]): Promise<boolean> {
+      while (busy) await new Promise<void>((resolve) => waiters.push(resolve))
+      if (closing) throw new Error('系统代理正在退出。')
+      busy = true
+      inspecting = true
+      try {
+        // Read all scopes without releasing a PAC or changing macOS preferences.
+        let current: SystemProxyReport
+        try {
+          current = accept(await adapters.native('inspect'))
+        } catch {
+          markUnknown()
+          throw new Error('系统代理状态未确认。')
+        }
+        const pacServers = [...retained]
+        if (
+          pacServers.some((pac) => referencesPac(current, pac, current.currentLoopbackProxyPorts))
+        )
+          return true
+        if (
+          current.recordID &&
+          current.currentLoopbackProxyPorts?.some((port) => proxyPorts.includes(port))
+        )
+          return true
+        if (current.status === 'uncertain') throw new Error('系统代理状态未确认。')
+        if (!current.recordID && !retained.size) return false
+        // Untouched scopes, hostname aliases and external PAC contents can hide a
+        // dependency. Only the native detached proof can clear this transaction.
+        if (
+          current.currentPacURLHashes &&
+          current.currentProxyPorts &&
+          (current.canRetireDetached || !current.recordID) &&
+          !current.currentProxyPorts.some((port) => proxyPorts.includes(port)) &&
+          !pacServers.some((pac) => referencesPac(current, pac, current.currentProxyPorts))
+        )
+          return false
+        throw new Error('系统代理与本次监听的依赖未确认。')
+      } finally {
+        inspecting = false
         end()
       }
     },

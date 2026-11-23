@@ -14,6 +14,37 @@ enum RelayUninstallRegistrationTests {
         }
         typealias R = RelayUninstallRegistration
         let home = "/Users/fixture", trash = "/Users/fixture/.Trash/Relay 1.02.03 PM.app"
+        func item(_ type: String, _ identifier: String, _ location: String, _ enabled: Bool = true) -> String {
+            return " #1:\n                 UUID: 50DCC3EF-6AD8-5EAA-AC56-451AD340113C\n                 Type: \(type)\n          Disposition: [\(enabled ? "enabled" : "disabled"), allowed, visible, notified] (0x2)\n           Identifier: \(identifier)\n                  URL: \(location)\n"
+        }
+        let developer = item("developer (0x20)", "Unknown Developer", "(null)")
+            + "  Embedded Item Identifiers:\n    #1: 16.local.relay.network.system-proxy\n"
+        func absent(_ entry: String, _ uid: UInt32 = 501, _ migrated: Bool = true) -> Bool {
+            let section = { (user: Int, content: String) in
+                "========================\n Records for UID \(user) : 50DCC3EF-6AD8-5EAA-AC56-451AD340113C\n========================\n ServiceManagement migrated: \(migrated)\n LaunchServices registered: true\n Items:\n" + content
+            }
+            return R.legacyLoginAbsent(Data((section(-2, developer) + section(501, entry)).utf8), uid: uid, movedPath: trash)
+        }
+        try check(absent(""), "macOS 15 recognized empty Items table")
+        let unrelatedLogin = item("login item (0x4)", "4.example.unrelated", "file:///Applications/Other.app/")
+        try check(absent(unrelatedLogin), "recognized shared and bound-user inventory excludes Relay")
+        try check(!absent(unrelatedLogin, 502) && !absent(unrelatedLogin, 501, false), "missing user or incomplete migration uses signed fallback")
+        try check(!absent(item("legacy login item (0x10004)", "4.local.relay.network.preview", "file:///elsewhere.app")), "legacy item matched by bundle ID")
+        let escaped = URL(fileURLWithPath: trash).absoluteString
+        try check(!absent(item("app (0x2)", "anonymous", escaped)), "escaped renamed Trash path matched")
+        try check(!absent(item("unknown kind (0x55)", "opaque", "(null)")), "unknown BTM encoding uses fallback")
+        try check(!absent(unrelatedLogin.replacingOccurrences(of: "Identifier:", with: "Identifikator:")) && !absent(" unrecognized table: 0 entries"), "localized or unrecognized inventory never authorizes skip")
+        try check(absent(item("app (0x2)", "2.local.relay.network.preview", escaped, false) + "  Embedded Item Identifiers:\n    #1: 16.local.relay.network.system-proxy\n"), "disabled BTM parent history is not an active login item")
+        var loginEvents: [String] = []
+        try refuses("failed signed fallback preserves unfinished intent") {
+            try RelayRemovalLifecycle.run(phase: "requested", prepareLegacyLogin: {
+                loginEvents.append("legacy"); throw RelayRemoval.fail("system refused")
+            }, retireNetworkOnLoginFailure: { loginEvents.append("network components") },
+            restoreUser: { loginEvents.append("restore proxy and user") }, removeRegistrations: { loginEvents.append("registration") },
+            removeComponents: { loginEvents.append("other components") }, checkpoint: { loginEvents.append($0) },
+            finish: { loginEvents.append("finish") })
+        }
+        try check(loginEvents == ["legacy", "restore proxy and user", "network components"], "network restored and stopped before retrying only unfinished login outcome")
         let fixed = try R.targets(home: home, uid: 501, observed: nil)
         try check(fixed.count == 6 && fixed.allSatisfy({ $0.path.hasPrefix(RelayRemoval.app) }), "six fixed installation bundles")
         try check(try R.targets(home: home, uid: 501, observed: RelayRemoval.app) == fixed, "direct deletion last installed path deduplicates")

@@ -100,12 +100,13 @@ enum RelayTunRuntimeCapture {
         private var publicationCheck: ((() throws -> Void) throws -> Void)?
         private var publicationStarted = false
         let deadline: UInt64
-        init(wall: @escaping () -> Double = { Date().timeIntervalSince1970 },
+        private let duration: UInt64
+        init(duration: UInt64 = RelayTunRuntimeCapture.duration, wall: @escaping () -> Double = { Date().timeIntervalSince1970 },
              tick: @escaping () -> UInt64 = { RelayTunRuntimeCapture.now }) {
-            self.wall = wall; self.tick = tick
+            self.duration = duration; self.wall = wall; self.tick = tick
             let began = wall(), now = tick()
             beganWall = began; lastWall = began; lastTick = now
-            deadline = min(now, UInt64.max - RelayTunRuntimeCapture.duration) + RelayTunRuntimeCapture.duration
+            deadline = min(now, UInt64.max - duration) + duration
         }
         func bindOwner(_ check: @escaping () throws -> Void) throws {
             lock.lock()
@@ -120,7 +121,7 @@ enum RelayTunRuntimeCapture {
         private func clocksLocked() throws {
             let currentWall = wall(), currentTick = tick()
             guard !cancelled, beganWall.isFinite, currentWall.isFinite,
-                  currentWall >= lastWall, currentWall - beganWall < 3,
+                  currentWall >= lastWall, currentWall - beganWall < Double(duration) / 1_000_000_000,
                   currentTick >= lastTick, currentTick < deadline else {
                 cancelled = true; throw Failure.deadline
             }
@@ -187,15 +188,27 @@ enum RelayTunRuntimeCapture {
         guard now < deadline else { throw Failure.deadline }
     }
 
+    enum ProxyAction {
+        case list, select(String, String), automatic(String)
+        static func name(_ value: Any?) -> String? {
+            guard let name = value as? String, !name.isEmpty, name.utf8.count <= 1024,
+                  name.unicodeScalars.allSatisfy({ $0.value >= 32 && !(127...159).contains($0.value) }) else { return nil }
+            return name
+        }
+    }
     final class Channel {
         typealias Capture = (UInt64, @escaping (Result) -> Void) -> Void
         typealias Traffic = (TrafficContext, @escaping (TrafficResult) -> Void) -> Void
+        typealias Proxies = (ProxyAction, TrafficContext, @escaping (TrafficResult) -> Void) -> Void
+        let proxyGroupsEnabled: Bool
+        private var proxies: Proxies?
         let telemetryEnabled: Bool
         let historyEnabled: Bool
-        private var version: Int { historyEnabled ? 3 : telemetryEnabled ? 2 : 1 }
+        private var version: Int { proxyGroupsEnabled ? 4 : historyEnabled ? 3 : telemetryEnabled ? 2 : 1 }
         private let input: Int32, output: Int32
         private let queue = DispatchQueue(label: "local.relay.tun.runtime-capture.read")
         private let source: DispatchSourceRead
+        private let cancellation = DispatchGroup()
         private var buffer = Data()
         private var closed = false
         private var started = false
@@ -212,7 +225,7 @@ enum RelayTunRuntimeCapture {
         /// The caller must gate this on --managed-session-runtime-capture-v1.
         /// Set CLOEXEC immediately, before any core could be spawned. Per-FD
         /// SIGPIPE suppression also makes a lost read peer harmless to control.
-        init?(input: Int32 = 3, output: Int32 = 4, telemetry: Bool = false, history: Bool = false) {
+        init?(input: Int32 = 3, output: Int32 = 4, telemetry: Bool = false, history: Bool = false, proxyGroups: Bool = false) {
             guard input >= 3, output >= 3, input != output else { return nil }
             for fd in [input, output] {
                 let flags = fcntl(fd, F_GETFD)
@@ -230,37 +243,48 @@ enum RelayTunRuntimeCapture {
                 let flags = fcntl(fd, F_GETFL)
                 guard flags >= 0, fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0 else { return nil }
             }
+            proxyGroupsEnabled = proxyGroups
             self.input = input; self.output = output; telemetryEnabled = telemetry || history; historyEnabled = history
             source = DispatchSource.makeReadSource(fileDescriptor: input, queue: queue)
-            source.setCancelHandler { [input, output] in Darwin.close(input); Darwin.close(output) }
+            cancellation.enter()
+            source.setCancelHandler { [input, output, cancellation] in
+                Darwin.close(input); Darwin.close(output); cancellation.leave()
+            }
         }
         deinit { source.cancel(); if !started { source.resume() } }
         func start(binding: [String: Any], clientSHA256: String, installationRevision: String,
-                   traffic: Traffic? = nil, connections: Traffic? = nil, capture: @escaping Capture) {
+                   traffic: Traffic? = nil, connections: Traffic? = nil, proxies: Proxies? = nil, capture: @escaping Capture) {
             guard !started else { return }; started = true
             self.binding = binding; self.capture = capture; self.traffic = telemetryEnabled ? traffic : nil
             self.connections = historyEnabled ? connections : nil
+            self.proxies = proxyGroupsEnabled ? proxies : nil
             source.setEventHandler { [weak self] in self?.read() }
             queue.async { [self] in
                 var hello = binding
                 hello["version"] = version; hello["kind"] = "hello"
-                hello["capability"] = historyEnabled ? "runtime-history-v3" : telemetryEnabled ? "runtime-telemetry-v2" : "runtime-capture-v1"
+                hello["capability"] = proxyGroupsEnabled ? "proxy-groups-v1" : historyEnabled ? "runtime-history-v3" : telemetryEnabled ? "runtime-telemetry-v2" : "runtime-capture-v1"
                 hello["launchClientSHA256"] = clientSHA256; hello["installationRevision"] = installationRevision
                 do { try send(hello, deadline: RelayTunRuntimeCapture.now + RelayTunRuntimeCapture.duration) }
                 catch { close() }
             }
             source.resume()
         }
+        /// Called only by the session owner, never by this pipe queue.
+        func invalidateAndDrain() -> Bool {
+            invalidate()
+            queue.sync { if !started { started = true; source.resume() } }
+            return cancellation.wait(timeout: .now() + 2) == .success
+        }
         private func close() {
             guard !closed else { return }; closed = true
             pendingContext?.cancel(); pendingContext = nil; pendingAction = nil
-            pending = nil; capture = nil; traffic = nil; connections = nil; buffer.removeAll(); timer?.cancel(); timer = nil
+            pending = nil; capture = nil; traffic = nil; connections = nil; proxies = nil; buffer.removeAll(); timer?.cancel(); timer = nil
             source.cancel()
         }
         func invalidate() { queue.async { [weak self] in self?.close() } }
         private func send(_ value: [String: Any], deadline: UInt64, check: () throws -> Void = {}, didWrite: () -> Void = {}) throws {
             var bytes = try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .withoutEscapingSlashes])
-            guard bytes.count <= (historyEnabled ? RelayTunRuntimeCapture.historyLimit : RelayTunRuntimeCapture.limit) else { throw Failure.unsupported }; bytes.append(10)
+            guard bytes.count <= (proxyGroupsEnabled ? 8 * 1024 * 1024 : historyEnabled ? RelayTunRuntimeCapture.historyLimit : RelayTunRuntimeCapture.limit) else { throw Failure.unsupported }; bytes.append(10)
             try bytes.withUnsafeBytes { raw in
                 var offset = 0
                 while offset < raw.count {
@@ -299,18 +323,33 @@ enum RelayTunRuntimeCapture {
         }
         private func accept(_ bytes: Data) throws {
             let raw = try RelayTunStrictJSON.object(bytes, limit: RelayTunRuntimeCapture.limit)
-            guard Set(raw.keys) == ["version", "id", "action", "sessionId", "evidenceSHA256", "runtimeConfigurationSHA256"],
+            var keys: Set<String> = ["version", "id", "action", "sessionId", "evidenceSHA256", "runtimeConfigurationSHA256"]
+            var operation: ProxyAction?
+            if proxyGroupsEnabled {
+                guard proxies != nil else { throw Failure.unavailable }
+                switch raw["action"] as? String {
+                case "groups": operation = .list
+                case "select":
+                    guard let group = ProxyAction.name(raw["group"]), let member = ProxyAction.name(raw["member"]) else { throw Failure.unsupported }
+                    keys.formUnion(["group", "member"]); operation = .select(group, member)
+                case "automatic":
+                    guard let group = ProxyAction.name(raw["group"]) else { throw Failure.unsupported }
+                    keys.insert("group"); operation = .automatic(group)
+                default: throw Failure.unsupported
+                }
+            }
+            guard Set(raw.keys) == keys,
                   RelayTunStrictJSON.integer(raw["version"]) == version,
                   let id = RelayTunStrictJSON.integer(raw["id"]), id > lastID, id <= Int(Int32.max),
                   let action = raw["action"] as? String,
-                  (action == "capture" || (telemetryEnabled && action == "traffic" && traffic != nil) ||
+                  (operation != nil || (!proxyGroupsEnabled && action == "capture") || (telemetryEnabled && action == "traffic" && traffic != nil) ||
                    (historyEnabled && action == "connections" && connections != nil)), pending == nil,
                   raw["sessionId"] as? String == binding["sessionId"] as? String,
                   raw["evidenceSHA256"] as? String == binding["evidenceSHA256"] as? String,
                   raw["runtimeConfigurationSHA256"] as? String == binding["runtimeConfigurationSHA256"] as? String,
                   let capture else { throw Failure.unavailable }
             lastID = id; pending = id; pendingAction = action
-            let context = action == "capture" ? nil : TrafficContext()
+            let context = action == "capture" ? nil : TrafficContext(duration: proxyGroupsEnabled ? 10_000_000_000 : RelayTunRuntimeCapture.duration)
             pendingContext = context
             let deadline = context?.deadline ?? (RelayTunRuntimeCapture.now + RelayTunRuntimeCapture.duration)
             let timer = DispatchSource.makeTimerSource(queue: queue); self.timer = timer
@@ -320,7 +359,10 @@ enum RelayTunRuntimeCapture {
                 else { self?.finish(id: id, result: .unavailable, deadline: deadline) }
             }
             timer.resume()
-            if let context, let read = (action == "connections" ? connections : traffic) {
+            let reader: Traffic?
+            if let operation, let proxies { reader = { context, reply in proxies(operation, context, reply) } }
+            else { reader = action == "connections" ? connections : traffic }
+            if let context, let read = reader {
                 try context.check()
                 read(context) { [weak self] result in
                     self?.queue.async { [weak self] in self?.finishTraffic(id: id, action: action, result: result, deadline: deadline) }
@@ -345,7 +387,10 @@ enum RelayTunRuntimeCapture {
                 try context.check()
                 var response = value(result.status)
                 if case .sampled(let raw) = result {
-                    if action == "connections" {
+                    if proxyGroupsEnabled {
+                        guard !raw.isEmpty, raw.count <= 5 * 1024 * 1024 else { throw Failure.unsupported }
+                        response["status"] = "groups"; response["groupsBase64"] = raw.base64EncodedString()
+                    } else if action == "connections" {
                         guard historyEnabled, !raw.isEmpty, raw.count <= RelayTunRuntimeCapture.bodyLimit else { throw Failure.unavailable }
                         response["status"] = "connections"
                         response["rawConnectionsBase64"] = raw.base64EncodedString()

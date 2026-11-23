@@ -106,7 +106,8 @@ export function createConfigurationEditService(adapters: {
   prepare?(
     request: unknown,
     recheck: () => Promise<void>,
-    enableTun?: boolean
+    enableTun?: boolean,
+    transform?: (configuration: Record<string, unknown>) => Record<string, unknown>
   ): Promise<CompleteConfigurationPlan>
 }) {
   // Keep scripts' prepared output stable while the source and saved edits are
@@ -134,7 +135,11 @@ export function createConfigurationEditService(adapters: {
     selection: RelayProfileSelection,
     record: ConfigurationEditRecord,
     bindings: unknown[],
-    enableTun = false
+    enableTun = false,
+    projection?: {
+      transform(configuration: Record<string, unknown>): Record<string, unknown>
+      recheck(): Promise<void>
+    }
   ): Promise<CompleteConfigurationPlan> => {
     if (!adapters.prepare) throw new Error('完整配置准备尚未接通。')
     await assertLibrary(record.document, selection.id)
@@ -142,13 +147,18 @@ export function createConfigurationEditService(adapters: {
     if (enableTun)
       options.controlled = mergeConfiguration(options.controlled, { tun: { enable: true } })
     const recheck = async (): Promise<void> => {
+      await projection?.recheck()
       const latest = await adapters.store.read()
       if (latest.exists !== record.exists || latest.revision !== record.revision)
         throw new Error('已保存的编辑版本已变化，请重新准备。')
       await assertLibrary(latest.document, selection.id)
     }
     const request = { profile: selection, options, bindings: structuredClone(bindings) }
-    return enableTun ? adapters.prepare(request, recheck, true) : adapters.prepare(request, recheck)
+    return enableTun
+      ? projection
+        ? adapters.prepare(request, recheck, true, projection.transform)
+        : adapters.prepare(request, recheck, true)
+      : adapters.prepare(request, recheck)
   }
   let runtimeGeneration = 0
   const invalidateRuntimeCache = (): void => {
@@ -307,11 +317,17 @@ export function createConfigurationEditService(adapters: {
         throw new Error('已保存的编辑版本已变化，请重新读取。')
       return prepareRecord(selection, record, input.bindings)
     },
-    async prepareForTun(raw: unknown): Promise<CompleteConfigurationPlan> {
+    async prepareForTun(
+      raw: unknown,
+      projection?: {
+        transform(configuration: Record<string, unknown>): Record<string, unknown>
+        recheck(): Promise<void>
+      }
+    ): Promise<CompleteConfigurationPlan> {
       const selection = profileSelection(raw)
       // This intent belongs only to the checked candidate. The saved source and
       // editor remain unchanged, including when no edit document exists yet.
-      return prepareRecord(selection, await adapters.store.read(), [], true)
+      return prepareRecord(selection, await adapters.store.read(), [], true, projection)
     },
     async readComposedProfile(
       selection: RelayProfileSelection,
@@ -477,6 +493,12 @@ export function createConfigurationEditService(adapters: {
       operation(() => service.inheritProfileEdits(previousId, targetId)),
     preview: (raw: unknown) => operation(() => service.preview(raw)),
     prepare: (raw: unknown) => operation(() => service.prepare(raw)),
-    prepareForTun: (raw: unknown) => operation(() => service.prepareForTun(raw))
+    prepareForTun: (
+      raw: unknown,
+      projection?: {
+        transform(configuration: Record<string, unknown>): Record<string, unknown>
+        recheck(): Promise<void>
+      }
+    ) => operation(() => service.prepareForTun(raw, projection))
   }
 }

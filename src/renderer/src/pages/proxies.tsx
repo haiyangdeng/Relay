@@ -20,6 +20,7 @@ import {
   mihomoCloseAllConnections,
   mihomoProxyDelay,
   mihomoGroups,
+  relayProxyPageOwner,
   getSimpleConfig,
   reorderSimpleProxyGroups,
   removeSimpleProxyGroup
@@ -39,7 +40,7 @@ import {
 } from 'react-icons/md'
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import { GroupedVirtuoso, GroupedVirtuosoHandle } from 'react-virtuoso'
-import ProxyItem, { type ProxyDelay } from '@renderer/components/proxies/proxy-item'
+import ProxyItem from '@renderer/components/proxies/proxy-item'
 import { IoIosArrowBack } from 'react-icons/io'
 import { useGroups } from '@renderer/hooks/use-groups'
 import CollapseInput from '@renderer/components/base/collapse-input'
@@ -72,27 +73,24 @@ import SortableGroup from '@renderer/components/proxies/sortable-group'
 import { toast } from '@renderer/components/base/toast'
 import { RELAY_PREVIEW_ONLY } from '@renderer/components/relay/preview-controls'
 import { RelayProxyLibrary } from '@renderer/components/relay/proxy-library'
-import {
-  relayProxyRunning,
-  relayProxyMatchesProfile
-} from '@renderer/components/relay/proxy-library-actions'
 import { relayProfileRead } from '@renderer/components/relay/profile-read-queue'
 import {
   executeRuntimeGroupProbe,
   executeRuntimeNodeProbe,
   runtimeProbeMembers,
-  runtimeProbeDisplayStatus,
+  updateRuntimeGroupMeasurements,
+  type RuntimeGroupMeasurements,
   runtimeProbeTestAvailable
 } from '@renderer/components/relay/runtime-group-probe'
 import { errorMessage } from '@renderer/utils/error-message'
 import { probeDelayURL, probeMeasurementSummary } from '../../../shared/relay/isolated-probes'
-import type { LocalProxyState } from '../../../shared/relay/local-proxy'
+import type { LocalProxyState, RelayProxyPageOwner } from '../../../shared/relay/local-proxy'
 import type { SimpleObject } from '../../../shared/simple-config'
 import type { IsolatedProbeState } from '../../../shared/relay/isolated-probes'
 
 const GROUP_EXPAND_STATE_KEY = 'proxy_group_expand_state'
 const EMPTY_GROUPS: IMihomoMixedGroup[] = []
-const EMPTY_MEASUREMENTS = new Map<string, ProxyDelay>()
+const EMPTY_MEASUREMENTS: RuntimeGroupMeasurements = new Map()
 const restrictToVerticalAxis: Modifier = ({ transform }) => ({ ...transform, x: 0 })
 
 interface GroupExpandState {
@@ -200,32 +198,37 @@ const Proxies: React.FC = () => {
   const { controledMihomoConfig } = useControledMihomoConfig()
   const { groups: upstreamGroups, mutate: mutateUpstream, showHidden, setShowHidden } = useGroups()
   const {
+    data: owner,
+    error: ownerError,
+    mutate: refreshOwner
+  } = useSWR<RelayProxyPageOwner | null>(
+    RELAY_PREVIEW_ONLY ? 'relayProxyPageOwner' : null,
+    async () => (await relayProxyPageOwner()) ?? null,
+    { refreshInterval: 2000, revalidateOnFocus: false, errorRetryCount: 0 }
+  )
+  const {
     data: relayState,
     error: relayStateError,
     mutate: refreshRelayState
   } = useSWR<LocalProxyState>(
-    RELAY_PREVIEW_ONLY ? 'relayLocalProxyState' : null,
+    RELAY_PREVIEW_ONLY && owner?.kind !== 'tun-managed' ? 'relayLocalProxyState' : null,
     () => window.electron.ipcRenderer.invoke('relayLocalProxyState') as Promise<LocalProxyState>,
     { refreshInterval: 2000, revalidateOnFocus: false, errorRetryCount: 0 }
   )
-  const relayRunning = relayProxyRunning(relayState) && !relayStateError
-  const viewingRelayRuntime =
-    relayRunning && relayProxyMatchesProfile(relayState, params.get('profile'))
-  const relayIdentityMissing =
-    relayRunning && (!relayState?.instanceId || !relayState.configurationRevision)
-  const mode = (RELAY_PREVIEW_ONLY ? relayState?.mode : controledMihomoConfig?.mode) ?? 'rule'
+  const profile = params.get('profile')
+  const runtimeOwner =
+    !ownerError && owner && (!profile || owner.profileId === profile) ? owner : undefined
+  const mode = (RELAY_PREVIEW_ONLY ? runtimeOwner?.mode : controledMihomoConfig?.mode) ?? 'rule'
   const {
     data: relayGroups,
     error: relayGroupsError,
     mutate: mutateRelayGroups
   } = useSWR<IMihomoMixedGroup[]>(
-    RELAY_PREVIEW_ONLY &&
-      viewingRelayRuntime &&
-      relayState?.instanceId &&
-      relayState.configurationRevision
-      ? ['relayLiveGroups', relayState.instanceId, relayState.configurationRevision, showHidden]
+    RELAY_PREVIEW_ONLY && runtimeOwner
+      ? (['relayLiveGroups', runtimeOwner, showHidden] as const)
       : null,
-    () => mihomoGroups(showHidden),
+    ([, observed, hidden]: readonly [string, RelayProxyPageOwner, boolean]) =>
+      mihomoGroups(hidden, observed),
     {
       refreshInterval: 30000,
       revalidateOnFocus: false,
@@ -234,26 +237,26 @@ const Proxies: React.FC = () => {
     }
   )
   const showCachedLibrary =
-    RELAY_PREVIEW_ONLY && (!viewingRelayRuntime || relayIdentityMissing || !!relayGroupsError)
+    RELAY_PREVIEW_ONLY && !runtimeOwner && !ownerError && owner !== undefined
   const relayGroupsLoading =
     RELAY_PREVIEW_ONLY &&
-    viewingRelayRuntime &&
-    !relayIdentityMissing &&
-    !relayGroups &&
-    !relayGroupsError
+    !ownerError &&
+    (owner === undefined || (!!runtimeOwner && !relayGroups && !relayGroupsError))
   const groupData = RELAY_PREVIEW_ONLY ? relayGroups : upstreamGroups
   const mutate = RELAY_PREVIEW_ONLY ? mutateRelayGroups : mutateUpstream
   const refreshRelay = useCallback(async (): Promise<void> => {
-    await Promise.allSettled([refreshRelayState(), mutate()])
-  }, [refreshRelayState, mutate])
+    await Promise.allSettled([refreshOwner(), refreshRelayState(), mutate()])
+  }, [refreshOwner, refreshRelayState, mutate])
   useEffect(() => {
     if (!RELAY_PREVIEW_ONLY) return
     const refresh = (): void => {
       void refreshRelay()
     }
+    const unsubscribeTun = window.electron.ipcRenderer.on('relayTunUpdated', refresh)
     const unsubscribeGroups = window.electron.ipcRenderer.on('groupsUpdated', refresh)
     const unsubscribeStarted = window.electron.ipcRenderer.on('core-started', refresh)
     return () => {
+      unsubscribeTun()
       unsubscribeGroups()
       unsubscribeStarted()
     }
@@ -491,21 +494,40 @@ const Proxies: React.FC = () => {
 
   const onChangeProxy = useCallback(
     async (group: string, proxy: string): Promise<void> => {
-      await mihomoChangeProxy(group, proxy)
-      if (autoCloseConnection) {
-        await mihomoCloseAllConnections(autoCloseConnectionOnlyGroup ? group : undefined)
+      try {
+        if (RELAY_PREVIEW_ONLY) {
+          if (!runtimeOwner) return
+          await mihomoChangeProxy(group, proxy, runtimeOwner)
+        } else {
+          await mihomoChangeProxy(group, proxy)
+        }
+        if (autoCloseConnection && runtimeOwner?.kind !== 'tun-managed') {
+          await mihomoCloseAllConnections(
+            autoCloseConnectionOnlyGroup
+              ? group
+              : runtimeOwner
+                ? {
+                    instanceId: runtimeOwner.instanceId,
+                    configurationRevision: runtimeOwner.configurationRevision
+                  }
+                : undefined
+          )
+        }
+      } catch (error) {
+        toast.error(errorMessage(error, '节点切换未完成，请刷新后重试。'))
+      } finally {
+        void mutate()
       }
-      mutate()
     },
-    [autoCloseConnection, autoCloseConnectionOnlyGroup, mutate]
+    [autoCloseConnection, autoCloseConnectionOnlyGroup, mutate, runtimeOwner]
   )
 
   const probeContext =
-    viewingRelayRuntime && !relayGroupsError
+    runtimeOwner?.kind === 'ordinary' && !relayGroupsError
       ? JSON.stringify([
-          relayState?.instanceId,
-          relayState?.configurationRevision,
-          relayState?.profileId,
+          runtimeOwner.instanceId,
+          runtimeOwner.configurationRevision,
+          runtimeOwner.profileId,
           groups.map((group) => [group.name, group.now, group.testUrl]),
           delayTestUrl || '',
           delayTestTimeout || 5000
@@ -514,7 +536,7 @@ const Proxies: React.FC = () => {
   const currentProbeContext = useRef(probeContext)
   currentProbeContext.current = probeContext
   const { data: isolatedMeasurements = EMPTY_MEASUREMENTS, mutate: updateIsolatedMeasurements } =
-    useSWR<Map<string, ProxyDelay>>(
+    useSWR<RuntimeGroupMeasurements>(
       RELAY_PREVIEW_ONLY && probeContext ? ['relayIsolatedDelays', probeContext] : null,
       null
     )
@@ -525,6 +547,7 @@ const Proxies: React.FC = () => {
   const [probePending, setProbePending] = useState(false)
   const [probeView, setProbeView] = useState<{
     group: string
+    groupTest?: boolean
     notice: string
     nodes?: string[]
     cleanup?: boolean
@@ -554,17 +577,14 @@ const Proxies: React.FC = () => {
     return cancelProbe
   }, [probeContext, cancelProbe])
   const testSavedGroup = useCallback(
-    async (
-      group: string,
-      kind: 'nodeDelay' | 'groupDelay' = 'groupDelay',
-      url?: string
-    ): Promise<void> => {
-      if (probeWorking.current || !probeContext || !relayState?.profileId) return
+    async (group: string, url?: string, node?: string): Promise<void> => {
+      if (probeWorking.current || !probeContext || !runtimeOwner?.profileId) return
       probeWorking.current = true
       probeCancelled.current = false
       setProbePending(true)
-      let measuredNodes = kind === 'nodeDelay' ? [group] : runtimeProbeMembers(group, groups)
-      setProbeView({ group, nodes: measuredNodes, notice: '正在检查来源和网络环境…' })
+      const groupTest = node === undefined
+      const measuredNodes = groupTest ? runtimeProbeMembers(group, groups) : [node]
+      setProbeView({ group, groupTest, nodes: measuredNodes, notice: '正在检查来源和网络环境…' })
       const current = (): boolean =>
         probeMounted.current && currentProbeContext.current === probeContext
       const invoke = (channel: string, input?: unknown): Promise<unknown> =>
@@ -576,9 +596,10 @@ const Proxies: React.FC = () => {
           setProbeView({ group, notice: '已有探测正在执行或需要收尾，请先处理。', cleanup: true })
           return
         }
-        const execute = kind === 'groupDelay' ? executeRuntimeGroupProbe : executeRuntimeNodeProbe
-        const result = await execute(relayState.profileId, group, {
+        const execute = groupTest ? executeRuntimeGroupProbe : executeRuntimeNodeProbe
+        const result = await execute(runtimeOwner.profileId, node ?? group, {
           delay: {
+            ...(groupTest ? { members: measuredNodes } : {}),
             url: delayTestUrl || url || probeDelayURL,
             timeout: delayTestTimeout || 5000,
             selections: Object.fromEntries(
@@ -594,25 +615,15 @@ const Proxies: React.FC = () => {
           cancelled: () => probeCancelled.current,
           prepared: (plan) => {
             probeEvidence.current = plan.evidenceId
-            measuredNodes = [...new Set([...measuredNodes, ...plan.nodes])]
-            if (current()) setProbeView((value) => value && { ...value, nodes: measuredNodes })
           }
         })
         if (current()) {
+          const directMembers = new Set(measuredNodes)
+          const measurements = result.measurements.filter((row) => directMembers.has(row.name))
           if (!probeCancelled.current && result.status === 'completed')
             await updateIsolatedMeasurements(
               (previous) =>
-                new Map([
-                  ...(previous ?? []),
-                  ...measuredNodes.map((name): [string, ProxyDelay] => [
-                    name,
-                    runtimeProbeDisplayStatus(name)
-                  ]),
-                  ...result.measurements.map((row): [string, ProxyDelay] => [
-                    row.name,
-                    row.error ? { error: row.error } : row.milliseconds
-                  ])
-                ]),
+                updateRuntimeGroupMeasurements(previous, group, measuredNodes, measurements),
               { revalidate: false }
             )
           if (!current()) return
@@ -621,7 +632,7 @@ const Proxies: React.FC = () => {
             notice:
               probeCancelled.current || result.status === 'cancelled'
                 ? '已取消测速。'
-                : probeMeasurementSummary(result)
+                : probeMeasurementSummary({ ...result, measurements })
           })
         }
       } catch (error) {
@@ -629,13 +640,13 @@ const Proxies: React.FC = () => {
           if (!probeCancelled.current && measuredNodes.length)
             await updateIsolatedMeasurements(
               (previous) =>
-                new Map([
-                  ...(previous ?? []),
-                  ...measuredNodes.map((name): [string, ProxyDelay] => [
-                    name,
-                    runtimeProbeDisplayStatus(name, errorMessage(error, '测速未完成，请重试。'))
-                  ])
-                ]),
+                updateRuntimeGroupMeasurements(
+                  previous,
+                  group,
+                  measuredNodes,
+                  [],
+                  errorMessage(error, '测速未完成，请重试。')
+                ),
               { revalidate: false }
             )
           if (!current()) return
@@ -660,7 +671,7 @@ const Proxies: React.FC = () => {
     },
     [
       probeContext,
-      relayState?.profileId,
+      runtimeOwner?.profileId,
       updateIsolatedMeasurements,
       groups,
       delayTestUrl,
@@ -669,12 +680,15 @@ const Proxies: React.FC = () => {
   )
 
   const onProxyDelay = useCallback(
-    async (proxy: IMihomoProxy | IMihomoGroup, url?: string): Promise<IMihomoDelay | undefined> => {
+    async (
+      proxy: IMihomoProxy | IMihomoGroup,
+      group: IMihomoMixedGroup
+    ): Promise<IMihomoDelay | undefined> => {
       if (RELAY_PREVIEW_ONLY) {
-        await testSavedGroup(proxy.name, 'nodeDelay', url)
+        await testSavedGroup(group.name, group.testUrl, proxy.name)
         return
       }
-      return mihomoProxyDelay(proxy.name, url, getProviderName(proxy))
+      return mihomoProxyDelay(proxy.name, group.testUrl, getProviderName(proxy))
     },
     [testSavedGroup]
   )
@@ -765,7 +779,7 @@ const Proxies: React.FC = () => {
       if (!group) return
       expandGroup(index)
       if (RELAY_PREVIEW_ONLY) {
-        await testSavedGroup(group.name, 'groupDelay', group.testUrl)
+        await testSavedGroup(group.name, group.testUrl)
         return
       }
       const members = allProxies[index] ?? []
@@ -1015,10 +1029,12 @@ const Proxies: React.FC = () => {
                           variant="light"
                           isLoading={
                             RELAY_PREVIEW_ONLY
-                              ? probePending && probeView?.group === groups[index].name
+                              ? probePending &&
+                                probeView?.groupTest === true &&
+                                probeView.group === groups[index].name
                               : (delaying[index]?.size ?? 0) > 0
                           }
-                          isDisabled={RELAY_PREVIEW_ONLY && probePending}
+                          isDisabled={RELAY_PREVIEW_ONLY && (!probeContext || probePending)}
                           size="sm"
                           isIconOnly
                           onPress={() => {
@@ -1058,8 +1074,10 @@ const Proxies: React.FC = () => {
       expandGroup,
       allProxies,
       onGroupDelay,
+      probeContext,
       probePending,
       probeView?.group,
+      probeView?.groupTest,
       editing,
       openGroupEditor,
       configuredGroups,
@@ -1087,19 +1105,26 @@ const Proxies: React.FC = () => {
             if (!allProxies[groupIndex][innerIndex * cols + i]) return null
             return (
               <ProxyItem
-                key={allProxies[groupIndex][innerIndex * cols + i].name}
+                key={JSON.stringify([
+                  groups[groupIndex].name,
+                  allProxies[groupIndex][innerIndex * cols + i].name
+                ])}
                 mutateProxies={mutate}
                 onProxyDelay={onProxyDelay}
                 delayOverride={
                   RELAY_PREVIEW_ONLY
-                    ? isolatedMeasurements.get(allProxies[groupIndex][innerIndex * cols + i].name)
+                    ? isolatedMeasurements
+                        .get(groups[groupIndex].name)
+                        ?.get(allProxies[groupIndex][innerIndex * cols + i].name)
                     : undefined
                 }
                 testDisabled={
                   RELAY_PREVIEW_ONLY &&
-                  (probePending ||
+                  (!probeContext ||
+                    probePending ||
                     !runtimeProbeTestAvailable(allProxies[groupIndex][innerIndex * cols + i].name))
                 }
+                relayOwner={runtimeOwner}
                 onSelect={onChangeProxy}
                 proxy={allProxies[groupIndex][innerIndex * cols + i]}
                 group={groups[groupIndex]}
@@ -1110,7 +1135,8 @@ const Proxies: React.FC = () => {
                 isGroupTesting={
                   RELAY_PREVIEW_ONLY
                     ? probePending &&
-                      (probeView?.nodes?.includes(
+                      probeView?.group === groups[groupIndex].name &&
+                      (probeView.nodes?.includes(
                         allProxies[groupIndex][innerIndex * cols + i].name
                       ) ??
                         false)
@@ -1137,7 +1163,10 @@ const Proxies: React.FC = () => {
       mutate,
       onProxyDelay,
       isolatedMeasurements,
+      runtimeOwner,
+      probeContext,
       probePending,
+      probeView?.group,
       probeView?.nodes,
       onChangeProxy
     ]
@@ -1159,9 +1188,12 @@ const Proxies: React.FC = () => {
               查看测速收尾
             </a>
           )}
-          {RELAY_PREVIEW_ONLY && relayRunning && !showCachedLibrary && (
+          {RELAY_PREVIEW_ONLY && runtimeOwner && (
             <Chip size="sm" color="success" variant="flat" className="self-center">
-              运行中 · {relayState?.profileName}
+              运行中 ·{' '}
+              {runtimeOwner.kind === 'tun-managed'
+                ? '虚拟网卡'
+                : (relayState?.profileName ?? '本地代理')}
             </Chip>
           )}
           <Dropdown placement="bottom-end" closeOnSelect={false}>
@@ -1338,99 +1370,119 @@ const Proxies: React.FC = () => {
           }}
         />
       )}
-      {showCachedLibrary ? (
-        <RelayProxyLibrary
-          state={relayState}
-          runtimeError={!!relayStateError || !!relayGroupsError || relayIdentityMissing}
-          onRuntimeChange={refreshRelay}
-        />
-      ) : relayGroupsLoading ? (
-        <div className="flex justify-center p-6">
-          <Spinner label="读取运行中的代理组" />
-        </div>
-      ) : editing ? (
-        <>
-          {!simpleState && !simpleError && (
-            <div className="flex justify-center p-6">
-              <Spinner aria-label="加载代理组" />
-            </div>
-          )}
-          {(simpleError || groupConfigError) && (
-            <div role="alert" className="p-3 text-danger text-sm">
-              {String(simpleError || groupConfigError)}
-            </div>
-          )}
-          <DndContext
-            sensors={sensors}
-            collisionDetection={closestCenter}
-            modifiers={[restrictToVerticalAxis]}
-            onDragStart={() => {
-              dragging.current = true
-            }}
-            onDragEnd={onGroupDragEnd}
-            onDragCancel={() => {
-              dragging.current = false
-              lastDragEnd.current = Date.now()
-            }}
-          >
-            <SortableContext
-              items={groups.map((group) => group.name)}
-              strategy={verticalListSortingStrategy}
-            >
-              {groups.map((group, index) => (
-                <SortableGroup
-                  key={group.name}
-                  name={group.name}
-                  disabled={savingOrder || !!editingGroup || creatingGroup}
-                >
-                  {renderGroupContent(index)}
-                </SortableGroup>
-              ))}
-            </SortableContext>
-          </DndContext>
-          <div className="px-2 pb-2">
-            <Card
-              isPressable
-              fullWidth
-              isDisabled={savingOrder || !simpleState || !!simpleError || !!groupConfigError}
-              onPress={() => setCreatingGroup(true)}
-            >
-              <CardBody className="flex h-14 flex-row items-center justify-center gap-2 text-foreground-500">
-                <MdAdd className="text-xl" />
-                <span className="text-sm">添加代理组</span>
-              </CardBody>
-            </Card>
-          </div>
-        </>
-      ) : mode === 'direct' ? (
-        <div className="h-full w-full flex justify-center items-center">
-          <div className="flex flex-col items-center">
-            <MdDoubleArrow className="text-foreground-500 text-[100px]" />
-            <h2 className="text-foreground-500 text-[20px]">{t('proxies.mode.direct')}</h2>
-          </div>
-        </div>
-      ) : (
-        <div className="h-[calc(100vh-50px)] flex flex-col">
-          {RELAY_PREVIEW_ONLY && probeView && (
-            <p role="status" className="sr-only">
-              {probeView.group} · {probeView.notice}
-            </p>
-          )}
-          {/* Reset Virtuoso's measured sizes after toggling unavailable proxy filtering. */}
-          <GroupedVirtuoso
-            className="flex-1 min-h-0"
-            key={appConfig?.hideUnavailableProxies ? 'hide-unavailable' : 'show-unavailable'}
-            ref={virtuosoRef}
-            groupCounts={groupCounts}
-            defaultItemHeight={80}
-            increaseViewportBy={{ top: 150, bottom: 150 }}
-            overscan={200}
-            computeItemKey={(index, groupIndex) => `${groupIndex}-${index}`}
-            groupContent={renderGroupContent}
-            itemContent={renderItemContent}
+      <div
+        className={RELAY_PREVIEW_ONLY && !showCachedLibrary ? 'flex h-full flex-col' : 'contents'}
+      >
+        {RELAY_PREVIEW_ONLY && !ownerError && owner !== undefined && (
+          <RelayProxyLibrary
+            state={relayState}
+            owner={owner}
+            cached={showCachedLibrary}
+            runtimeError={!!relayStateError}
+            onRuntimeChange={refreshRelay}
           />
-        </div>
-      )}
+        )}
+        {RELAY_PREVIEW_ONLY && (ownerError || (runtimeOwner && relayGroupsError)) ? (
+          <div role="alert" className="p-3 text-sm">
+            {errorMessage(ownerError || relayGroupsError, '运行中的代理组读取失败。')}
+            <Button size="sm" variant="light" onPress={() => void refreshRelay()}>
+              重新读取
+            </Button>
+          </div>
+        ) : showCachedLibrary ? null : relayGroupsLoading ? (
+          <div className="flex justify-center p-6">
+            <Spinner label="读取运行中的代理组" />
+          </div>
+        ) : editing ? (
+          <>
+            {!simpleState && !simpleError && (
+              <div className="flex justify-center p-6">
+                <Spinner aria-label="加载代理组" />
+              </div>
+            )}
+            {(simpleError || groupConfigError) && (
+              <div role="alert" className="p-3 text-danger text-sm">
+                {String(simpleError || groupConfigError)}
+              </div>
+            )}
+            <DndContext
+              sensors={sensors}
+              collisionDetection={closestCenter}
+              modifiers={[restrictToVerticalAxis]}
+              onDragStart={() => {
+                dragging.current = true
+              }}
+              onDragEnd={onGroupDragEnd}
+              onDragCancel={() => {
+                dragging.current = false
+                lastDragEnd.current = Date.now()
+              }}
+            >
+              <SortableContext
+                items={groups.map((group) => group.name)}
+                strategy={verticalListSortingStrategy}
+              >
+                {groups.map((group, index) => (
+                  <SortableGroup
+                    key={group.name}
+                    name={group.name}
+                    disabled={savingOrder || !!editingGroup || creatingGroup}
+                  >
+                    {renderGroupContent(index)}
+                  </SortableGroup>
+                ))}
+              </SortableContext>
+            </DndContext>
+            <div className="px-2 pb-2">
+              <Card
+                isPressable
+                fullWidth
+                isDisabled={savingOrder || !simpleState || !!simpleError || !!groupConfigError}
+                onPress={() => setCreatingGroup(true)}
+              >
+                <CardBody className="flex h-14 flex-row items-center justify-center gap-2 text-foreground-500">
+                  <MdAdd className="text-xl" />
+                  <span className="text-sm">添加代理组</span>
+                </CardBody>
+              </Card>
+            </div>
+          </>
+        ) : mode === 'direct' ? (
+          <div className="h-full w-full flex justify-center items-center">
+            <div className="flex flex-col items-center">
+              <MdDoubleArrow className="text-foreground-500 text-[100px]" />
+              <h2 className="text-foreground-500 text-[20px]">{t('proxies.mode.direct')}</h2>
+            </div>
+          </div>
+        ) : (
+          <div
+            className={
+              RELAY_PREVIEW_ONLY
+                ? 'flex min-h-0 flex-1 flex-col'
+                : 'h-[calc(100vh-50px)] flex flex-col'
+            }
+          >
+            {RELAY_PREVIEW_ONLY && probeView && (
+              <p role="status" className="sr-only">
+                {probeView.group} · {probeView.notice}
+              </p>
+            )}
+            {/* Reset Virtuoso's measured sizes after toggling unavailable proxy filtering. */}
+            <GroupedVirtuoso
+              className="flex-1 min-h-0"
+              key={appConfig?.hideUnavailableProxies ? 'hide-unavailable' : 'show-unavailable'}
+              ref={virtuosoRef}
+              groupCounts={groupCounts}
+              defaultItemHeight={80}
+              increaseViewportBy={{ top: 150, bottom: 150 }}
+              overscan={200}
+              computeItemKey={(index, groupIndex) => `${groupIndex}-${index}`}
+              groupContent={renderGroupContent}
+              itemContent={renderItemContent}
+            />
+          </div>
+        )}
+      </div>
     </BasePage>
   )
 }

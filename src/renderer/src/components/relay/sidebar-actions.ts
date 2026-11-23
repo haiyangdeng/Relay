@@ -13,8 +13,12 @@ import type {
   LocalProxyResult
 } from '../../../../shared/relay/local-proxy'
 import type { RelayProfileInventory } from '../../../../shared/relay/profiles'
-import { selectedSystemProxyServices, submitSystemProxy } from './system-proxy-actions'
-import { ensureSelectedProxy } from './proxy-library-actions'
+import {
+  canSwitchSystemProxy,
+  selectedSystemProxyServices,
+  submitSystemProxy,
+  systemProxyListenerPort
+} from './system-proxy-actions'
 
 export type SidebarInvoke = (channel: string, ...args: unknown[]) => Promise<unknown>
 export async function sidebarSystemProxy(
@@ -29,9 +33,9 @@ export async function sidebarSystemProxy(
     return result
   }
   const report = (await guarded('relaySystemProxyInspect')) as SystemProxyReport
-  if (enabled && report.recordID && ['active', 'applied'].includes(report.status)) return report
   if (!enabled) {
-    if (!report.canRestore) throw new Error('没有可恢复的 Relay 系统代理记录。')
+    if (!report.recordID && ['inactive', 'restored'].includes(report.status)) return report
+    if (!report.recordID || !report.canRestore) throw new Error('没有可恢复的 Relay 系统代理记录。')
     const result = await submitSystemProxy(
       'restore',
       { ...defaultSystemProxyDraft(), port: 18191, serviceIDs: [] },
@@ -41,13 +45,15 @@ export async function sidebarSystemProxy(
     if (result.status !== 'restored') throw new Error('系统代理恢复结果需要核对。')
     return result.report
   }
+  if (!canSwitchSystemProxy(report))
+    throw new Error('系统代理状态需要核对，请检查网络服务和恢复记录。')
   const saved = systemProxyDraftRecord(await guarded('relaySystemProxyDraftRead'))
-  const state = await ensureSelectedProxy(guarded, current)
+  const port = await systemProxyListenerPort(guarded, current, saved.document)
   const result = await submitSystemProxy(
-    'apply',
+    'enable',
     {
       ...saved.document,
-      port: state.httpPort ?? 18191,
+      port,
       serviceIDs: selectedSystemProxyServices(report)
     },
     guarded,

@@ -60,7 +60,22 @@ if [ "$recovering" != 1 ]; then
     /usr/bin/install -m 600 "$manifest" "$pending"
 fi
 inventory=$(/usr/sbin/pkgutil --pkgs) || fail 'package receipt query failed; recovery files retained'
-while IFS= read -r installed; do if [ "$installed" = "$receipt" ]; then /usr/sbin/pkgutil --forget "$receipt" >/dev/null; fi; done <<EOF
+retain_receipt=0
+transaction="$relay/InstallerTransaction"
+if present "$transaction"; then
+    directory "$transaction"
+    regular "$transaction/state.plist" 600
+    directory "$transaction/old"
+    if [ "$(/usr/bin/plutil -extract phase raw -o - "$transaction/state.plist")" = prepared ] &&
+        [ "$(/usr/bin/plutil -extract upgrade raw -o - "$transaction/state.plist")" = yes ] &&
+        [ "$(/usr/bin/plutil -extract clientUID raw -o - "$transaction/state.plist")" = "$bound_uid" ]; then
+        directory "$transaction/old/proxy"
+        regular "$transaction/old/proxy/installation.json" 644
+        [ "$(/usr/bin/plutil -extract clientUID raw -o - "$transaction/old/proxy/installation.json")" = "$bound_uid" ] || fail 'upgrade backup user changed'
+        retain_receipt=1
+    fi
+fi
+while IFS= read -r installed; do if [ "$installed" = "$receipt" ] && [ "$retain_receipt" = 0 ]; then /usr/sbin/pkgutil --forget "$receipt" >/dev/null; fi; done <<EOF
 $inventory
 EOF
 for file in "$helper" "$daemon" "$client" "$manifest" "$root/.install-client" "$root/.install-helper" "$root/.install-daemon" "$root/.install-manifest" "$root/.install-uid"; do

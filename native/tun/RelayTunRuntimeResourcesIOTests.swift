@@ -297,7 +297,7 @@ private final class Fixture {
             try require(RelayTunManagedInstallation.profile(nil) == .official)
             let profile = try RelayTunManagedInstallation.profile("local-geodata-v1")
             try require(profile == .localGeodata)
-            try require(RelayTunManagedInstallation.pins(profile)["arm64"]?.0 == "e9327b2ce0e5c4405ce2640145339be9e315943bdeb63ffee4b3f4fe18bee419")
+            try require(RelayTunManagedInstallation.pins(profile)["arm64"]?.0 == "a7dcd3ffe59be033ed1b4000a4ae90acdf2ab41450536e02445692ea124195c2")
             try require(RelayTunManagedInstallation.pins(.official)["arm64"]?.0 == "f3e8ae41397c08cbf900ce1f7c8a168285d29954e9bca5d84d69a2b2561adfe9")
             for invalid: Any in ["official", "local-geodata-v2", NSNull(), true, ["local-geodata-v1"]] {
                 var rejected = false

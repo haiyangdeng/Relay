@@ -24,7 +24,7 @@ async function fixture(
 ): Promise<void> {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'relay-core-resource-')))
   try {
-    const data = Buffer.alloc(1_000_000)
+    const data = Buffer.alloc(1024 * 1024 + 17)
     data.writeUInt32LE(0xfeedfacf, 0)
     data.writeUInt32LE(0x100000c, 4)
     const file = join(root, 'inert-macho-fixture')
@@ -46,7 +46,7 @@ describe('Pinned independent core resources and inert runtime constraints', () =
         '架构'
       )
       const changed = await readFile(file)
-      changed[100] = 1
+      changed[changed.length - 1] = 1
       await writeFile(file, changed)
       await expect(verifyCoreExecutable(file, pin)).rejects.toThrow('摘要')
       await writeFile(file, changed.subarray(0, 100))

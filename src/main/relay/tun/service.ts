@@ -1,5 +1,8 @@
 import { randomUUID } from 'crypto'
 import { lstat, realpath } from 'fs/promises'
+import { projectProxyGroups } from '../clash-backend'
+import { validateCoreMode } from '../../../shared/relay/core'
+import { localProxyPort } from '../../../shared/relay/local-proxy'
 import type { TrafficUsageConnectionSnapshot } from '../../../shared/trafficUsage'
 import type { TrafficHistoryOwner } from '../../../shared/relay/traffic-history'
 import {
@@ -53,6 +56,13 @@ import {
 import type { RuleProviderResourceCandidate } from '../resources/rule-provider-candidate'
 import type { RelayProfileSelection } from '../../../shared/relay/runtime'
 import type { TunRuleProviderEntry } from '../../../shared/relay/tun-rule-providers'
+import {
+  applyTunFixedGroups,
+  restoreTunSavedSelectors,
+  tunGroupSelections,
+  type ProxyGroupAction,
+  type ProxyGroupChannel
+} from './proxy-groups'
 import type { createTunSmartToolsChannel } from './smart-tools-channel'
 import type { TunPlanEvidence } from './plan'
 import {
@@ -105,6 +115,11 @@ export class TunStartFailure extends Error {
   }
 }
 
+// Only a strictly bound negative native receipt proves that the terminal
+// resource-release action did not close its command channel.
+export class TunResourcesReleaseDenied extends Error {}
+export class TunDisposalDenied extends Error {}
+
 export interface TunSessionBinding {
   sessionId: string
   evidenceSHA256: string
@@ -134,6 +149,7 @@ export interface TunWorkDirectoryProof {
 // ordinary-UID child. No renderer-selected FD, executable, path or PID enters it.
 // Mutations must be idempotent for a retry of this same held capability only.
 export interface TunSessionHost {
+  readonly proxyGroups?: ProxyGroupChannel
   readonly runtimeReader?: TunRuntimeReader
   readonly rulesChannel?: TunRulesChannel
   readonly resourcesChannel?: TunResourcesChannel
@@ -153,8 +169,15 @@ export interface TunSessionHost {
   // releasing recovery ownership; resolution requires a native acknowledgment.
   revokeActivation(): Promise<void>
   dispose(): Promise<void>
+  // Managed hosts may release their stopped child/device capability while
+  // retaining evidence of external proxy changes. Success proves the child and
+  // device are gone and the route/DNS baseline is restored.
+  disposeReleased?(): Promise<void>
 }
 export interface TunSessionCandidate {
+  fixedGroups?: { name: string; member: string }[]
+  readSavedSelectors?(): Promise<Map<string, string>>
+  profileId?: string
   // Can be assembled from CompleteConfigurationService.takeChecked(); the
   // checked configuration/assets/pins remain private to the main process.
   evidence: TunPlanEvidence
@@ -300,6 +323,7 @@ export function createTunSessionService(adapters: {
     binding: TunSessionBinding | undefined,
     latest: TunHostObservation | undefined,
     disposePending: { host: TunSessionHost; restored: TunHostObservation } | undefined,
+    releasedDisposePending: { host: TunSessionHost } | undefined,
     revoking: { host: TunSessionHost; promise: Promise<void> } | undefined,
     revocationFailed = false,
     closing: Promise<boolean> | undefined
@@ -313,6 +337,7 @@ export function createTunSessionService(adapters: {
   let loaded:
     | {
         host: TunSessionHost
+        profileId?: string
         binding: TunSessionBinding
         configuration: string
         mode?: string
@@ -394,9 +419,11 @@ export function createTunSessionService(adapters: {
     loaded = undefined
     phase = 'uncertain'
     warnings = [
-      disposePending
-        ? '本次网络及设备恢复已有终端证据，宿主退出尚未确认；保留本次宿主，请重试完成停用。'
-        : 'TUN会话结果未确认；保留本次宿主及恢复能力，请复核后明确停用。'
+      releasedDisposePending
+        ? '本次核心已停止，宿主资源释放及退出尚未确认；保留本次宿主，请重试完成停用。'
+        : disposePending
+          ? '本次网络及设备恢复已有终端证据，宿主退出尚未确认；保留本次宿主，请重试完成停用。'
+          : 'TUN会话结果未确认；保留本次宿主及恢复能力，请复核后明确停用。'
     ]
     notify()
   }
@@ -462,24 +489,55 @@ export function createTunSessionService(adapters: {
       uncertain()
       // A terminal capability may already have closed its control channel;
       // no activation remains after its verified network/device restoration.
-      if (!disposePending) revokeActivation(host)
+      if (!disposePending && !releasedDisposePending) revokeActivation(host)
     } else {
       if (phase === 'prepared') phase = 'idle'
       notify()
     }
   }
-  const stopCurrent = async (reason: 'stop' | 'quit'): Promise<TunSessionResult> => {
-    if (busy || resourcesPending || revoking || !host || !binding)
-      throw new Error('请等待当前操作结束并选择本次TUN会话。')
-    const owned = host
-    begin()
-    proof = undefined
-    ++generation
-    let failureStage = 'confirmation'
+  const disposeReleasedOwned = async (owned: TunSessionHost): Promise<void> => {
+    if (host !== owned || !binding || !owned.disposeReleased)
+      throw new Error('本次TUN资源释放能力已变化。')
+    // Once attempted, the native command channel may already be terminal.
+    // Retain that exact capability for disposal-only retry even if IO exit
+    // confirmation fails after the terminal native acknowledgment.
+    releasedDisposePending = { host: owned }
+    await whenRevoked()
     try {
-      if (!(await adapters.confirmStop(state(), reason))) return result('cancelled')
+      await owned.disposeReleased()
+    } catch (error) {
+      if (error instanceof TunResourcesReleaseDenied) releasedDisposePending = undefined
+      throw error
+    }
+    await whenRevoked()
+    host = undefined
+    loaded = undefined
+    latest = undefined
+    binding = undefined
+    disposePending = undefined
+    releasedDisposePending = undefined
+    phase = 'released'
+    revocationFailed = false
+    warnings = ['TUN 已关闭，路由和 DNS 已恢复。保留当前系统代理设置。']
+  }
+  // The caller owns the existing lifecycle operation. Startup compensation
+  // must not reenter stopCurrent or wait for the busy operation it is inside.
+  const restoreOwned = async (
+    owned: TunSessionHost,
+    reason: 'stop' | 'startup'
+  ): Promise<TunSessionResult> => {
+    let failureStage = 'session-binding',
+      coreStopped = false
+    try {
+      if (host !== owned || !binding) throw new Error('本次TUN恢复宿主已变化。')
       phase = 'stopping'
       notify()
+      if (releasedDisposePending) {
+        failureStage = 'released-host-dispose'
+        if (releasedDisposePending.host !== owned) throw new Error('本次宿主资源释放能力已变化。')
+        await disposeReleasedOwned(owned)
+        return result('released')
+      }
       // Stop only the native host's held ordinary-UID child and FD copies.
       // A stopped core or released helper FD alone cannot complete recovery.
       if (disposePending) {
@@ -490,6 +548,7 @@ export function createTunSessionService(adapters: {
       } else {
         failureStage = 'core-stop'
         accept(await owned.stopCore(), 'coreStopped')
+        coreStopped = true
         failureStage = 'device-release'
         accept(await owned.release(), 'released')
         failureStage = 'restoration-check'
@@ -510,9 +569,51 @@ export function createTunSessionService(adapters: {
       revocationFailed = false
       warnings = []
       return result('restored')
+    } catch (error) {
+      const disposalDenied =
+        failureStage === 'host-dispose' &&
+        error instanceof TunDisposalDenied &&
+        disposePending?.host === owned
+      if (
+        adapters.execution === 'core-managed' &&
+        ((coreStopped && ['device-release', 'restoration-check'].includes(failureStage)) ||
+          disposalDenied) &&
+        owned.disposeReleased
+      ) {
+        // A bound refusal proves normal disposal did not terminate the host.
+        // Its old restoration proof no longer describes the changed baseline.
+        if (disposalDenied) disposePending = undefined
+        try {
+          await disposeReleasedOwned(owned)
+          return result('released')
+        } catch {
+          // Retain the terminal attempt for an explicitly authorized retry;
+          // no other command may reuse a possibly closed native channel.
+          failureStage += '/released-host-dispose'
+        }
+      }
+      uncertain()
+      warnings.push(
+        reason === 'startup'
+          ? `TUN启动恢复失败阶段：${failureStage}。`
+          : `TUN停用失败阶段：${failureStage}。`
+      )
+      return result('uncertain')
+    }
+  }
+  const stopCurrent = async (reason: 'stop' | 'quit'): Promise<TunSessionResult> => {
+    if (busy || resourcesPending || revoking || !host || !binding)
+      throw new Error('请等待当前操作结束并选择本次TUN会话。')
+    const owned = host
+    begin()
+    proof = undefined
+    ++generation
+    try {
+      if (!(await adapters.confirmStop(state(), reason))) return result('cancelled')
+      return await restoreOwned(owned, 'stop')
     } catch {
       uncertain()
-      warnings.push(`TUN停用失败阶段：${failureStage}。`)
+      warnings.push('TUN停用失败阶段：confirmation。')
       return result('uncertain')
     } finally {
       end()
@@ -992,7 +1093,51 @@ export function createTunSessionService(adapters: {
     },
     confirm: (report) => adapters.confirmRuleProvider?.(report) ?? Promise.resolve(false)
   })
+  const proxyPageOwner = () => {
+    const active = loaded
+    if (
+      !active ||
+      !active.profileId ||
+      host !== active.host ||
+      !host.proxyGroups ||
+      busy ||
+      closing ||
+      revoking ||
+      phase !== 'active' ||
+      latest?.phase !== 'active'
+    )
+      return undefined
+    const runtime = JSON.parse(active.configuration)
+    return {
+      kind: 'tun-managed' as const,
+      instanceId: active.binding.sessionId,
+      configurationRevision: active.binding.runtimeConfigurationSHA256,
+      profileId: active.profileId,
+      mode: validateCoreMode(active.mode ?? runtime.mode ?? 'rule')
+    }
+  }
+  const readProxyTable = async (action: ProxyGroupAction) => {
+    const active = loaded,
+      owner = proxyPageOwner()
+    if (!active || !owner || !active.host.proxyGroups) throw new Error('TUN 节点会话尚未就绪。')
+    const nodes = await active.host.proxyGroups(action)
+    if (loaded !== active || proxyPageOwner()?.instanceId !== owner.instanceId)
+      throw new Error('TUN 节点会话已切换。')
+    return { nodes, mode: owner.mode, runtime: JSON.parse(active.configuration) }
+  }
   return {
+    proxyPageOwner,
+    async proxyGroups(showHidden: boolean) {
+      const { nodes, runtime, mode } = await readProxyTable({ action: 'groups' })
+      return projectProxyGroups(new Map(Object.entries(nodes)), runtime, mode, showHidden)
+    },
+    async changeProxy(action: Exclude<ProxyGroupAction, { action: 'groups' }>) {
+      await readProxyTable(action)
+    },
+    async proxySelections() {
+      const { nodes } = await readProxyTable({ action: 'groups' })
+      return tunGroupSelections(nodes)
+    },
     async smartTools(
       raw: unknown,
       confirmClear: (inspection: SmartToolsInspection) => Promise<boolean> = async () => false
@@ -1103,6 +1248,26 @@ export function createTunSessionService(adapters: {
       }
     },
     state,
+    systemProxyListener(sessionId: string | undefined): { httpPort: number; mixedPort?: number } {
+      const active = loaded
+      if (
+        !active ||
+        active.host !== host ||
+        binding?.sessionId !== sessionId ||
+        active.binding.sessionId !== sessionId ||
+        busy ||
+        closing ||
+        revoking ||
+        phase !== 'active' ||
+        latest?.phase !== 'active'
+      )
+        throw new Error('TUN 的代理监听尚未确认。')
+      // The native receipt binds this session to these exact launch bytes.
+      // System proxy needs its ordinary ports, even when runtime export is unavailable.
+      const config: Record<string, unknown> = JSON.parse(active.configuration)
+      const mixedPort = config['mixed-port'] ? localProxyPort(config['mixed-port']) : undefined
+      return { httpPort: localProxyPort(config.port || mixedPort), mixedPort }
+    },
     readRuleProviders: ruleProviders.read,
     replaceRuleProvider: ruleProviders.replace,
     invalidateRuleProviders: ruleProviders.invalidate,
@@ -1493,7 +1658,13 @@ export function createTunSessionService(adapters: {
         proof = {
           public: structuredClone(output),
           request,
-          candidate: { evidence, recheck: () => candidate.recheck() },
+          candidate: {
+            evidence,
+            profileId: candidate.profileId,
+            fixedGroups: structuredClone(candidate.fixedGroups),
+            readSavedSelectors: candidate.readSavedSelectors,
+            recheck: () => candidate.recheck()
+          },
           runtime,
           generation: epoch
         }
@@ -1596,12 +1767,23 @@ export function createTunSessionService(adapters: {
           failureStage = 'network-activate'
           accept(await owner.activate(), 'active')
         }
+        if (current.candidate.readSavedSelectors) {
+          failureStage = 'saved-selector-restore'
+          const saved = await current.candidate.readSavedSelectors()
+          live()
+          if (saved.size) await restoreTunSavedSelectors(owner.proxyGroups, saved, live)
+        }
+        if (current.candidate.fixedGroups?.length) {
+          failureStage = 'fixed-group-handoff'
+          await applyTunFixedGroups(owner.proxyGroups, current.candidate.fixedGroups, live)
+        }
         failureStage = 'active-preparation-validity'
         live()
         phase = 'active'
         if (current.runtime.version === 2)
           loaded = {
             host: owner,
+            profileId: current.candidate.profileId,
             binding: { ...binding },
             configuration: current.runtime.configuration
           }
@@ -1609,8 +1791,17 @@ export function createTunSessionService(adapters: {
         return result('started')
       } catch (error) {
         if (host) {
+          const owned = host
           uncertain()
-          revokeActivation(host)
+          revokeActivation(owned)
+          if (current.runtime.version === 2) {
+            // Starting this owned managed core also owns recovery of a failed
+            // attempt. Preserve the legacy descriptor path and never request
+            // fresh UI authority to undo an unsuccessful launch.
+            await whenRevoked()
+            ++generation
+            await restoreOwned(owned, 'startup')
+          }
         } else {
           binding = undefined
           latest = undefined
@@ -1619,7 +1810,7 @@ export function createTunSessionService(adapters: {
         }
         const detail = error instanceof TunStartFailure ? `/${error.code}` : ''
         warnings.push(`TUN启动失败阶段：${failureStage}${detail}。`)
-        return result(host ? 'uncertain' : 'failed')
+        return result(host || phase === 'uncertain' ? 'uncertain' : 'failed')
       } finally {
         if (!host && phase === 'prepared') phase = 'idle'
         end()
@@ -1638,7 +1829,7 @@ export function createTunSessionService(adapters: {
       // A terminal host may already have closed its command channel. Preserve
       // its verified recovery and pending disposal rather than issue another
       // command or let a status receipt replace that terminal evidence.
-      if (disposePending) return state()
+      if (disposePending || releasedDisposePending) return state()
       begin()
       const epoch = generation
       try {
@@ -1665,7 +1856,8 @@ export function createTunSessionService(adapters: {
         invalidatePending()
         await whenIdle()
         if (!host) return true
-        return (await stopCurrent('quit')).status === 'restored'
+        await stopCurrent('quit')
+        return !host
       }
       closing = close().finally(() => {
         closing = undefined

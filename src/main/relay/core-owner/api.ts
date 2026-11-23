@@ -1,5 +1,6 @@
 import { request } from 'http'
 import { lstat, realpath } from 'fs/promises'
+import { mihomoPathSegment } from '../core/mihomo-path'
 import type { OwnedCoreRequestGuards } from '../core/owned-runtime'
 
 // Minimal adaptation of owned-runtime.ts's existing bounded private Unix API.
@@ -113,7 +114,7 @@ export function createCoreOwnerAPI(options: {
       )
     )
       throw new Error('组或成员名称无效。')
-    return encodeURIComponent(value)
+    return mihomoPathSegment(value)
   }
   return {
     read(

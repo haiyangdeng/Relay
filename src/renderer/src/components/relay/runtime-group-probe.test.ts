@@ -195,21 +195,15 @@ describe('runtime toolbar isolated group test', () => {
 
 describe('whole runtime group refresh feedback', () => {
   const groups = [
-    { name: 'PROXY', all: [{ name: 'A' }, { name: 'DIRECT' }] },
+    { name: 'PROXY', all: [{ name: 'A' }, { name: 'DIRECT' }, { name: 'OnlyChild' }] },
     {
       name: 'GLOBAL',
       all: [{ name: 'DIRECT' }, { name: 'REJECT' }, { name: 'A' }, { name: 'PROXY' }]
     }
   ] as IMihomoMixedGroup[]
-  it('refreshes every member and nested leaf once, including same-name cards in other groups', () => {
-    expect(runtimeProbeMembers('PROXY', groups)).toEqual(['PROXY', 'A', 'DIRECT'])
-    expect(runtimeProbeMembers('GLOBAL', groups)).toEqual([
-      'GLOBAL',
-      'DIRECT',
-      'REJECT',
-      'A',
-      'PROXY'
-    ])
+  it('measures only direct members of the clicked group, including nested groups as a single outbound', () => {
+    expect(runtimeProbeMembers('PROXY', groups)).toEqual(['A', 'DIRECT', 'OnlyChild'])
+    expect(runtimeProbeMembers('GLOBAL', groups)).toEqual(['DIRECT', 'REJECT', 'A', 'PROXY'])
   })
   it('leaves missing outcomes as errors instead of manufacturing delays or timeouts', () => {
     for (const name of ['DIRECT', 'REJECT', 'COMPATIBLE', 'PROXY', 'GLOBAL', 'A']) {

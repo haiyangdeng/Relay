@@ -9,6 +9,7 @@ import {
   submitSystemProxy,
   canPrepareSystemProxy,
   systemProxyPortFromCore,
+  systemProxyListenerPort,
   selectedSystemProxyServices
 } from './system-proxy-actions'
 
@@ -146,6 +147,42 @@ describe('one-action system proxy workflow', () => {
     }
   )
 
+  it('treats an already completed startup restore as enabled but still lets Apply Settings update it', async () => {
+    const report = {
+      status: 'active',
+      recordID: evidenceId,
+      canRestore: true,
+      canApply: true,
+      warnings: []
+    }
+    const plan = { ...preparation('apply'), alreadyApplied: true, report }
+    const invoke = vi.fn(async (channel: string) =>
+      channel === 'relaySystemProxyPrepare' ? plan : undefined
+    )
+    await expect(submitSystemProxy('enable', settings, invoke, () => {})).resolves.toMatchObject({
+      status: 'applied',
+      report
+    })
+    expect(invoke.mock.calls.map(([name]) => name)).toEqual([
+      'relaySystemProxyPrepare',
+      'relaySystemProxyCancel'
+    ])
+    invoke.mockClear()
+    await submitSystemProxy('apply', settings, invoke, () => {})
+    expect(invoke.mock.calls.map(([name]) => name)).toEqual([
+      'relaySystemProxyPrepare',
+      'relaySystemProxyExecute'
+    ])
+  })
+  it('preserves a manually edited HTTP target and rejects the HTTP-only port for SOCKS', async () => {
+    const invoke = vi.fn(async () => ({ httpPort: 7892, mixedPort: 7890 }))
+    expect(
+      await systemProxyListenerPort(invoke, () => true, { mode: 'manual', socks: false }, 19000)
+    ).toBe(19000)
+    await expect(
+      systemProxyListenerPort(invoke, () => true, { mode: 'manual', socks: true }, 7892)
+    ).rejects.toThrow('不支持 SOCKS')
+  })
   it('follows a later core port until the user edits it, without adopting an unavailable endpoint', () => {
     expect(systemProxyPortFromCore(18191, false, 18192)).toBe(18192)
     expect(systemProxyPortFromCore(7890, true, 18192)).toBe(7890)

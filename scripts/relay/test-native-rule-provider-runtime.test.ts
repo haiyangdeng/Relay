@@ -33,7 +33,7 @@ import type {
 import { freeFixturePort } from './fixtures/local-network'
 
 const signedCore = resolve('../artifacts/core-geodata-provider-v1p1-pair-20261102/arm64/mihomo'),
-  coreSHA256 = 'e9327b2ce0e5c4405ce2640145339be9e315943bdeb63ffee4b3f4fe18bee419',
+  coreSHA256 = 'a7dcd3ffe59be033ed1b4000a4ae90acdf2ab41450536e02445692ea124195c2',
   hash = (bytes: Buffer): string => createHash('sha256').update(bytes).digest('hex'),
   uid = process.getuid?.()
 interface Held {

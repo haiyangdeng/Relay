@@ -33,8 +33,9 @@ export interface SimpleFileRecord<T> {
   exists: boolean
 }
 
-type PrivateDocumentArea = 'configuration' | 'app-update' | 'ui-reset' | 'diagnostics'
+type PrivateDocumentArea = 'core' | 'configuration' | 'app-update' | 'ui-reset' | 'diagnostics'
 const privateDocumentNames: Record<PrivateDocumentArea, readonly string[]> = {
+  core: ['core-startup.json'],
   configuration: [
     'simple.json',
     'simple-publication.json',
@@ -48,6 +49,7 @@ const privateDocumentNames: Record<PrivateDocumentArea, readonly string[]> = {
   diagnostics: ['external-verification.json']
 }
 const privateDocumentDirectories: Record<PrivateDocumentArea, readonly string[]> = {
+  core: ['Core'],
   configuration: ['Configuration'],
   'app-update': ['Transactions', 'AppUpdate'],
   'ui-reset': ['Transactions', 'UIReset'],
@@ -62,6 +64,7 @@ export class SimplePrivateDocumentFile<T> {
   constructor(
     context: RelayStateContext,
     name:
+      | 'core-startup.json'
       | 'simple.json'
       | 'simple-publication.json'
       | 'app-update-installation.json'
@@ -84,7 +87,7 @@ export class SimplePrivateDocumentFile<T> {
         ? 64 * 1024
         : name === 'simple.json'
           ? SIMPLE_DOCUMENT_BYTES
-          : name === 'system-proxy-defaults.json'
+          : name === 'system-proxy-defaults.json' || name === 'core-startup.json'
             ? 512 * 1024
             : 16 * 1024
   }

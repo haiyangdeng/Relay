@@ -4,6 +4,17 @@ import type {
   CompleteConfigurationResult
 } from '../../../../shared/relay/configuration'
 
+export async function readTunProfileId(
+  invoke: (channel: string, ...args: unknown[]) => Promise<unknown>
+): Promise<string> {
+  const config = (await invoke('getProfileConfig', true)) as IProfileConfig
+  if (config.current) return config.current
+  const inventory = (await invoke('relayProfileList')) as RelayProfileInventory
+  const id = inventory.profiles[0]?.id
+  if (!id) throw new Error('没有可用配置，请先导入或选择配置。')
+  return id
+}
+
 export async function prepareCurrentTunConfiguration(
   profileId: string,
   options: {
@@ -18,10 +29,10 @@ export async function prepareCurrentTunConfiguration(
   const inventory = (await options.invoke('relayProfileList')) as RelayProfileInventory
   check()
   const profile = inventory.profiles.find((item) => item.id === profileId)
-  if (!profile) throw new Error('当前配置不存在，请重新选择。')
+  if (!profile) throw new Error('没有可用配置，请先导入或选择配置。')
   const plan = (await options.invoke('relayTunConfigurationPrepare', {
-    id: profile.id,
-    sha256: profile.sha256
+    intent: 'enable',
+    profile: { id: profile.id, sha256: profile.sha256 }
   })) as CompleteConfigurationPlan
   check()
   if (plan.profileId !== profile.id || !plan.readyForParserCheck)

@@ -5,6 +5,7 @@ import { FaMapPin } from 'react-icons/fa6'
 import { useTranslation } from 'react-i18next'
 import { KeyedMutator } from 'swr'
 import { showError } from '@renderer/utils/error-display'
+import type { RelayProxyPageOwner } from '../../../../shared/relay/local-proxy'
 
 export type ProxyDelay = number | null | { error: string } | { label: string; detail: string }
 
@@ -12,11 +13,12 @@ interface Props {
   mutateProxies: KeyedMutator<IMihomoMixedGroup[]>
   onProxyDelay: (
     proxy: IMihomoProxy | IMihomoGroup,
-    url?: string
+    group: IMihomoMixedGroup
   ) => Promise<IMihomoDelay | undefined>
   proxyDisplayMode: 'simple' | 'full'
   proxy: IMihomoProxy | IMihomoGroup
   group: IMihomoMixedGroup
+  relayOwner?: RelayProxyPageOwner
   onSelect: (group: string, proxy: string) => void
   selected: boolean
   isGroupTesting?: boolean
@@ -40,6 +42,7 @@ const ProxyItemBase: React.FC<Props> = (props) => {
     proxy,
     selected,
     onSelect,
+    relayOwner,
     onProxyDelay,
     isGroupTesting = false,
     delayOverride,
@@ -75,13 +78,23 @@ const ProxyItemBase: React.FC<Props> = (props) => {
   const onDelay = useCallback((): void => {
     if (testDisabled || loading) return
     setLoading(true)
-    void onProxyDelay(proxy, group.testUrl)
+    void onProxyDelay(proxy, group)
       .catch(showError)
       .finally(() => {
         mutateProxies()
         setLoading(false)
       })
-  }, [proxy, group.testUrl, onProxyDelay, mutateProxies, testDisabled, loading])
+  }, [proxy, group, onProxyDelay, mutateProxies, testDisabled, loading])
+
+  const unpin = async (): Promise<void> => {
+    try {
+      if (relayOwner) await mihomoUnfixedProxy(group.name, relayOwner)
+      else await mihomoUnfixedProxy(group.name)
+      await mutateProxies()
+    } catch (error) {
+      showError(error)
+    }
+  }
 
   const fixed = useMemo(() => group.fixed && group.fixed === proxy.name, [group.fixed, proxy.name])
 
@@ -115,10 +128,7 @@ const ProxyItemBase: React.FC<Props> = (props) => {
                   isIconOnly
                   title={t('proxies.unpin')}
                   color="danger"
-                  onPress={async () => {
-                    await mihomoUnfixedProxy(group.name)
-                    mutateProxies()
-                  }}
+                  onPress={unpin}
                   variant="light"
                   className="h-5 p-0 text-sm"
                 >
@@ -176,10 +186,7 @@ const ProxyItemBase: React.FC<Props> = (props) => {
                   isIconOnly
                   title={t('proxies.unpin')}
                   color="danger"
-                  onPress={async () => {
-                    await mihomoUnfixedProxy(group.name)
-                    mutateProxies()
-                  }}
+                  onPress={unpin}
                   variant="light"
                   className="h-5 p-0 text-sm"
                 >
@@ -219,6 +226,7 @@ const ProxyItem = React.memo(ProxyItemBase, (prevProps, nextProps) => {
     prevProps.proxy.history === nextProps.proxy.history &&
     prevProps.selected === nextProps.selected &&
     prevProps.proxyDisplayMode === nextProps.proxyDisplayMode &&
+    prevProps.group.name === nextProps.group.name &&
     prevProps.group.fixed === nextProps.group.fixed &&
     prevProps.isGroupTesting === nextProps.isGroupTesting &&
     prevProps.delayOverride === nextProps.delayOverride &&

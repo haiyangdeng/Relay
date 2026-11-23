@@ -3,7 +3,10 @@
 The integrated Installer installs a root-owned `RelayUninstallSupervisor` and a
 byte-identical copy of the sealed App's `RelayNative` under
 `/Library/Application Support/Relay/Uninstall`. It registers the fixed installed
-App and console account only after the App and proxy helper installation succeed.
+App and console account only after the App, proxy helper and managed TUN installation succeed.
+All three components bind the actual logged-in ordinary console user during the
+same administrator-authorized installation; the package contains no build-user UID.
+Both fixed TUN Core architectures come from the verified sealed App resources.
 Installation is not successful until the independent LaunchDaemon confirms that
 it is monitoring the registered App. No main App, core or network operation is
 started by the Installer.
@@ -13,10 +16,23 @@ cleanup even after the main App has quit. The watched file identity, current
 location and installation generation are the trigger. A missing original path,
 an ordinary move, or replacement during an update is not sufficient evidence of
 uninstall intent. An unlinked held vnode also admits cleanup, covering immediate
-emptying of Trash and direct deletion. The current Installer rejects an existing
-App and the App opens that Installer rather than replacing its bundle itself;
-any future updater that unlinks the old bundle before installing a replacement
-must add an explicit update transaction guard. User restoration runs as the bound ordinary user; privileged
+emptying of Trash and direct deletion. The integrated Installer admits only an
+idle, fully verified existing installation for upgrade. It checks the console UID,
+App registration, component hashes, fixed inventory and managed-core lifetime lock
+before any change, then stops only its own monitor and proxy administrator helper.
+The old App and components are renamed into a root-private transaction directory
+before Installer writes the replacement. Failures restore the old inodes and
+service registration; user configuration directories are never moved or removed.
+The same verified package can resume an interrupted prepare or finish committed
+backup cleanup. A partial replacement App at the fixed, root-owned destination is
+moved intact into `InstallerRecovery/<UUID>` before restoring the old App; that
+uncertain payload is retained for review and is never recursively deleted.
+Foreign bundle identities and unsafe paths still block recovery. The irreversible
+commit marker prevents a backup-cleanup failure from restoring a partially deleted
+old version or tearing down the complete new installation. A same-generation accepted Trash intent
+during the new monitor handshake retains its durable cleanup owner and retires the
+old upgrade backup. The App opens this Installer rather than overwriting itself.
+Other updaters must use an equivalent guard. User restoration runs as the bound ordinary user; privileged
 component removal uses the existing fixed-path, owner-checked uninstall paths.
 The monitor removes itself last.
 

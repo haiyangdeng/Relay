@@ -2,7 +2,7 @@
   <img src="site/assets/app-icon.png" width="96" alt="Relay 应用图标" />
   <h1>Relay</h1>
   <p><strong>macOS 上的代理管理与 AI 客户端网络工作区。</strong></p>
-  <p><a href="https://haiyangdeng.github.io/Relay/">产品介绍</a> · <a href="https://github.com/haiyangdeng/Relay/releases/tag/v1.0.0">下载 V1.0.0</a> · <a href="docs/BUILD.md">源码构建</a> · <a href="https://github.com/haiyangdeng/Relay/issues">问题反馈</a> · <a href="#支持-relay">支持 Relay</a></p>
+  <p><a href="https://haiyangdeng.github.io/Relay/">产品介绍</a> · <a href="https://github.com/haiyangdeng/Relay/releases/latest">下载 V1.0.0</a> · <a href="docs/BUILD.md">源码构建</a> · <a href="https://github.com/haiyangdeng/Relay/issues">问题反馈</a> · <a href="#支持-relay">支持 Relay</a></p>
 </div>
 
 Relay 基于 Clash Party 与 Mihomo，将配置、订阅、代理组、分流规则、连接和日志集中在一个 macOS 应用中，并提供 Claude / Codex 专用代理与 Claude Code 配置工作流。
@@ -13,14 +13,14 @@ Relay 基于 Clash Party 与 Mihomo，将配置、订阅、代理组、分流规
 
 ## 下载
 
-需要 **macOS 13 或更新版本**。安装包包含 Relay App、系统代理管理员组件和自动卸载组件。
+需要 **macOS 13 或更新版本**。两种安装包都使用空白配置。首次安装后，把自己的 YAML 配置或订阅导入 Relay。
 
-| Mac 类型                    | 安装包                                                                                                                   |
-| --------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| Apple Silicon（M 系列芯片） | [Relay-1.0.0-macOS-arm64.pkg](https://github.com/haiyangdeng/Relay/releases/download/v1.0.0/Relay-1.0.0-macOS-arm64.pkg) |
-| Intel                       | [Relay-1.0.0-macOS-x64.pkg](https://github.com/haiyangdeng/Relay/releases/download/v1.0.0/Relay-1.0.0-macOS-x64.pkg)     |
+| Mac 类型                    | 实际构建          | 安装包                                                                                                                 |
+| --------------------------- | ----------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| Apple Silicon（M 系列芯片） | 23，包含 TUN      | [下载 Apple Silicon 安装包](https://github.com/haiyangdeng/Relay/releases/latest/download/Relay-1.0.0-macOS-arm64.pkg) |
+| Intel                       | 2，沿用首发安装包 | [下载 Intel 安装包](https://github.com/haiyangdeng/Relay/releases/latest/download/Relay-1.0.0-macOS-x64.pkg)           |
 
-[版本说明与 SHA256SUMS](https://github.com/haiyangdeng/Relay/releases/tag/v1.0.0)。本版使用 **ad-hoc 签名，未使用 Developer ID，也未获 Apple 公证**。管理员组件安装需要 macOS 授权；安装器会拒绝覆盖已有 Relay 应用、组件或运行实例。
+安装管理员组件需要 macOS 授权。安装包采用 ad-hoc 签名，未经 Apple 公证。[版本说明与 SHA256SUMS](https://github.com/haiyangdeng/Relay/releases/tag/v1.0.0-build.23) · [Intel 构建 2 对应源码](https://github.com/haiyangdeng/Relay/tree/v1.0.0)
 
 ## 功能
 
@@ -37,11 +37,11 @@ Relay 基于 Clash Party 与 Mihomo，将配置、订阅、代理组、分流规
 
 Relay 的专用代理处理实际进入该入口的流量。**V1.0.0 不提供系统级按进程防直连保证**；客户端忽略代理或命中 `NO_PROXY` 例外时，不能推断连接已受保护。
 
-源码保留虚拟网卡（TUN）能力；TUN 需要匹配的额外组件。现有独立 TUN 安装包绑定构建用户，不作为面向任意用户的公开下载。本页的 App 一体安装包不包含通用 TUN 安装组件。
+Apple Silicon 构建 23 已将 TUN 组件合并到主安装包。系统代理和 TUN 可分别开启。关闭 TUN 后，Relay 恢复此前的系统代理状态。Intel 构建 2 提供系统代理，其安装包不含通用 TUN 组件。
 
 与其他代理软件交替使用时，应错开监听端口，并让一个软件管理系统代理或 TUN 路由。客户端配置不会因为同时打开两个软件而自动切换。更多说明见 [使用与保护范围](docs/USAGE.md)。
 
-自动卸载会删除 Relay 的专属数据，请先导出需要保留的配置。无法确认归属或恢复失败时会保留恢复记录。本轮已完成退出／卸载离线回归、独立审阅、双架构打包及资源签名核对；**真实 Finder、系统权限和完整系统卸载链尚未进行本轮实机验收**。
+自动卸载会删除 Relay 的专属数据，请先导出需要保留的配置。无法确认归属或恢复失败时会保留恢复记录。Apple Silicon 构建 23 在 macOS 虚拟机中经过两轮移入废纸篓、全新安装和首次导入测试。验证范围见[发行说明](release-notes.md)。
 
 ## 本地开发
 

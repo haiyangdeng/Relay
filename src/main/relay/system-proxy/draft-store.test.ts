@@ -80,6 +80,20 @@ describe('Portable system proxy draft schema', () => {
 })
 
 describe.runIf(process.getuid !== undefined)('System proxy draft private storage', () => {
+  it('shares concurrent launch and panel reads, with independent results and caller checks', async () => {
+    const { store } = await fixture()
+    let checks = 0
+    const first = store.read()
+    const second = store.read(() => {
+      ++checks
+    })
+    expect(store.isReading()).toBe(true)
+    const [one, two] = await Promise.all([first, second])
+    expect(checks).toBe(2)
+    expect(one).toEqual(two)
+    expect(one.document).not.toBe(two.document)
+    expect(store.isReading()).toBe(false)
+  })
   it('reads defaults without creating a file or carrying service selection/Clash port', async () => {
     const { context, store } = await fixture()
     expect(store.path).toBe(join(context.stateRoot, 'Configuration/system-proxy-defaults.json'))
