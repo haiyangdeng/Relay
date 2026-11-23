@@ -32,15 +32,43 @@ function fixture(enabled = false) {
       openAtLogin = value
     })
   }
+  const approval = vi.fn(async () => 'requiresApproval' as const)
   const registration = createLoginItemRegistration({
     platform: 'darwin',
     packaged: true,
     home,
-    legacy
+    legacy,
+    approval
   })
-  return { registration, legacy }
+  return { registration, legacy, approval }
 }
 describe('removable Relay login item registration', () => {
+  it('observes only the current plist and never migrates or registers anything on a state read', async () => {
+    const { registration, legacy, approval } = fixture(true)
+    await expect(registration.state()).resolves.toEqual({
+      configured: false,
+      approval: 'notRegistered'
+    })
+    expect(approval).not.toHaveBeenCalled()
+    expect(legacy.read).not.toHaveBeenCalled()
+    expect(legacy.write).not.toHaveBeenCalled()
+    mkdirSync(join(home, 'Library', 'LaunchAgents'), { recursive: true, mode: 0o700 })
+    writeFileSync(path(), relayLoginItemContents, { mode: 0o600 })
+    await expect(registration.state()).resolves.toEqual({
+      configured: true,
+      approval: 'requiresApproval'
+    })
+    expect(approval).toHaveBeenCalledExactlyOnceWith(path(), process.getuid?.())
+    expect(legacy.write).not.toHaveBeenCalled()
+    approval.mockImplementationOnce(async () => {
+      rmSync(path())
+      return 'requiresApproval'
+    })
+    await expect(registration.state()).resolves.toEqual({
+      configured: false,
+      approval: 'notRegistered'
+    })
+  })
   it('preserves enabled preference before unregistering the legacy main app', () => {
     const { registration, legacy } = fixture(true)
     legacy.write.mockImplementationOnce(() => {

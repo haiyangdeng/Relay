@@ -492,7 +492,11 @@ vi.mock('./shell/login-item-registration', () => ({
     legacy
   }: {
     legacy: { read(): { openAtLogin: boolean }; write(enabled: boolean): void }
-  }) => ({ ...legacy, migrate: () => {} })
+  }) => ({
+    ...legacy,
+    migrate: () => {},
+    state: async () => ({ configured: legacy.read().openAtLogin, approval: 'notRegistered' })
+  })
 }))
 
 vi.mock('electron', () => ({
@@ -8068,7 +8072,8 @@ describe('Relay entry IPC integration with simulated OS adapters', () => {
       undefined,
       undefined,
       { http: 18191, socks: 0, mixed: 0, redir: 0 },
-      undefined
+      undefined,
+      new Map()
     )
     expect(invoke('relayStatus')).toMatchObject({
       coreRunning: true,
@@ -8133,7 +8138,8 @@ describe('Relay entry IPC integration with simulated OS adapters', () => {
       undefined,
       undefined,
       { http: 18191, socks: 0, mixed: 0, redir: 0 },
-      undefined
+      undefined,
+      new Map()
     )
     expect(fixture.confirmRestore).not.toHaveBeenCalled()
     fixture.confirmRestore.mockResolvedValueOnce({ response: 1, checkboxChecked: false })
@@ -9194,21 +9200,31 @@ describe('Relay entry IPC integration with simulated OS adapters', () => {
     expect(fixture.loginRead).not.toHaveBeenCalled()
     expect(fixture.loginWrite).not.toHaveBeenCalled()
     expect(() => invoke('checkAutoRun')).toThrow('已打包')
+    expect(() => invoke('relayLoginItemState')).toThrow('已打包')
     await expect(invoke('enableAutoRun') as Promise<unknown>).rejects.toThrow('已打包')
     expect(fixture.loginWrite).not.toHaveBeenCalled()
     await fixture.afterBackupRestore?.()
     expect(fixture.loginWrite).not.toHaveBeenCalled()
   })
-  it('registers current-app login channels once and rejects paths and untrusted senders before OS access', () => {
+  it('registers current-app login channels once and rejects paths and untrusted senders before OS access', async () => {
     fixture.packaged = true
     expect(invoke('checkAutoRun')).toBe(false)
-    for (const channel of ['checkAutoRun', 'enableAutoRun', 'disableAutoRun']) {
+    await expect(invoke('relayLoginItemState')).resolves.toEqual({
+      configured: false,
+      approval: 'notRegistered'
+    })
+    for (const channel of [
+      'relayLoginItemState',
+      'checkAutoRun',
+      'enableAutoRun',
+      'disableAutoRun'
+    ]) {
       expect(() => invoke(channel, { path: '/Other.app' })).toThrow('不接受')
       const handler = fixture.handlers.get(channel)
       expect(handler).toBeDefined()
       expect(() => handler?.({ sender: {}, senderFrame: {} })).toThrow('Untrusted')
     }
-    expect(fixture.loginRead).toHaveBeenCalledOnce()
+    expect(fixture.loginRead).toHaveBeenCalledTimes(2)
     expect(fixture.loginWrite).not.toHaveBeenCalled()
   })
   it('modifies directly on explicit action and targets only the current-app login item', async () => {

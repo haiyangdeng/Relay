@@ -64,6 +64,7 @@ import { RelayBackupPanel } from '@renderer/components/relay/backup-panel'
 import { RelayBackupAccountPanel } from '@renderer/components/relay/backup-account-panel'
 import { RelayWebdavBackupSchedulerPanel } from '@renderer/components/relay/webdav-backup-scheduler-panel'
 import { RelayWebdavDirectoryPanel } from '@renderer/components/relay/webdav-directory-panel'
+import { RelayLoginItemSetting } from '@renderer/components/relay/login-item-setting'
 import { RelayShellPanel } from '@renderer/components/relay/shell-panel'
 import { RelayVariantsPanel } from '@renderer/components/relay/variants-panel'
 import { RelayRuntimeInfoPanel } from '@renderer/components/relay/runtime-info-panel'
@@ -1690,6 +1691,9 @@ export default function RelayWorkspace(): React.JSX.Element {
         <RelayWorkspaceSection panels={['overview']} active={activePanel}>
           <RelayOverviewPanel status={status} active={activePanel === 'overview'} />
         </RelayWorkspaceSection>
+        {(activePanel === 'settings' || activePanel === 'shell') && (
+          <RelayLoginItemSetting busy={busy} onBusy={setBusy} />
+        )}
         <RelayWorkspaceSection panels={['settings']} active={activePanel}>
           <RelayUIPreferencesPanel busy={busy} onBusy={setBusy} />
         </RelayWorkspaceSection>

@@ -148,6 +148,11 @@ export interface RelayShellState extends RelayShellRecord {
   warnings: string[]
 }
 
+export interface RelayLoginItemState {
+  configured: boolean
+  approval: 'enabled' | 'requiresApproval' | 'notRegistered' | 'notFound' | 'unknown'
+}
+
 export interface RelayLoginItemResult {
   status: 'applied' | 'unchanged' | 'cancelled' | 'uncertain'
   openAtLogin?: boolean

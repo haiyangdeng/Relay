@@ -3650,6 +3650,7 @@ app
         executable: app.getPath('exe')
       }),
       read: () => loginRegistration.read(),
+      state: () => loginRegistration.state(),
       write: (openAtLogin) => loginRegistration.write(openAtLogin),
       assertIdle: () => {
         if (
@@ -5024,6 +5025,7 @@ app
       'relayBackupRecoveryPrepare',
       'relayBackupRecoveryCommit',
       'relayBackupRecoveryCancel',
+      'relayLoginItemState',
       'checkAutoRun',
       'enableAutoRun',
       'disableAutoRun',
@@ -7823,6 +7825,11 @@ app
       trusted(event)
       if (input !== undefined) throw new Error('取消不接受参数。')
       backupService.cancel()
+    })
+    ipcMain.handle('relayLoginItemState', (event, input: unknown) => {
+      trusted(event)
+      if (input !== undefined) throw new Error('登录项读取不接受参数。')
+      return loginItem.state()
     })
     ipcMain.handle('checkAutoRun', (event, input: unknown) => {
       trusted(event)

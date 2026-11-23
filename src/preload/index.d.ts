@@ -14,7 +14,11 @@ import type {
 } from '../shared/relay/connection-app-info'
 import type { RelayLibraryInventory, RelayLibraryChange } from '../shared/relay/library'
 import type { TunIpcApi } from '../shared/relay/tun'
-import type { RelayShellTheme } from '../shared/relay/shell'
+import type {
+  RelayLoginItemResult,
+  RelayLoginItemState,
+  RelayShellTheme
+} from '../shared/relay/shell'
 import type { TrafficHistoryOwner, TrafficHistoryState } from '../shared/relay/traffic-history'
 import type { RelaySimpleIpcApi } from '../shared/relay/simple'
 import type { RelaySimpleSourcesIpcApi } from '../shared/relay/simple-sources'
@@ -30,6 +34,9 @@ type RelayTypedIpcApi = TunIpcApi &
   RelaySimpleSourcesIpcApi &
   RelaySimpleConfigurationIpcApi &
   RelaySimplePublicationIpcApi & {
+    relayLoginItemState(): Promise<RelayLoginItemState>
+    enableAutoRun(): Promise<RelayLoginItemResult>
+    disableAutoRun(): Promise<RelayLoginItemResult>
     relayShellThemeFilesImport(): Promise<RelayShellTheme[] | undefined>
     relayShellTrayIconImport(): Promise<string | undefined>
     relaySubStoreAdvancedAcquire(request: SubStoreAdvancedStart): Promise<SubStoreState>

@@ -10,7 +10,6 @@ import {
   shellTrayProxyGroupStyles,
   shellTrayProxyGroupLabels,
   shellEnvironmentLabels,
-  type RelayLoginItemResult,
   type RelayShellAction,
   type RelayShellActionRequest,
   type RelayShellRestartResult,
@@ -44,8 +43,6 @@ export function RelayShellPanel({
     [report, setReport] = useState<RelayShellState>(),
     [pending, setPending] = useState(false),
     [notice, setNotice] = useState(''),
-    [loginEnabled, setLoginEnabled] = useState<boolean>(),
-    [loginNotice, setLoginNotice] = useState(''),
     [trayIconKind, setTrayIconKind] = useState<RelayShellTrayIconKind>('default'),
     [themeId, setThemeId] = useState(''),
     [themeName, setThemeName] = useState(''),
@@ -131,41 +128,6 @@ export function RelayShellPanel({
       } catch {
         /* Keep an unknown state rather than an earlier success. */
       }
-    } finally {
-      operation.current = false
-      setPending(false)
-      onBusy(false)
-    }
-  }
-  const runLogin = async (action: 'read' | 'enable' | 'disable'): Promise<void> => {
-    if (busy || operation.current) return
-    operation.current = true
-    setPending(true)
-    onBusy(true)
-    setLoginNotice('')
-    try {
-      if (action === 'read') {
-        const observed: unknown = await window.electron.ipcRenderer.invoke('checkAutoRun')
-        if (typeof observed !== 'boolean') throw new Error('登录项读取未确认。')
-        setLoginEnabled(observed)
-        setLoginNotice('已读取系统登录项；没有更改。')
-      } else {
-        const result = (await window.electron.ipcRenderer.invoke(
-          action === 'enable' ? 'enableAutoRun' : 'disableAutoRun'
-        )) as RelayLoginItemResult
-        setLoginEnabled(result.openAtLogin)
-        setLoginNotice(
-          result.status === 'cancelled'
-            ? '已取消，登录项未更改。'
-            : result.status === 'uncertain'
-              ? '更改未确认，请核对系统设置后重新读取。'
-              : '已重新读取确认系统登录项。'
-        )
-        if (result.warnings.length) setLoginNotice(result.warnings.join(' '))
-      }
-    } catch {
-      setLoginEnabled(undefined)
-      setLoginNotice('登录项状态未确认；仅已打包的macOS Relay支持此操作，请重新读取。')
     } finally {
       operation.current = false
       setPending(false)
@@ -376,26 +338,6 @@ export function RelayShellPanel({
               : '尚未初始化'
           : '尚未读取'}
       </p>
-      <h3>登录后启动</h3>
-      <p>
-        仅操作当前打包Relay。系统登录项与“启动时隐藏窗口”分别设置；备份恢复不会自动添加登录项，也不会清理其他应用的登录项。
-      </p>
-      <p>
-        系统读回：
-        {loginEnabled === undefined ? '尚未读取／待核对' : loginEnabled ? '已开启' : '已关闭'}
-      </p>
-      <div className="relay-action">
-        <button disabled={locked} onClick={() => void runLogin('read')}>
-          读取登录项
-        </button>
-        <button disabled={locked || loginEnabled !== false} onClick={() => void runLogin('enable')}>
-          开启登录后启动…
-        </button>
-        <button disabled={locked || loginEnabled !== true} onClick={() => void runLogin('disable')}>
-          关闭登录后启动…
-        </button>
-      </div>
-      {loginNotice && <p role="status">{loginNotice}</p>}
       {acquiring && (
         <button
           onClick={() => {

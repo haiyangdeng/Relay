@@ -275,6 +275,7 @@ export const relayUpstreamChannels = [
   'queryTrafficUsageBreakdown',
   'importTrafficUsage',
   'clearTrafficUsage',
+  'relayLoginItemState',
   'checkAutoRun',
   'enableAutoRun',
   'disableAutoRun',

@@ -9,6 +9,7 @@ function fixture() {
       executable: '/Applications/Relay.app/Contents/MacOS/Relay'
     })),
     read: vi.fn(() => ({ openAtLogin: enabled })),
+    state: vi.fn(async () => ({ configured: enabled, approval: 'unknown' as const })),
     write: vi.fn((next: boolean) => {
       enabled = next
     }),

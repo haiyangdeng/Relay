@@ -130,3 +130,17 @@ it('exposes the visible-workspace handshake and removes only its own show listen
   expect(on).toHaveBeenCalledTimes(1)
   expect(invoke).toHaveBeenCalledTimes(1)
 })
+
+it('exposes the read-only login item state without accepting other service management commands', async () => {
+  Object.defineProperty(process, 'contextIsolated', { configurable: true, value: true })
+  await import('./index')
+  const api = expose.mock.calls.find(([name]) => name === 'electron')?.[1]
+  const state = { configured: true, approval: 'requiresApproval' }
+  invoke.mockReset().mockResolvedValue(state)
+  await expect(api.ipcRenderer.invoke('relayLoginItemState')).resolves.toEqual(state)
+  expect(invoke).toHaveBeenCalledExactlyOnceWith('relayLoginItemState')
+  await expect(api.ipcRenderer.invoke('relayLoginItemApprove')).rejects.toThrow(
+    'Invalid invoke channel'
+  )
+  expect(invoke).toHaveBeenCalledOnce()
+})

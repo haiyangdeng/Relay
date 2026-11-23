@@ -303,6 +303,7 @@ const validInvokeChannels = [
   'importTrafficUsage',
   'clearTrafficUsage',
   // AutoRun
+  'relayLoginItemState',
   'checkAutoRun',
   'enableAutoRun',
   'disableAutoRun',

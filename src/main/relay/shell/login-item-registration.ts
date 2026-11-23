@@ -1,6 +1,8 @@
 import { lstatSync, mkdirSync, readFileSync, realpathSync, unlinkSync } from 'fs'
 import { join } from 'path'
+import type { RelayLoginItemState } from '../../../shared/relay/shell'
 import { atomicWriteFileSync } from '../../utils/safeFile'
+import { readLoginItemApproval } from './login-item-approval'
 
 export const relayLoginItemName = 'local.relay.network.login.plist'
 export const relayLoginItemContents = `<?xml version="1.0" encoding="UTF-8"?>
@@ -20,9 +22,21 @@ export function createLoginItemRegistration(options: {
   packaged: boolean
   home: string
   legacy: { read(): { openAtLogin: boolean }; write(enabled: boolean): void }
-}): { migrate(): void; read(): { openAtLogin: boolean }; write(enabled: boolean): void } {
+  approval?: typeof readLoginItemApproval
+}): {
+  migrate(): void
+  read(): { openAtLogin: boolean }
+  state(): Promise<RelayLoginItemState>
+  write(enabled: boolean): void
+} {
   if (options.platform !== 'darwin' || !options.packaged)
-    return { ...options.legacy, migrate: () => {} }
+    return {
+      ...options.legacy,
+      migrate: () => {},
+      state: async () => {
+        throw new Error('登录项仅支持已打包的macOS Relay。')
+      }
+    }
   const path = join(options.home, 'Library', 'LaunchAgents', relayLoginItemName)
   const uid = process.getuid?.()
   let migrated = false
@@ -108,6 +122,13 @@ export function createLoginItemRegistration(options: {
   }
   return {
     migrate,
+    state: async () => {
+      const off: RelayLoginItemState = { configured: false, approval: 'notRegistered' }
+      if (!present()) return off
+      const approval =
+        uid === undefined ? 'unknown' : await (options.approval ?? readLoginItemApproval)(path, uid)
+      return present() ? { configured: true, approval } : off
+    },
     read: () => {
       migrate()
       return { openAtLogin: present() }

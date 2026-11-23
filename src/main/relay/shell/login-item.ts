@@ -1,10 +1,11 @@
-import type { RelayLoginItemResult } from '../../../shared/relay/shell'
+import type { RelayLoginItemResult, RelayLoginItemState } from '../../../shared/relay/shell'
 
 // Only the current packaged app is addressed. No legacy login-item cleanup,
 // executable path, startup arguments or persisted grant is accepted from IPC.
 export function createLoginItemService(adapters: {
   identity(): { supported: boolean; executable: string }
   read(): { openAtLogin: boolean }
+  state(): Promise<RelayLoginItemState>
   write(enabled: boolean): void
   confirm(enabled: boolean): Promise<boolean>
   assertIdle(): void
@@ -23,14 +24,21 @@ export function createLoginItemService(adapters: {
     if (typeof value !== 'boolean') throw new Error('系统登录项状态未确认。')
     return value
   }
+  const assertReadable = (): void => {
+    if (pending) throw new Error('登录项操作尚未结束。')
+    identity()
+  }
   return {
     isBusy: (): boolean => pending,
     whenIdle: (): Promise<void> =>
       pending ? new Promise((resolve) => waiters.push(resolve)) : Promise.resolve(),
     read(): boolean {
-      if (pending) throw new Error('登录项操作尚未结束。')
-      identity()
+      assertReadable()
       return read()
+    },
+    state(): Promise<RelayLoginItemState> {
+      assertReadable()
+      return adapters.state()
     },
     async set(enabled: boolean): Promise<RelayLoginItemResult> {
       if (typeof enabled !== 'boolean') throw new Error('登录项开关无效。')
