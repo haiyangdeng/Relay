@@ -1,6 +1,6 @@
 # 构建与发布准备
 
-本标签对应 **V1.0.0 构建 24** 的 Apple Silicon 与 Intel 安装包。两包使用同一份[构建源码](https://github.com/haiyangdeng/Relay/releases/download/v1.0.0-build.24/Relay-1.0.0.24-source.tar.gz)。
+本标签对应 **V1.0.0 构建 25** 的 Apple Silicon 与 Intel 安装包。两包使用同一份[构建源码](https://github.com/haiyangdeng/Relay/releases/download/v1.0.0-build.25/Relay-1.0.0.25-source.tar.gz)。
 
 ## 工具
 
@@ -81,6 +81,6 @@ python3 scripts/relay/build-public.py tun-installer --execute
 
 ## 发布验证
 
-构建 24 已在 Apple Silicon macOS 虚拟机验证从构建 23 升级、真实重启登录、首次开启系统代理、开启与关闭 TUN 以及普通代理恢复。Intel 安装包已核对架构与应用签名，原生登录和联网仍待实测。[发行说明](../release-notes.md)
+Apple Silicon 构建 25 已在 macOS 虚拟机验证从构建 24 升级、两处端口显示及两个 HTTP 入口的实际请求。Intel 包已完成归档、架构与签名检查，原生运行待验证。[发行说明](../release-notes.md)
 
 从干净检出重建时，应保留本次对应源码快照、工具版本、资源摘要、展开的 Installer 检查结果和安装包 SHA256SUMS。不同 SDK、Go 或签名工具的输出不应被描述为已经逐字节可复现。发布步骤见 [`RELEASING.md`](RELEASING.md)。

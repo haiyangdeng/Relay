@@ -78,7 +78,7 @@ afterEach(() => {
   for (const cleanup of hooks.cleanups.splice(0)) cleanup()
   vi.unstubAllGlobals()
 })
-function fixture() {
+function fixture(ports?: { http: number; mixed: number }) {
   let tree: ReactNode,
     panelBusy = false
   const state = {
@@ -124,6 +124,8 @@ function fixture() {
     hooks.dirty = false
     hooks.cursor = 0
     tree = RelaySystemProxyPanel({
+      defaultSettings: ports && { port: ports.http },
+      mixedPort: ports?.mixed,
       busy: state.busy || panelBusy,
       active: state.active,
       onBusy: (value) => {
@@ -170,6 +172,21 @@ function fixture() {
 }
 
 describe('System proxy panel visibility lifecycle (injected hooks/IPC)', () => {
+  it('displays the configured mixed port for SOCKS and the HTTP port for HTTP alone or PAC', async () => {
+    const f = fixture({ http: 7892, mixed: 7890 })
+    f.state.draft.document.socks = true
+    await f.flush()
+    expect(f.find('代理端口').value).toBe(7890)
+    ;(f.find('代理模式').onSelectionChange as (key: string) => void)('pac')
+    await f.flush()
+    expect(f.find('代理端口').value).toBe(7892)
+    ;(f.find('代理模式').onSelectionChange as (key: string) => void)('manual')
+    await f.flush()
+    ;(f.find('同时启用 SOCKS').onChange as (event: unknown) => void)({ target: { checked: false } })
+    await f.flush()
+    expect(f.find('代理端口').value).toBe(7892)
+    f.onlyReads()
+  })
   it('recovers the unchanged active panel after hide/show with one read and no writes', async () => {
     const f = fixture()
     await f.flush()

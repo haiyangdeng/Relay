@@ -6,7 +6,7 @@
     <meta name="theme-color" content="#0b1221" />
     <meta
       name="description"
-      content="Relay 是面向 macOS 的网络工作台。管理 Mihomo 代理、订阅与分流，为 Claude 和 Codex 配置专用连接。Apple Silicon 和 Intel 构建 24 均集成 TUN，可在设置中启用登录自启动。安装后导入自己的配置即可使用。"
+      content="Relay 是面向 macOS 的网络工作台。管理 Mihomo 代理、订阅与分流，为 Claude 和 Codex 配置专用连接。Apple Silicon 和 Intel 构建 25 修正了系统代理端口显示。安装后导入自己的配置即可使用。"
     />
     <title>Relay V1.0.0 — macOS 代理与 AI 客户端工作区</title>
     <link rel="canonical" href="https://haiyangdeng.github.io/Relay/" />
@@ -117,7 +117,7 @@
         <div>
           <span class="release-pill">V1.0.0</span>
           <p>
-            准备好下一段连接。<span id="release-strip-note">Apple Silicon 与 Intel · 构建 24</span>
+            准备好下一段连接。<span id="release-strip-note">Apple Silicon 与 Intel · 构建 25</span>
           </p>
         </div>
         <a href="#downloads">查看下载 <span>↗</span></a>
@@ -321,7 +321,7 @@
           <div class="version-picker">
             <label for="release-version">版本</label
             ><select id="release-version">
-              <option value="1.0.0-build.24">V1.0.0 · 2026-11-24</option>
+              <option value="1.0.0-build.25">V1.0.0 · 构建 25 · 2026-11-24</option>
             </select>
           </div>
         </div>
@@ -370,35 +370,37 @@
             初始配置为空，请在「订阅管理」导入自己的 YAML 或订阅。
           </p>
           <p>
-            构建 24 的两个安装包都集成了 TUN。Apple Silicon 版已通过登录自启和联网实测，Intel
-            版已核对架构与应用签名，原生运行仍待验证。
+            构建 25 修正了系统代理端口显示。Apple Silicon 版已验证原位升级和两个 HTTP 入口。Intel
+            版已核对归档、架构与应用签名，原生运行待验证。
           </p>
           <a
             id="release-notes-link"
-            href="https://github.com/haiyangdeng/Relay/releases/tag/v1.0.0-build.24"
+            href="https://github.com/haiyangdeng/Relay/releases/tag/v1.0.0-build.25"
             >阅读完整版本说明与已知边界 ↗</a
           >
         </div>
         <details class="release-notes">
           <summary><span>V1.0.0 版本内容</span><span aria-hidden="true">＋</span></summary>
           <ul id="release-notes-list">
-            <li>在设置首页打开「开机自启动」，下次登录当前账户时自动打开 Relay。</li>
+            <li>
+              系统代理使用混合端口时，设置页与配置检测页现在都显示这一端口，独立 HTTP 入口仍可使用。
+            </li>
           </ul>
         </details>
         <noscript
           ><p class="scope-note">
             <a
-              href="https://github.com/haiyangdeng/Relay/releases/download/v1.0.0-build.24/Relay-1.0.0-macOS-arm64.pkg"
-              >下载 Apple Silicon 构建 24</a
+              href="https://github.com/haiyangdeng/Relay/releases/download/v1.0.0-build.25/Relay-1.0.0-macOS-arm64.pkg"
+              >下载 Apple Silicon 构建 25</a
             >
             ·
             <a
-              href="https://github.com/haiyangdeng/Relay/releases/download/v1.0.0-build.24/Relay-1.0.0-macOS-x64.pkg"
-              >下载 Intel 构建 24</a
+              href="https://github.com/haiyangdeng/Relay/releases/download/v1.0.0-build.25/Relay-1.0.0-macOS-x64.pkg"
+              >下载 Intel 构建 25</a
             >
             ·
             <a
-              href="https://github.com/haiyangdeng/Relay/releases/download/v1.0.0-build.24/SHA256SUMS"
+              href="https://github.com/haiyangdeng/Relay/releases/download/v1.0.0-build.25/SHA256SUMS"
               >SHA256SUMS</a
             >
           </p></noscript

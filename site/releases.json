@@ -1,8 +1,37 @@
 {
   "schemaVersion": 1,
   "repositoryUrl": "https://github.com/haiyangdeng/Relay",
-  "currentVersion": "1.0.0-build.24",
+  "currentVersion": "1.0.0-build.25",
   "releases": [
+    {
+      "version": "1.0.0-build.25",
+      "status": "published",
+      "publishedAt": "2026-11-24",
+      "minimumOS": "macOS 13 或更高版本",
+      "notes": [
+        "修正系统代理设置页和配置检测页的端口显示。系统代理使用混合端口时，两处都显示该端口。独立 HTTP 入口继续可用。",
+        "Apple Silicon 版在 macOS 15.7.7 虚拟机从构建 24 升级后，18 个配置与历史文件的摘要一致。测试请求分别通过混合入口和独立 HTTP 入口抵达预期出口。",
+        "Intel 安装包已核对架构、应用签名与归档，尚待原生 Intel Mac 运行验证。"
+      ],
+      "assets": [
+        {
+          "arch": "arm64",
+          "label": "Apple Silicon",
+          "filename": "Relay-1.0.0-macOS-arm64.pkg",
+          "url": "https://github.com/haiyangdeng/Relay/releases/download/v1.0.0-build.25/Relay-1.0.0-macOS-arm64.pkg",
+          "sha256": "efb5e46ccca86db791ca317bfa2faa835a5b891eef3ecd373ac8c774dc07e9f5",
+          "buildVersion": "25"
+        },
+        {
+          "arch": "x64",
+          "label": "Intel",
+          "filename": "Relay-1.0.0-macOS-x64.pkg",
+          "url": "https://github.com/haiyangdeng/Relay/releases/download/v1.0.0-build.25/Relay-1.0.0-macOS-x64.pkg",
+          "sha256": "cac51f471f0db115e8a9c8dbfb602b6c2d03790ce851d5a58fa0d4cb33bc094b",
+          "buildVersion": "25"
+        }
+      ]
+    },
     {
       "version": "1.0.0-build.24",
       "status": "published",

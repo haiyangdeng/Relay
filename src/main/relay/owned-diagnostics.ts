@@ -106,13 +106,13 @@ export function createOwnedDiagnosticService(adapters: {
       const pid = before.pid
       const ordinary =
         running && before.httpPort ? localProxyPortsFor(before.httpPort, before.ports) : undefined
-      const ports: OwnedDiagnosticPorts = {
+      let ports: OwnedDiagnosticPorts = {
         systemHTTPPort: ordinary ? ordinary.http || ordinary.mixed : null,
         systemSOCKSPort: ordinary ? ordinary.socks || ordinary.mixed || null : null,
         codeHTTPPort: running ? (before.dedicated?.httpPort ?? null) : null,
         dedicatedSOCKSPort: running ? (before.dedicated?.socksPort ?? null) : null
       }
-      const [native, associated, external, guard, ordinaryLive] = await Promise.all([
+      const [native, associated, external, guard, separateListenersLive] = await Promise.all([
         adapters.clients(ports),
         adapters.association(),
         adapters.evidence(),
@@ -129,9 +129,28 @@ export function createOwnedDiagnosticService(adapters: {
             ).then((results) => results.every(Boolean))
           : false
       ])
+      const report = structuredClone(native)
+      let ordinaryLive = separateListenersLive
+      const mixed = ordinary?.mixed
+      if (
+        !report.snapshot.systemProxy &&
+        pid &&
+        mixed &&
+        (ports.systemHTTPPort !== mixed || ports.systemSOCKSPort !== mixed)
+      ) {
+        // macOS may send HTTP, HTTPS and SOCKS to the same mixed listener.
+        const mixedPorts = { ...ports, systemHTTPPort: mixed, systemSOCKSPort: mixed }
+        const alternate = await adapters.clients(mixedPorts).catch(() => undefined)
+        if (alternate?.snapshot.systemProxy) {
+          ports = mixedPorts
+          ordinaryLive = await (adapters.listener ?? ownsHttpListener)(pid, mixed).catch(
+            () => false
+          )
+          report.snapshot.systemProxy = true
+        }
+      }
       if (identity(adapters.state()) !== identity(before))
         throw new Error('检测期间 Relay 实例或配置已变化，请重新检测。')
-      const report = structuredClone(native)
       delete report.owned
       const snapshot = report.snapshot
       const associationMatches =

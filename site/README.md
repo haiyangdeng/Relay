@@ -21,7 +21,7 @@ python3 -m http.server 4173 --bind 127.0.0.1 --directory site
 
 ## 下载清单
 
-`releases.json` 管理发行标签（不含 v 前缀）、发布日期、架构、文件名、下载 URL 与 SHA-256。同一应用版本的不同发行记录按日期区分；每张下载卡显示该架构资产的实际构建号。早期两个架构共用构建号的记录沿用发行级 buildVersion。下载仅在版本为 `published` 且同仓库 Release URL、文件名及摘要全部匹配时开放。JSON 不可用或数据无效时关闭动态入口；无 JavaScript 的访客仍可通过 GitHub Release 链接下载。
+`releases.json` 管理发行标签（不含 v 前缀）、发布日期、架构、文件名、下载 URL 与 SHA-256。同一应用版本的不同发行记录按构建号和日期区分；每张下载卡显示该架构资产的实际构建号。早期两个架构共用构建号的记录沿用发行级 buildVersion。下载仅在版本为 `published` 且同仓库 Release URL、文件名及摘要全部匹配时开放。JSON 不可用或数据无效时关闭动态入口；无 JavaScript 的访客仍可通过 GitHub Release 链接下载。
 
 更新版本时先上传 Release 安装包并核对远端资源，再将已验证的数据写入清单。不能仅靠本地校验声称远端资源已可访问。
 

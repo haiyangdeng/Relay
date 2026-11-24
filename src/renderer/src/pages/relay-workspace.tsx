@@ -2155,6 +2155,7 @@ export default function RelayWorkspace(): React.JSX.Element {
             defaultSettings={{
               port: relayProxyRunning(localState) ? (localState?.httpPort ?? localPort) : localPort
             }}
+            mixedPort={relayProxyRunning(localState) ? localState?.ports?.mixed : localPorts.mixed}
             busy={operationBusy || simplePending || !!tunState?.pending || tunUnconfirmed}
             onBusy={setBusy}
           />

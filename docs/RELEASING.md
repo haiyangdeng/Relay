@@ -1,6 +1,6 @@
 # Relay 发布流程
 
-公开仓库：<https://github.com/haiyangdeng/Relay>。应用版本沿用 1.0.0。同一版本再次发行时创建独立标签，例如 `v1.0.0-build.24`；保留原标签及资产，按架构分别记录实际构建号和对应源码。
+公开仓库：<https://github.com/haiyangdeng/Relay>。应用版本沿用 1.0.0。同一版本再次发行时创建独立标签，例如 `v1.0.0-build.25`；保留原标签及资产，按架构分别记录实际构建号和对应源码。
 
 ## 对应源码与产物
 
@@ -16,7 +16,7 @@
 
 - `Relay-1.0.0-macOS-arm64.pkg`
 - `Relay-1.0.0-macOS-x64.pkg`
-- `Relay-1.0.0.24-source.tar.gz`
+- `Relay-1.0.0.25-source.tar.gz`
 - `SHA256SUMS`
 
 架构文件名保持稳定，因此 `/releases/latest/download/<文件名>` 在新 Release 标为 Latest 后仍能下载。各发行记录使用含标签的链接固定对应字节。
@@ -37,4 +37,4 @@ python3 tools/check-public-source.py
 
 ## TUN 下载范围
 
-构建 24 的 Apple Silicon 和 Intel 安装包都包含 App、系统代理、TUN 和自动卸载组件，安装时绑定目标 Mac 实际登录用户。发布前必须核对密封 App 的 admission pins、TUN client、双架构 Core、安装／升级／回滚及卸载链，并单独记录真实 TUN 验收结果。保留的 `tun-installer` 开发产物仍绑定构建用户 UID，不作为通用公开下载。本轮 Apple Silicon 已在 macOS 虚拟机验证登录自启和联网。Intel 原生运行仍待实测，在 GitHub Release 和站点标明该范围。
+构建 25 的 Apple Silicon 和 Intel 安装包都包含 App、系统代理、TUN 和自动卸载组件，安装时绑定目标 Mac 实际登录用户。发布前必须核对密封 App 的 admission pins、TUN client、双架构 Core、安装／升级／回滚及卸载链，并单独记录真实 TUN 验收结果。保留的 `tun-installer` 开发产物仍绑定构建用户 UID，不作为通用公开下载。本轮 Apple Silicon 验证了系统代理端口显示、配置保留和双入口请求。登录自启和 TUN 的实测记录来自构建 24。Intel 原生运行仍待实测，在 GitHub Release 和站点标明该范围。

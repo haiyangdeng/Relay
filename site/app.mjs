@@ -255,7 +255,8 @@ fetch('./releases.json', { cache: 'no-cache' })
         const downloadable = release.assets.some((asset) =>
           downloadableAsset(release, asset, githubRepository(manifest.repositoryUrl))
         )
-        option.textContent = `V${appVersion(release)} · ${downloadable ? release.publishedAt.slice(0, 10) : '待验证'}`
+        const displayVersion = release.version.replace('-build.', ' · 构建 ')
+        option.textContent = `V${displayVersion} · ${downloadable ? release.publishedAt.slice(0, 10) : '待验证'}`
         return option
       })
     )

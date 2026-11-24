@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { LocalProxyState } from '../../shared/relay/local-proxy'
-import { externalDiagnosticRecord } from '../../shared/relay/diagnostic-evidence'
+import {
+  externalDiagnosticRecord,
+  type OwnedDiagnosticPorts
+} from '../../shared/relay/diagnostic-evidence'
 import { validateReadOnlyReport } from '../../shared/relay/protocol'
 import { createOwnedDiagnosticService } from './owned-diagnostics'
 import { readOnlyFixture } from './__fixtures__/read-only'
@@ -98,7 +101,9 @@ export function ownedDiagnosticFixture() {
     state: () => structuredClone(state),
     live: vi.fn(async () => structuredClone(live)),
     association: () => ai.inspect(),
-    clients: vi.fn(async () => structuredClone(report)),
+    clients: vi.fn<(ports: OwnedDiagnosticPorts) => Promise<typeof report>>(async () =>
+      structuredClone(report)
+    ),
     guard: async () => guardReadinessFixture(),
     evidence: vi.fn(async () => ({
       status: 'available' as const,
@@ -170,6 +175,49 @@ describe('Owned Relay diagnostics', () => {
     expect(f.adapters.listener).toHaveBeenCalledWith(123, 18192)
     expect(result.report.snapshot.systemProxy).toBe(false)
     expect(result.report.checks.find((row) => row.id === 'clients')?.state).toBe('attention')
+  })
+  it.each([
+    ['separate', 17301, 17302, true, 1],
+    ['mixed', 17303, 17303, true, 2],
+    ['foreign', 17309, 17309, false, 2],
+    ['unowned mixed', 17303, 17303, false, 2]
+  ] as const)(
+    'compares the %s macOS endpoints to Relay-owned listeners',
+    async (mode, http, socks, matched, calls) => {
+      const f = ownedDiagnosticFixture()
+      f.state.httpPort = 17301
+      f.state.ports = { http: 17301, socks: 17302, mixed: 17303, redir: 0 }
+      f.adapters.clients.mockImplementation(async (ports) => {
+        const report = structuredClone(f.report)
+        report.snapshot.systemProxy =
+          ports.systemHTTPPort === http && ports.systemSOCKSPort === socks
+        return report
+      })
+      f.adapters.listener.mockImplementation(
+        async (_pid?: number, port?: number) => mode !== 'unowned mixed' || port !== 17303
+      )
+      const result = await f.service.observe()
+      expect(result.report.snapshot.systemProxy).toBe(matched)
+      expect(result.owned?.ports.systemHTTPPort).toBe(http === 17303 ? 17303 : 17301)
+      expect(result.owned?.ports.systemSOCKSPort).toBe(http === 17303 ? 17303 : 17302)
+      expect(result.owned?.ports.codeHTTPPort).toBe(17891)
+      expect(f.adapters.clients).toHaveBeenCalledTimes(calls)
+      if (http === 17303) expect(f.adapters.listener).toHaveBeenCalledWith(123, 17303)
+    }
+  )
+  it('keeps the original diagnostic if checking the alternate port fails and skips duplicate candidates', async () => {
+    const f = ownedDiagnosticFixture()
+    f.report.snapshot.systemProxy = false
+    await f.service.observe()
+    expect(f.adapters.clients).toHaveBeenCalledTimes(1)
+    f.state.ports = { http: 18191, socks: 18192, mixed: 18193, redir: 0 }
+    f.adapters.clients
+      .mockResolvedValueOnce(f.report)
+      .mockRejectedValueOnce(new Error('unavailable'))
+    const result = await f.service.observe()
+    expect(result.owned?.ports.systemHTTPPort).toBe(18191)
+    expect(result.report.snapshot.systemProxy).toBe(false)
+    expect(result.owned?.external.bindingMatches).toBe(true)
   })
   it('rejects a changed instance before returning any successful observation', async () => {
     const f = ownedDiagnosticFixture()

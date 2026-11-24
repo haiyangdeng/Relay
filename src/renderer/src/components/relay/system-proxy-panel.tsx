@@ -41,11 +41,13 @@ export function RelaySystemProxyPanel({
   busy,
   onBusy,
   active = true,
+  mixedPort,
   defaultSettings
 }: {
   busy: boolean
   onBusy(value: boolean): void
   active?: boolean
+  mixedPort?: number
   defaultSettings?: Partial<SystemProxySettings>
 }): React.JSX.Element {
   const [settings, setSettings] = useState<SystemProxySettings>(() => ({
@@ -82,7 +84,8 @@ export function RelaySystemProxyPanel({
     if (Object.keys(next).some((key) => key !== 'port' && key !== 'serviceIDs')) setDraftDirty(true)
     setSettings((previous) => ({ ...previous, ...next }))
   }
-  const corePort = defaultSettings?.port
+  const useMixed = settings.mode === 'manual' && settings.socks
+  const corePort = useMixed ? mixedPort : defaultSettings?.port
   useEffect(() => {
     setSettings((previous) => {
       const port = systemProxyPortFromCore(previous.port, portEdited.current, corePort)
@@ -480,7 +483,7 @@ export function RelaySystemProxyPanel({
               type="number"
               min={1024}
               max={65535}
-              value={settings.port}
+              value={useMixed && !corePort && !portEdited.current ? '' : settings.port}
               onChange={(event) => update({ port: Number(event.target.value) })}
             />
           </div>
