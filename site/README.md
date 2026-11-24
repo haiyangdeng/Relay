@@ -5,7 +5,7 @@
 - 线上地址：<https://haiyangdeng.github.io/Relay/>
 - 对应仓库：<https://github.com/haiyangdeng/Relay>
 - 当前发布：<https://github.com/haiyangdeng/Relay/releases/latest>
-- 历史版本：<https://github.com/haiyangdeng/Relay/releases/tag/v1.0.0>
+- 历史版本：<https://github.com/haiyangdeng/Relay/releases>
 
 ## 本地预览
 

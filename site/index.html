@@ -6,7 +6,7 @@
     <meta name="theme-color" content="#0b1221" />
     <meta
       name="description"
-      content="Relay 是面向 macOS 的网络工作台。管理 Mihomo 代理、订阅与分流，为 Claude 和 Codex 配置专用连接。Apple Silicon 构建 23 集成 TUN，Intel 提供构建 2。安装后导入自己的配置即可使用。"
+      content="Relay 是面向 macOS 的网络工作台。管理 Mihomo 代理、订阅与分流，为 Claude 和 Codex 配置专用连接。Apple Silicon 和 Intel 构建 24 均集成 TUN，可在设置中启用登录自启动。安装后导入自己的配置即可使用。"
     />
     <title>Relay V1.0.0 — macOS 代理与 AI 客户端工作区</title>
     <link rel="canonical" href="https://haiyangdeng.github.io/Relay/" />
@@ -117,9 +117,7 @@
         <div>
           <span class="release-pill">V1.0.0</span>
           <p>
-            准备好下一段连接。<span id="release-strip-note"
-              >Apple Silicon 构建 23 · Intel 构建 2</span
-            >
+            准备好下一段连接。<span id="release-strip-note">Apple Silicon 与 Intel · 构建 24</span>
           </p>
         </div>
         <a href="#downloads">查看下载 <span>↗</span></a>
@@ -323,7 +321,7 @@
           <div class="version-picker">
             <label for="release-version">版本</label
             ><select id="release-version">
-              <option value="1.0.0-build.23">V1.0.0 · 2026-11-23</option>
+              <option value="1.0.0-build.24">V1.0.0 · 2026-11-24</option>
             </select>
           </div>
         </div>
@@ -364,7 +362,7 @@
         </div>
         <div class="download-footer">
           <p id="minimum-os">需要 macOS 13 或更高版本</p>
-          <p>ad-hoc 签名 · 未使用 Developer ID，未获 Apple 公证</p>
+          <p>应用采用 ad-hoc 签名，安装包未签名，未经 Apple 公证。</p>
         </div>
         <div class="installation-note">
           <p>
@@ -372,37 +370,35 @@
             初始配置为空，请在「订阅管理」导入自己的 YAML 或订阅。
           </p>
           <p>
-            Apple Silicon 构建 23 已集成 TUN，可与系统代理同时开启。构建 2
-            安装包提供系统代理和自动卸载组件，不含通用 TUN 组件。
+            构建 24 的两个安装包都集成了 TUN。Apple Silicon 版已通过登录自启和联网实测，Intel
+            版已核对架构与应用签名，原生运行仍待验证。
           </p>
           <a
             id="release-notes-link"
-            href="https://github.com/haiyangdeng/Relay/releases/tag/v1.0.0-build.23"
+            href="https://github.com/haiyangdeng/Relay/releases/tag/v1.0.0-build.24"
             >阅读完整版本说明与已知边界 ↗</a
           >
         </div>
         <details class="release-notes">
           <summary><span>V1.0.0 版本内容</span><span aria-hidden="true">＋</span></summary>
           <ul id="release-notes-list">
-            <li>订阅、代理组、分流规则与连接管理。</li>
-            <li>Claude 与 Codex 专用代理，客户端配置备份与恢复。</li>
-            <li>专用浏览器入口与桌面登录恢复流程。</li>
+            <li>在设置首页打开「开机自启动」，下次登录当前账户时自动打开 Relay。</li>
           </ul>
         </details>
         <noscript
           ><p class="scope-note">
             <a
-              href="https://github.com/haiyangdeng/Relay/releases/download/v1.0.0-build.23/Relay-1.0.0-macOS-arm64.pkg"
-              >下载 Apple Silicon 构建 23</a
+              href="https://github.com/haiyangdeng/Relay/releases/download/v1.0.0-build.24/Relay-1.0.0-macOS-arm64.pkg"
+              >下载 Apple Silicon 构建 24</a
             >
             ·
             <a
-              href="https://github.com/haiyangdeng/Relay/releases/download/v1.0.0-build.23/Relay-1.0.0-macOS-x64.pkg"
-              >下载 Intel 构建 2</a
+              href="https://github.com/haiyangdeng/Relay/releases/download/v1.0.0-build.24/Relay-1.0.0-macOS-x64.pkg"
+              >下载 Intel 构建 24</a
             >
             ·
             <a
-              href="https://github.com/haiyangdeng/Relay/releases/download/v1.0.0-build.23/SHA256SUMS"
+              href="https://github.com/haiyangdeng/Relay/releases/download/v1.0.0-build.24/SHA256SUMS"
               >SHA256SUMS</a
             >
           </p></noscript

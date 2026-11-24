@@ -15,12 +15,12 @@ Relay 基于 Clash Party 与 Mihomo，将配置、订阅、代理组、分流规
 
 需要 **macOS 13 或更新版本**。两种安装包都使用空白配置。首次安装后，把自己的 YAML 配置或订阅导入 Relay。
 
-| Mac 类型                    | 实际构建          | 安装包                                                                                                                 |
-| --------------------------- | ----------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| Apple Silicon（M 系列芯片） | 23，包含 TUN      | [下载 Apple Silicon 安装包](https://github.com/haiyangdeng/Relay/releases/latest/download/Relay-1.0.0-macOS-arm64.pkg) |
-| Intel                       | 2，沿用首发安装包 | [下载 Intel 安装包](https://github.com/haiyangdeng/Relay/releases/latest/download/Relay-1.0.0-macOS-x64.pkg)           |
+| Mac 类型                    | 构建 | 验证情况                                             | 安装包                                                                                                                          |
+| --------------------------- | ---- | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| Apple Silicon（M 系列芯片） | 24   | 已在 macOS 15.7.7 虚拟机验证登录自启、系统代理及 TUN | [下载 Apple Silicon 安装包](https://github.com/haiyangdeng/Relay/releases/download/v1.0.0-build.24/Relay-1.0.0-macOS-arm64.pkg) |
+| Intel                       | 24   | 已核对组件架构与应用签名，原生登录与联网仍待实测     | [下载 Intel 安装包](https://github.com/haiyangdeng/Relay/releases/download/v1.0.0-build.24/Relay-1.0.0-macOS-x64.pkg)           |
 
-安装管理员组件需要 macOS 授权。安装包采用 ad-hoc 签名，未经 Apple 公证。[版本说明与 SHA256SUMS](https://github.com/haiyangdeng/Relay/releases/tag/v1.0.0-build.23) · [Intel 构建 2 对应源码](https://github.com/haiyangdeng/Relay/tree/v1.0.0)
+安装管理员组件需要 macOS 授权。应用采用 ad-hoc 签名，安装包未签名，未经 Apple 公证。[发行说明](https://github.com/haiyangdeng/Relay/releases/tag/v1.0.0-build.24) · [SHA256SUMS](https://github.com/haiyangdeng/Relay/releases/download/v1.0.0-build.24/SHA256SUMS) · [构建 24 对应源码](https://github.com/haiyangdeng/Relay/releases/download/v1.0.0-build.24/Relay-1.0.0.24-source.tar.gz)
 
 ## 功能
 
@@ -28,7 +28,7 @@ Relay 基于 Clash Party 与 Mihomo，将配置、订阅、代理组、分流规
 - **系统代理**：管理遵循 macOS 系统代理设置的应用，保留 Relay 修改前的恢复记录。
 - **AI 客户端配置**：Claude / Codex 专用代理；Claude Code 配置草稿、备份、应用与恢复。
 - **浏览器与登录**：独立 Chrome 配置目录和专用代理入口；桌面登录的默认浏览器恢复流程。
-- **日常操作**：菜单栏快捷操作、关闭窗口后后台运行、状态与流量统计、备份与恢复。
+- **日常操作**：在设置首页启用登录自启动、菜单栏快捷操作、关闭窗口后后台运行、状态与流量统计、备份与恢复。
 - **自动卸载**：将已安装的 `Relay.app` 拖入废纸篓后，由独立组件恢复 Relay 管理的配置并清理其进程、组件、登录项、专属数据、缓存与凭据，无需另跑卸载脚本。
 
 ![Relay V1.0.0 Claude Code 配置真实截图](docs/assets/screenshots/configuration.png)
@@ -37,11 +37,11 @@ Relay 基于 Clash Party 与 Mihomo，将配置、订阅、代理组、分流规
 
 Relay 的专用代理处理实际进入该入口的流量。**V1.0.0 不提供系统级按进程防直连保证**；客户端忽略代理或命中 `NO_PROXY` 例外时，不能推断连接已受保护。
 
-Apple Silicon 构建 23 已将 TUN 组件合并到主安装包。系统代理和 TUN 可分别开启。关闭 TUN 后，Relay 恢复此前的系统代理状态。Intel 构建 2 提供系统代理，其安装包不含通用 TUN 组件。
+构建 24 的两种安装包均集成 TUN。系统代理和 TUN 可分别开启。关闭 TUN 后，Relay 恢复此前的系统代理状态。
 
 与其他代理软件交替使用时，应错开监听端口，并让一个软件管理系统代理或 TUN 路由。客户端配置不会因为同时打开两个软件而自动切换。更多说明见 [使用与保护范围](docs/USAGE.md)。
 
-自动卸载会删除 Relay 的专属数据，请先导出需要保留的配置。无法确认归属或恢复失败时会保留恢复记录。Apple Silicon 构建 23 在 macOS 虚拟机中经过两轮移入废纸篓、全新安装和首次导入测试。验证范围见[发行说明](release-notes.md)。
+自动卸载会删除 Relay 的专属数据，请先导出需要保留的配置。无法确认归属或恢复失败时会保留恢复记录。Apple Silicon 构建 23 在 macOS 虚拟机中经过两轮移入废纸篓、全新安装和首次导入测试。构建 24 的升级、登录与联网验收见[发行说明](release-notes.md)。
 
 ## 本地开发
 

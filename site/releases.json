@@ -1,8 +1,37 @@
 {
   "schemaVersion": 1,
   "repositoryUrl": "https://github.com/haiyangdeng/Relay",
-  "currentVersion": "1.0.0-build.23",
+  "currentVersion": "1.0.0-build.24",
   "releases": [
+    {
+      "version": "1.0.0-build.24",
+      "status": "published",
+      "publishedAt": "2026-11-24",
+      "minimumOS": "macOS 13 或更高版本",
+      "notes": [
+        "可在设置首页打开「开机自启动」，下次登录当前 macOS 账户时自动打开 Relay。",
+        "Apple Silicon 版已在 macOS 15.7.7 虚拟机实测登录自启、首次开启系统代理，以及关闭 TUN 后恢复普通代理。",
+        "Intel 版已核对组件架构与应用签名，原生 Intel Mac 上的登录与联网仍待实测。"
+      ],
+      "assets": [
+        {
+          "arch": "arm64",
+          "label": "Apple Silicon",
+          "filename": "Relay-1.0.0-macOS-arm64.pkg",
+          "url": "https://github.com/haiyangdeng/Relay/releases/download/v1.0.0-build.24/Relay-1.0.0-macOS-arm64.pkg",
+          "sha256": "c087f2523708e10aa1a75103f2120716b0580e4c66fd9a7e4f1f8adbb6d3b267",
+          "buildVersion": "24"
+        },
+        {
+          "arch": "x64",
+          "label": "Intel",
+          "filename": "Relay-1.0.0-macOS-x64.pkg",
+          "url": "https://github.com/haiyangdeng/Relay/releases/download/v1.0.0-build.24/Relay-1.0.0-macOS-x64.pkg",
+          "sha256": "d2ea75cd1075f2cc42e55cb1248c6bd5f3e6b2ee8cd8ed845e654458bf472b74",
+          "buildVersion": "24"
+        }
+      ]
+    },
     {
       "version": "1.0.0-build.23",
       "status": "published",

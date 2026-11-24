@@ -44,8 +44,15 @@ def check() -> int:
     try:
         package = json.loads((ROOT / 'package.json').read_text())
         manifest = json.loads((ROOT / 'site/releases.json').read_text())
-        if package['version'] != manifest['currentVersion']:
+        version_pattern = r'(\d+\.\d+\.\d+)(?:-build\.([1-9]\d*))?'
+        current = re.fullmatch(version_pattern, manifest['currentVersion'])
+        if not current or current[1] != package['version']:
             raise ValueError('version-mismatch')
+        if current[2]:
+            builder = (ROOT / 'electron-builder.relay.yml').read_text()
+            build = re.search(r'''^buildVersion:[ \t]*(["']?)([1-9]\d*)\1[ \t]*$''', builder, re.M)
+            if not build or build[2] != current[2]:
+                raise ValueError('build-version-mismatch')
         if manifest.get('schemaVersion') != 1:
             raise ValueError('release-schema')
         releases = manifest['releases']
@@ -59,7 +66,7 @@ def check() -> int:
         if repo is not None and not re.fullmatch(r'https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repo):
             raise ValueError('repository-url')
         for release in releases:
-            if not re.fullmatch(r'\d+\.\d+\.\d+', release['version']):
+            if not re.fullmatch(version_pattern, release['version']):
                 raise ValueError('release-version')
             if release['status'] not in {'pending', 'published'}:
                 raise ValueError('release-status')
