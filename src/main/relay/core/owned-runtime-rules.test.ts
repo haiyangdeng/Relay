@@ -31,6 +31,8 @@ const f = vi.hoisted(() => ({
   modelGate: undefined as (() => Promise<void>) | undefined,
   stopGate: undefined as (() => Promise<void>) | undefined,
   holdParser: false,
+  parserDurationMs: 0,
+  parserError: undefined as Error | undefined,
   releaseParser: undefined as (() => void) | undefined,
   revokeAtConfig: false,
   resourceBytes: Buffer.from('synthetic Geo fixture'),
@@ -86,10 +88,29 @@ vi.mock('child_process', async () => {
       (
         _file: string,
         _args: string[],
-        _options: object,
+        options: { timeout?: number },
         callback: (error: Error | null, stdout: string, stderr: string) => void
       ) => {
-        if (f.holdParser) f.releaseParser = () => callback(null, '', '')
+        if (f.parserDurationMs) {
+          const timeout = options.timeout && options.timeout > 0 ? options.timeout : Infinity
+          setTimeout(
+            () => {
+              if (timeout < f.parserDurationMs)
+                callback(
+                  Object.assign(new Error('PRIVATE parser command and configuration'), {
+                    code: null,
+                    killed: true,
+                    signal: 'SIGKILL'
+                  }),
+                  'PRIVATE parser stdout',
+                  'PRIVATE parser stderr'
+                )
+              else callback(null, '', '')
+            },
+            Math.min(timeout, f.parserDurationMs)
+          )
+        } else if (f.parserError) callback(f.parserError, 'PRIVATE stdout', 'PRIVATE stderr')
+        else if (f.holdParser) f.releaseParser = () => callback(null, '', '')
         else callback(null, '', '')
       }
     ),
@@ -219,6 +240,8 @@ beforeEach(() => {
     modelGate: undefined,
     stopGate: undefined,
     holdParser: false,
+    parserDurationMs: 0,
+    parserError: undefined,
     releaseParser: undefined,
     revokeAtConfig: false,
     geoCapability: false,
@@ -234,6 +257,7 @@ afterEach(async () => {
   f.badSocket = false
   await core?.stop()
   core = undefined
+  vi.useRealTimers()
 })
 const live = () => {
   if (!f.live) throw new Error('context lost')
@@ -463,6 +487,70 @@ describe('Owned rule HTTP dispatch boundary (mock child/filesystem/HTTP, no Core
     await expect(current.patchRule?.(0, true, { assertLive: live, submitted })).rejects.toThrow()
     expect(submitted).toHaveBeenCalledOnce()
     expect(f.requests).toHaveLength(1)
+  })
+})
+
+describe('Owned core configuration parser deadline (mock processes only)', () => {
+  const configuration = JSON.stringify(isolatedCoreConfiguration('rule')),
+    timeoutWarning = '核心配置检查超时（30 秒），未启动核心；请重试。'
+  beforeEach(() => vi.clearAllMocks())
+
+  it('allows a valid twelve-second first parse before starting the core', async () => {
+    vi.useFakeTimers()
+    f.parserDurationMs = 12000
+    const pending = startOwnedCore('/fixture', configuration, 'inert').then(
+      (started) => (core = started),
+      (error) => error
+    )
+    await vi.waitFor(() => expect(execFile).toHaveBeenCalledOnce())
+    expect(spawn).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(12000)
+    expect(await pending).toMatchObject({ pid: 1234 })
+    expect(spawn).toHaveBeenCalledOnce()
+  })
+
+  it('ends an over-budget parser without spawning or exposing private error fields', async () => {
+    vi.useFakeTimers()
+    f.parserDurationMs = 60000
+    const pending = startOwnedCore('/fixture', configuration, 'inert').catch((error) => error)
+    await vi.waitFor(() => expect(execFile).toHaveBeenCalledOnce())
+    await vi.runAllTimersAsync()
+    const failure = await pending
+    expect(failure).toBeInstanceOf(Error)
+    expect(failure.message).toBe(timeoutWarning)
+    expect(JSON.stringify(failure, Object.getOwnPropertyNames(failure))).not.toContain('PRIVATE')
+    expect(failure.cause).toBeUndefined()
+    expect(spawn).not.toHaveBeenCalled()
+    expect(rm).toHaveBeenCalledOnce()
+  })
+
+  it.each([
+    { code: 1, killed: true, signal: 'SIGKILL' },
+    { code: null, killed: false, signal: 'SIGKILL' },
+    { code: null, killed: true, signal: 'SIGTERM' },
+    { code: 'ENOENT' }
+  ])('does not misclassify an ordinary parser failure: %j', async (details) => {
+    f.parserError = Object.assign(new Error('PRIVATE parser failure'), details)
+    const failure = await startOwnedCore('/fixture', configuration, 'inert').catch((error) => error)
+    expect(failure.message).toContain('隔离核心未就绪')
+    expect(failure.message).not.toContain(timeoutWarning)
+    expect(JSON.stringify(failure, Object.getOwnPropertyNames(failure))).not.toContain('PRIVATE')
+    expect(spawn).not.toHaveBeenCalled()
+    expect(rm).toHaveBeenCalledOnce()
+  })
+
+  it('prioritizes unconfirmed cleanup over the parser timeout diagnosis', async () => {
+    f.parserError = Object.assign(new Error('PRIVATE parser timeout'), {
+      code: null,
+      killed: true,
+      signal: 'SIGKILL'
+    })
+    vi.mocked(rm).mockRejectedValueOnce(new Error('PRIVATE cleanup failure'))
+    const failure = await startOwnedCore('/fixture', configuration, 'inert').catch((error) => error)
+    expect(failure.message).toContain('退出/清理未确认')
+    expect(failure.message).not.toContain(timeoutWarning)
+    expect(JSON.stringify(failure, Object.getOwnPropertyNames(failure))).not.toContain('PRIVATE')
+    expect(spawn).not.toHaveBeenCalled()
   })
 })
 

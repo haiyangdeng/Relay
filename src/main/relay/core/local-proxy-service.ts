@@ -45,10 +45,12 @@ import { persistentCoreConfiguration } from '../core-owner/runtime'
 import { readConnections, readLogs, type ConnectionSnapshot } from './owned-observe'
 import type { CoreStoreLease, CoreStoreSnapshot, CoreLeaseRuntime } from './store'
 import type { RelayCoreResource } from './resources'
-import type {
-  RelayOwnedCore,
-  OwnedCoreProfileOwner,
-  OwnedCoreCleanupRegistration
+import {
+  OWNED_CORE_CONFIGURATION_TIMEOUT_WARNING,
+  OwnedCoreConfigurationTimeoutError,
+  type RelayOwnedCore,
+  type OwnedCoreProfileOwner,
+  type OwnedCoreCleanupRegistration
 } from './owned-runtime'
 import { smartCollectCSV, type SmartLearningStopResult } from './smart-state-runtime'
 import { localProxyConfiguration } from './local-proxy-runtime'
@@ -1763,7 +1765,13 @@ export function createLocalProxyService(adapters: {
           }
         }
         phase = hasRecord ? 'blocked' : 'failed'
-        warnings = [`普通代理启动失败，未完成「${startupStep}」。`, ...learningWarnings()]
+        warnings = [
+          `普通代理启动失败，未完成「${startupStep}」。`,
+          ...(error instanceof OwnedCoreConfigurationTimeoutError
+            ? [OWNED_CORE_CONFIGURATION_TIMEOUT_WARNING]
+            : []),
+          ...learningWarnings()
+        ]
         return result('failed')
       } finally {
         end()

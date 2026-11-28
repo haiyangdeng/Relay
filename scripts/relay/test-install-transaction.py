@@ -7,6 +7,7 @@ from pathlib import Path
 import plistlib
 import shlex
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -61,10 +62,35 @@ class TransactionTests(unittest.TestCase):
             "/usr/bin/id": '''case "$1:${2:-}" in
 -u:) echo 0;; -nu:*) echo fixture;; -u:fixture) echo "${RELAY_FIXTURE_UID:-501}";; *) exit 1;; esac''',
             "/usr/bin/stat": '''case "$2" in
+%d:%i:%u:%Lp:%l:%z|%i:%u:%Lp:%l:%z) [ "${RELAY_FIXTURE_STAT_IDENTITY_FAIL:-}" != 1 ] || exit 31;;
+esac
+case "$2" in
 %u) case "$3" in /dev/console) echo "${RELAY_FIXTURE_UID:-501}";; *) if [ "$3" = "${RELAY_FIXTURE_FOREIGN_DIR:-}" ]; then echo 501; else echo 0; fi;; esac;;
 %u:%l) printf '0:%s\\n' "$(/usr/bin/stat -f '%l' "$3")";;
 %u:%Lp:%l) printf '0:%s\\n' "$(/usr/bin/stat -f '%Lp:%l' "$3")";;
 *) exec /usr/bin/stat "$@";; esac''',
+            "/usr/bin/lockf": '''/usr/bin/lockf "$@" || exit $?
+lock="$RELAY_FIXTURE_ROOT/Library/Application Support/Relay/TunManaged/busy.lock"
+if [ -n "${RELAY_FIXTURE_LOCK_MUTATION:-}${RELAY_FIXTURE_STAT_IDENTITY_FAIL:-}" ]; then
+    ''' + shlex.quote(sys.executable) + ''' - "$lock" <<'PY'
+import fcntl, sys
+with open(sys.argv[1], "rb") as contender:
+    try:
+        fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        pass
+    else:
+        raise SystemExit("fixture expected the shell to retain its lifetime lock")
+PY
+    [ "$?" = 0 ] || exit 32
+fi
+case "${RELAY_FIXTURE_LOCK_MUTATION:-}" in
+replace)
+    /bin/mv "$lock" "$RELAY_FIXTURE_ROOT/held-busy.lock" || exit $?
+    /bin/cat "$RELAY_FIXTURE_ROOT/held-busy.lock" > "$lock" || exit $?
+    /bin/chmod 644 "$lock";;
+chmod) /bin/chmod 600 "$lock";;
+esac''',
             "/usr/bin/codesign": '[ -z "${RELAY_FIXTURE_BAD_SIGNATURE:-}" ]',
             "/bin/ps": '''if [ -f "$RELAY_FIXTURE_ROOT/started-after-move" ]; then echo /Applications/Relay.app/Contents/MacOS/Relay; else printf "%s\\n" "${RELAY_FIXTURE_PROCESSES:-}"; fi''',
             "/usr/sbin/pkgutil": 'printf "%s\\n" "${RELAY_FIXTURE_RECEIPTS:-}"',
@@ -598,6 +624,79 @@ exec /bin/cat "$@"''',
             self.assertIn("lock is busy", self.prepare(expected=1))
         self.assertFalse(self.transaction.exists())
         self.assertFalse((self.root / "trace").exists())
+
+    def assert_locked_identity_refusals(self, run):
+        lock = self.relay / "TunManaged/busy.lock"
+        held = self.root / "held-busy.lock"
+        original = lock.stat()
+        original_bytes = lock.read_bytes()
+
+        def snapshot():
+            result = {}
+            for parent in [self.root / "Applications", self.root / "Library"]:
+                for path in [parent, *parent.rglob("*")]:
+                    if path == lock:
+                        continue
+                    info = path.lstat()
+                    result[str(path.relative_to(self.root))] = (
+                        info.st_ino, info.st_mode, path.read_bytes() if path.is_file() else None)
+            trace = self.root / "trace"
+            result["trace"] = trace.read_bytes() if trace.exists() else None
+            result["jobs"] = sorted(path.name for path in self.root.glob("job-*"))
+            return result
+
+        before = snapshot()
+        for fault in ["replace", "chmod", "stat-both"]:
+            with self.subTest(fault=fault):
+                variable = "RELAY_FIXTURE_STAT_IDENTITY_FAIL" if fault == "stat-both" else "RELAY_FIXTURE_LOCK_MUTATION"
+                self.environment[variable] = "1" if fault == "stat-both" else fault
+                try:
+                    message = run()
+                    if fault == "replace":
+                        self.assertIn("lock replaced", message)
+                        self.assertEqual(held.stat().st_ino, original.st_ino)
+                        self.assertNotEqual(lock.stat().st_ino, original.st_ino)
+                        self.assertEqual(lock.stat().st_mode & 0o7777, 0o644)
+                    elif fault == "chmod":
+                        self.assertRegex(message, r"file (mode|permissions)")
+                        self.assertEqual(lock.stat().st_ino, original.st_ino)
+                        self.assertEqual(lock.stat().st_mode & 0o7777, 0o600)
+                    else:
+                        self.assertIn("cannot inspect", message)
+                    self.assertEqual(lock.read_bytes(), original_bytes)
+                    self.assertEqual(snapshot(), before)
+                finally:
+                    self.environment.pop(variable, None)
+                    if held.exists():
+                        lock.unlink()
+                        held.rename(lock)
+                    lock.chmod(0o644)
+
+    def test_upgrade_rejects_lock_changes_and_failed_identity_reads(self):
+        self.make_old()
+        self.assert_locked_identity_refusals(lambda: self.prepare(expected=1))
+        self.assertFalse(self.transaction.exists())
+
+    def test_rollback_rejects_lock_changes_and_failed_identity_reads(self):
+        self.make_old()
+        self.prepare()
+        self.make_app()
+        self.run_action("publish-tun")
+        self.assert_locked_identity_refusals(lambda: self.run_action("rollback", expected=1))
+        self.assertTrue((self.transaction / "old/app").exists())
+        self.assertTrue((self.relay / "TunManaged/installation.json").exists())
+
+    def test_shell_remover_rejects_lock_changes_and_failed_identity_reads(self):
+        self.make_old()
+        remover, reviewed = self.stage_shell_remover()
+
+        def run():
+            result = subprocess.run([remover, "--remove", reviewed], env=self.environment, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            return result.stdout + result.stderr
+
+        self.assert_locked_identity_refusals(run)
+        self.assertTrue((self.relay / "TunManaged/installation.json").exists())
 
     def test_wrong_user_damaged_hash_symlink_and_unknown_content_refused(self):
         self.make_old()

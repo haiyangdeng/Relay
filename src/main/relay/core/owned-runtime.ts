@@ -84,6 +84,14 @@ import {
 } from './smart-state-runtime'
 
 const exec = promisify(execFile)
+export const OWNED_CORE_CONFIGURATION_TIMEOUT_WARNING =
+  '核心配置检查超时（30 秒），未启动核心；请重试。'
+export class OwnedCoreConfigurationTimeoutError extends Error {
+  constructor() {
+    super(OWNED_CORE_CONFIGURATION_TIMEOUT_WARNING)
+    this.name = 'OwnedCoreConfigurationTimeoutError'
+  }
+}
 export interface OwnedCoreRequestGuards {
   assertLive(): void
   // A dispatch attempt, not proof that bytes reached or changed the core.
@@ -1139,7 +1147,7 @@ export async function startOwnedCore(
     await learning?.verifyBeforeLaunch()
     assertLaunch()
     const parseOptions = {
-      timeout: 10000,
+      timeout: 30000,
       maxBuffer: 65536,
       killSignal: 'SIGKILL' as const,
       env: {
@@ -1155,7 +1163,14 @@ export async function startOwnedCore(
         () => undefined,
         () => undefined
       )
-    await parser
+    try {
+      await parser
+    } catch (error) {
+      const failure = error as { code?: unknown; killed?: unknown; signal?: unknown } | null
+      if (failure?.code === null && failure.killed === true && failure.signal === 'SIGKILL')
+        throw new OwnedCoreConfigurationTimeoutError()
+      throw error
+    }
     assertLaunch()
     if (kind === 'localProxy') {
       const listeners = [
@@ -1286,12 +1301,13 @@ export async function startOwnedCore(
       logSnapshot: logBuffer.sequencedSnapshot,
       stop
     }
-  } catch {
+  } catch (error) {
     try {
       await stop()
     } catch {
       throw new Error('隔离验证失败且退出/清理未确认；没有操作其他核心。')
     }
+    if (error instanceof OwnedCoreConfigurationTimeoutError) throw error
     throw new Error('隔离核心未就绪，已结束本次实例；未改变系统代理、DNS或TUN。')
   }
 }

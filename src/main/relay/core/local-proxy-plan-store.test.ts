@@ -9,6 +9,7 @@ import {
   localProxyPlanRecord,
   localProxyPlanSaveRequest
 } from '../../../shared/relay/local-proxy-plan'
+import { SimplePrivateDocumentFile } from '../simple/store'
 import { LocalProxyPlanStore } from './local-proxy-plan-store'
 import { createProfileStartup } from './profile-startup'
 import { localProxyConfiguration } from './local-proxy-runtime'
@@ -146,6 +147,99 @@ describe.runIf(process.getuid !== undefined)('Local proxy startup private persis
     ).rejects.toThrow()
     expect(await store.read()).toEqual(second)
   })
+  it('rejects stale CAS before considering an unchanged plan or the write guard', async () => {
+    const { store } = await fixture()
+    const saved = await store.save({ document: dedicatedPlan, expectedRevision: '' })
+    const recheck = vi.fn(async () => {
+      throw new Error('backup recovery unresolved')
+    })
+    await expect(
+      store.save({ document: saved.document, expectedRevision: '0'.repeat(64) }, () => {}, recheck)
+    ).rejects.toThrow('启动设置已变化')
+    expect(recheck).not.toHaveBeenCalled()
+    expect(await store.read()).toEqual(saved)
+  })
+  it('refuses an unchanged plan when its owner becomes stale during the private read', async () => {
+    const { store } = await fixture()
+    const saved = await store.save({ document: dedicatedPlan, expectedRevision: '' })
+    const bytes = await readFile(store.path)
+    let current = true
+    const read = SimplePrivateDocumentFile.prototype.read
+    const spy = vi
+      .spyOn(SimplePrivateDocumentFile.prototype, 'read')
+      .mockImplementationOnce(async function (this: SimplePrivateDocumentFile<unknown>) {
+        const record = await read.call(this)
+        current = false
+        return record
+      })
+    const recheck = vi.fn(async () => {})
+    try {
+      await expect(
+        store.save(
+          { document: saved.document, expectedRevision: saved.revision },
+          () => {
+            if (!current) throw new Error('owner changed during read')
+          },
+          recheck
+        )
+      ).rejects.toThrow('owner changed during read')
+      expect(recheck).not.toHaveBeenCalled()
+      expect(await readFile(store.path)).toEqual(bytes)
+    } finally {
+      spy.mockRestore()
+    }
+  })
+  it('keeps the write guard for a changed document and leaves the private file untouched', async () => {
+    const { store } = await fixture()
+    const saved = await store.save({ document: dedicatedPlan, expectedRevision: '' })
+    const bytes = await readFile(store.path)
+    const recheck = vi.fn(async () => {
+      throw new Error('backup recovery unresolved')
+    })
+    await expect(
+      store.save(
+        {
+          document: { ...saved.document, resolverMode: 'profile' },
+          expectedRevision: saved.revision
+        },
+        () => {},
+        recheck
+      )
+    ).rejects.toThrow('backup recovery unresolved')
+    expect(recheck).toHaveBeenCalledOnce()
+    expect(await readFile(store.path)).toEqual(bytes)
+    expect(await store.read()).toEqual(saved)
+  })
+  it('keeps the write guard for absent defaults and does not create a file', async () => {
+    const { store } = await fixture()
+    const recheck = vi.fn(async () => {
+      throw new Error('backup recovery unresolved')
+    })
+    await expect(
+      store.save({ document: defaultLocalProxyPlan(), expectedRevision: '' }, () => {}, recheck)
+    ).rejects.toThrow('backup recovery unresolved')
+    expect(recheck).toHaveBeenCalledOnce()
+    await expect(lstat(store.path)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+  it('does not treat adding explicit default ports as an unchanged document', async () => {
+    const { store } = await fixture()
+    const saved = await store.save({ document: defaultLocalProxyPlan(), expectedRevision: '' })
+    const recheck = vi.fn(async () => {
+      throw new Error('backup recovery unresolved')
+    })
+    await expect(
+      store.save(
+        {
+          document: { ...saved.document, ports: { http: 18191, socks: 0, mixed: 0, redir: 0 } },
+          expectedRevision: saved.revision
+        },
+        () => {},
+        recheck
+      )
+    ).rejects.toThrow('backup recovery unresolved')
+    expect(recheck).toHaveBeenCalledOnce()
+    expect(await store.read()).toEqual(saved)
+  })
   it('freezes the request, refuses readers during a save and exposes an idle barrier', async () => {
     const { store } = await fixture(),
       gate = Promise.withResolvers<void>(),
@@ -225,6 +319,58 @@ describe.runIf(process.getuid !== undefined)('Private dedicated node snapshot', 
     port: 1234,
     password: 'fixture-private'
   }
+  it('returns an unchanged normalized plan without a write or write guard and preserves its private pin', async () => {
+    const { store, context } = await fixture()
+    const document = {
+      ...dedicatedPlan,
+      ports: { http: 18191, socks: 18192, mixed: 18194, redir: 18195 }
+    }
+    const saved = await store.save({ document, expectedRevision: '' })
+    await store.resolvePinnedNode(document.dedicated, sourceProfileId, () => node)
+    const bytes = await readFile(store.path)
+    const before = await lstat(store.path)
+    const recheck = vi.fn(async () => {
+      throw new Error('backup recovery unresolved')
+    })
+    const unchanged = await store.save(
+      {
+        document: {
+          ports: { redir: 18195, mixed: 18194, socks: 18192, http: 18191 },
+          dedicated: { route: 'fixed-node', socksPort: 18190, httpPort: 18193 },
+          resolverMode: 'off',
+          httpPort: 18191
+        },
+        expectedRevision: saved.revision
+      },
+      () => {},
+      recheck
+    )
+    expect(unchanged).toEqual(saved)
+    expect(recheck).not.toHaveBeenCalled()
+    expect(await readFile(store.path)).toEqual(bytes)
+    expect(await lstat(store.path)).toMatchObject({
+      dev: before.dev,
+      ino: before.ino,
+      mode: before.mode,
+      uid: before.uid,
+      nlink: before.nlink,
+      size: before.size,
+      mtimeMs: before.mtimeMs,
+      ctimeMs: before.ctimeMs
+    })
+    expect(JSON.stringify(unchanged)).not.toContain('fixture-private')
+    const capture = vi.fn(() => undefined)
+    expect(
+      (
+        await new LocalProxyPlanStore(context).resolvePinnedNode(
+          document.dedicated,
+          sourceProfileId,
+          capture
+        )
+      ).node
+    ).toEqual(node)
+    expect(capture).not.toHaveBeenCalled()
+  })
   it('joins a simultaneous dashboard plan read when restoring a dedicated listener', async () => {
     const { store } = await fixture()
     await store.save({ document: dedicatedPlan, expectedRevision: '' })
@@ -417,8 +563,10 @@ describe.runIf(process.getuid !== undefined)('Private dedicated node snapshot', 
         store.resolvePinnedNode(dedicatedPlan.dedicated, sourceProfileId, () => candidate)
       ).rejects.toThrow()
     await store.resolvePinnedNode(dedicatedPlan.dedicated, sourceProfileId, () => node)
+    const saved = await store.read()
     const original = JSON.parse(await readFile(store.path, 'utf8'))
     const capture = vi.fn(() => node)
+    const recheck = vi.fn(async () => {})
     for (const patch of [
       { sha256: '0'.repeat(64) },
       { sourceProfileId: 'invalid' },
@@ -433,6 +581,16 @@ describe.runIf(process.getuid !== undefined)('Private dedicated node snapshot', 
         store.resolvePinnedNode(dedicatedPlan.dedicated, sourceProfileId, capture)
       ).rejects.toThrow()
       await expect(store.read()).rejects.toThrow()
+      const bytes = await readFile(store.path)
+      await expect(
+        store.save(
+          { document: saved.document, expectedRevision: saved.revision },
+          () => {},
+          recheck
+        )
+      ).rejects.toThrow()
+      expect(recheck).not.toHaveBeenCalled()
+      expect(await readFile(store.path)).toEqual(bytes)
     }
     expect(capture).not.toHaveBeenCalled()
   })

@@ -19,8 +19,8 @@
   "assets": {
     "arm64": {
       "path": "darwin-arm64/mihomo",
-      "sha256": "a7dcd3ffe59be033ed1b4000a4ae90acdf2ab41450536e02445692ea124195c2",
-      "size": 79861968,
+      "sha256": "6c211be8a99257e980ed6a69d7eb4c2cae12946eebcd2b7fd4a2e6b7aebfcbbe",
+      "size": 79397776,
       "cpuType": 16777228
     },
     "x64": {

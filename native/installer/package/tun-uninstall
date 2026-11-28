@@ -53,7 +53,10 @@ $inventory
 EOF
 exec 9<"$root/busy.lock"
 /usr/bin/lockf -s -t 0 9 || fail 'TUN is still active; stop it manually before removal'
-[ "$(/usr/bin/stat -f '%i:%u:%Lp:%l:%z' /dev/fd/9)" = "$(/usr/bin/stat -f '%i:%u:%Lp:%l:%z' "$root/busy.lock")" ] || fail 'lifetime lock replaced'
+# No pathname makes stat inspect the held descriptor, not devfs metadata.
+held_lock=$(/usr/bin/stat -f '%d:%i:%u:%Lp:%l:%z' <&9) || fail 'cannot inspect held lifetime lock'
+current_lock=$(/usr/bin/stat -f '%d:%i:%u:%Lp:%l:%z' "$root/busy.lock") || fail 'cannot inspect lifetime lock path'
+[ "$held_lock" = "$current_lock" ] || fail 'lifetime lock replaced'
 # Cache the reviewed fields before retiring installation.json. The lifetime
 # lock also serializes the supported upgrade path; every item must still match
 # its observed identity and bytes immediately before unlink.

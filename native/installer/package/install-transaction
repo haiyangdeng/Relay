@@ -227,7 +227,10 @@ prepare)
             # until all old admission/executable paths leave the live namespace.
             exec 9<"$relay/TunManaged/busy.lock"
             /usr/bin/lockf -s -t 0 9 || fail 'TUN lifetime lock is busy; no installation changes made'
-            [ "$(/usr/bin/stat -f '%i:%u:%Lp:%l:%z' /dev/fd/9)" = "$(/usr/bin/stat -f '%i:%u:%Lp:%l:%z' "$relay/TunManaged/busy.lock")" ] || fail 'TUN lock replaced'
+            # No pathname makes stat inspect the held descriptor, not devfs metadata.
+            held_lock=$(/usr/bin/stat -f '%d:%i:%u:%Lp:%l:%z' <&9) || fail 'cannot inspect held TUN lock'
+            current_lock=$(/usr/bin/stat -f '%d:%i:%u:%Lp:%l:%z' "$relay/TunManaged/busy.lock") || fail 'cannot inspect TUN lock path'
+            [ "$held_lock" = "$current_lock" ] || fail 'TUN lock replaced'
             tun_identity "$relay/TunManaged"
         fi
     else
@@ -494,7 +497,10 @@ rollback|rollback-check)
         tun_identity "$relay/TunManaged"
         exec 8<"$relay/TunManaged/busy.lock"
         /usr/bin/lockf -s -t 0 8 || fail 'new TUN is active; rollback retained'
-        [ "$(/usr/bin/stat -f '%i:%u:%Lp:%l:%z' /dev/fd/8)" = "$(/usr/bin/stat -f '%i:%u:%Lp:%l:%z' "$relay/TunManaged/busy.lock")" ] || fail 'TUN lock replaced'
+        held_lock=$(/usr/bin/stat -f '%d:%i:%u:%Lp:%l:%z' <&8) || fail 'cannot inspect held TUN lock'
+        current_lock=$(/usr/bin/stat -f '%d:%i:%u:%Lp:%l:%z' "$relay/TunManaged/busy.lock") || fail 'cannot inspect TUN lock path'
+        [ "$held_lock" = "$current_lock" ] || fail 'TUN lock replaced'
+        tun_identity "$relay/TunManaged"
         [ "$(field "$relay/TunManaged/installation.json" client.sha256)" = "$(field "$scripts/tun-installation.template.json" client.sha256)" ] || fail 'new TUN differs'
         retire_tun=yes
     else retire_tun=no

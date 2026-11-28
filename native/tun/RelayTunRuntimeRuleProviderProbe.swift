@@ -13,7 +13,7 @@ enum RelayTunRuntimeRuleProviderProbe {
     static let coreVersion = "relay-geodata-v1p1-3f27"
     static var corePin: (sha256: String, bytes: Int) {
         #if arch(arm64)
-        return ("a7dcd3ffe59be033ed1b4000a4ae90acdf2ab41450536e02445692ea124195c2", 79861968)
+        return ("6c211be8a99257e980ed6a69d7eb4c2cae12946eebcd2b7fd4a2e6b7aebfcbbe", 79397776)
         #else
         return ("bd9f2b38256b05b643f6a33273669b4df2c2b32b5a25db0b8db41a0a0199bc3b", 85466544)
         #endif

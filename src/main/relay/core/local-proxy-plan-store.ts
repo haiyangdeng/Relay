@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { isDeepStrictEqual } from 'node:util'
 import { SimplePrivateDocumentFile, type SimpleFileRecord } from '../simple/store'
 import type { RelayStateContext } from '../context'
 import {
@@ -119,10 +120,13 @@ export class LocalProxyPlanStore {
     const request = localProxyPlanSaveRequest(raw)
     return this.perform(async () => {
       assertCurrent()
-      await recheck?.()
       const previous = await this.file.read()
+      assertCurrent()
       if (publicRecord(previous).revision !== request.expectedRevision)
         throw new Error('Relay 启动设置已变化，请重新读取。')
+      if (previous.exists && isDeepStrictEqual(previous.value.document, request.document))
+        return publicRecord(previous)
+      await recheck?.()
       const pin = previous.value.pinnedNode
       return publicRecord(
         await this.file.change(

@@ -1,23 +1,26 @@
-# Relay V1.0.0 · 构建 25
+# Relay V1.0.0 · Intel 构建 28 / Apple Silicon 构建 25
 
-2026 年 11 月 24 日发布，适用于 macOS 13 或更新版本。Apple Silicon 和 Intel 安装包均为构建 25，包含系统代理、TUN 和自动卸载组件。
+2026 年 11 月 28 日发布，适用于 macOS 13 或更新版本。本次更新 Intel 安装包；Apple Silicon 保留正式构建 25 的原始安装包和对应源码，字节与原发行版一致。两个安装包均包含系统代理、TUN 和自动卸载组件。
 
-| Mac 芯片      | 安装包                                                                                                                  | SHA-256                                                            |
-| ------------- | ----------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
-| Apple Silicon | [下载 arm64 安装包](https://github.com/haiyangdeng/Relay/releases/download/v1.0.0-build.25/Relay-1.0.0-macOS-arm64.pkg) | `efb5e46ccca86db791ca317bfa2faa835a5b891eef3ecd373ac8c774dc07e9f5` |
-| Intel         | [下载 x86_64 安装包](https://github.com/haiyangdeng/Relay/releases/download/v1.0.0-build.25/Relay-1.0.0-macOS-x64.pkg)  | `cac51f471f0db115e8a9c8dbfb602b6c2d03790ce851d5a58fa0d4cb33bc094b` |
+| Mac 芯片      | 构建 | 安装包                                                                                                                  | SHA-256                                                            |
+| ------------- | ---- | ----------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| Apple Silicon | 25   | [下载 arm64 安装包](https://github.com/haiyangdeng/Relay/releases/download/v1.0.0-build.28/Relay-1.0.0-macOS-arm64.pkg) | `efb5e46ccca86db791ca317bfa2faa835a5b891eef3ecd373ac8c774dc07e9f5` |
+| Intel         | 28   | [下载 x86_64 安装包](https://github.com/haiyangdeng/Relay/releases/download/v1.0.0-build.28/Relay-1.0.0-macOS-x64.pkg)  | `1f03754b3a579a4b7438c4a75a88ea63c145295cdf454c7c94076275bab8321f` |
 
-[对应源码快照](https://github.com/haiyangdeng/Relay/releases/download/v1.0.0-build.25/Relay-1.0.0.25-source.tar.gz) · [下载 SHA256SUMS](https://github.com/haiyangdeng/Relay/releases/download/v1.0.0-build.25/SHA256SUMS) · [介绍与真实截图](https://haiyangdeng.github.io/Relay/) · [历史发行版](https://github.com/haiyangdeng/Relay/releases)
+[Intel 28 对应源码](https://github.com/haiyangdeng/Relay/releases/download/v1.0.0-build.28/Relay-1.0.0.28-source.tar.gz) · [Silicon 25 对应源码](https://github.com/haiyangdeng/Relay/releases/download/v1.0.0-build.28/Relay-1.0.0.25-source.tar.gz) · [SHA256SUMS](https://github.com/haiyangdeng/Relay/releases/download/v1.0.0-build.28/SHA256SUMS) · [产品介绍](https://haiyangdeng.github.io/Relay/) · [历史发行版](https://github.com/haiyangdeng/Relay/releases)
 
-## 系统代理端口修正
+## Intel 修复
 
-同时配置混合入口和独立 HTTP 入口时，系统代理设置页和「配置检测 → 执行只读检测」现在都显示 macOS 系统代理使用的端口。例如，系统代理使用混合端口 `7890`、独立 HTTP 端口为 `7892` 时，设置页显示 `7890`，检测页显示「系统普通代理 7890：匹配」。独立 HTTP 入口仍可使用。
+- 启动设置未改变时，校验当前记录和版本后直接使用，避免重复写入触发备份恢复保护而阻断启动。真实设置变更仍保留原有保护检查。
+- 普通代理等隔离核心的配置解析上限从 10 秒调整为 30 秒，避免首次解析较慢时提前终止；超时仍终止并清理本次核心，提供具体提示。该调整不改变真实 TUN 的启动控制流程。
+- 修正安装、回滚和卸载中的 TUN 锁身份检查，比较已持有的真实文件描述符与锁文件。
 
-## 验证范围
+## 验证范围与已知问题
 
-- **Apple Silicon** 在 macOS 15.7.7 虚拟机从构建 24 原位升级。原配置、核心选择与启动设置、系统代理默认设置和合成历史记录共 18 个文件，升级前后 SHA-256 一致。两个端口分别发出的测试请求均抵达预期出口。
-- **Intel** 已核对安装包归档、组件架构和应用签名，原生 Intel Mac 的运行验证仍待完成。
-- **历史验收** 登录自启、首次开启系统代理以及 TUN 往返切换的 Apple Silicon 实测结果来自构建 24。[构建 24 发行说明](https://github.com/haiyangdeng/Relay/releases/tag/v1.0.0-build.24)
+- **Intel 自动检查**：275 项相关回归通过；实际渲染界面的启动调用链使用隔离 IPC 场景验证，2 个场景、18 项断言通过。安装包的源码关联、密封业务文件、架构、签名与组件配对校验通过。
+- **包内核心运行**：在 Intel Mac 上，从最终安装包全新展开的首轮 124 项及同资源复测 124 项全部通过，覆盖规则／全局／直连路由、节点切换、测速、多端口和停止清理。这些隔离测试不等于真实 TUN 或已安装 GUI 的完整验收。
+- **Intel 实机反馈**：用户已使用本包，反馈 TUN 开启较慢，其他功能暂未报告异常。**TUN 开启慢仍待定位，本次未修复；构建 28 的自动化本机升级、已安装 GUI 全流程和真实 TUN 专项验收尚未完成。**
+- **Apple Silicon**：本次未重新构建或替换原构建 25。原版从构建 24 升级、配置保留、系统代理端口和双入口联网的结果见[构建 25 发行说明](https://github.com/haiyangdeng/Relay/releases/tag/v1.0.0-build.25)；登录自启和 TUN 实测记录来自[构建 24](https://github.com/haiyangdeng/Relay/releases/tag/v1.0.0-build.24)。当前 Intel 28 源码重新构建的 arm64 App 尚未实机验收。
 
 ## 安装与卸载
 
@@ -27,4 +30,4 @@
 
 ## 来源与许可
 
-Relay 基于 Clash Party v2.0.4 与 Mihomo。对应源码、修改补丁与第三方归属随仓库提供。[GPL-3.0](https://github.com/haiyangdeng/Relay/blob/v1.0.0-build.25/LICENSE)
+Relay 基于 Clash Party v2.0.4 与 Mihomo。两种安装包各自对应的源码归档单独提供，包含构建说明、修改补丁及第三方归属。[GPL-3.0](https://github.com/haiyangdeng/Relay/blob/v1.0.0-build.28/LICENSE)

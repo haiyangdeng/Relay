@@ -1,8 +1,32 @@
 {
   "schemaVersion": 1,
   "repositoryUrl": "https://github.com/haiyangdeng/Relay",
-  "currentVersion": "1.0.0-build.25",
+  "currentVersion": "1.0.0-build.28",
   "releases": [
+    {
+      "version": "1.0.0-build.28",
+      "status": "pending",
+      "minimumOS": "macOS 13 或更高版本",
+      "notes": [
+        "Intel 构建 28 修复启动设置未改变时的重复写入，并保留首次核心配置检查的有限超时修复。",
+        "Apple Silicon 继续使用正式构建 25 的原始安装包和对应源码。",
+        "发布下载将在新 Intel 包完成验收、资源上传并核对摘要后开放。"
+      ],
+      "assets": [
+        {
+          "arch": "arm64",
+          "label": "Apple Silicon",
+          "filename": "Relay-1.0.0-macOS-arm64.pkg",
+          "buildVersion": "25"
+        },
+        {
+          "arch": "x64",
+          "label": "Intel",
+          "filename": "Relay-1.0.0-macOS-x64.pkg",
+          "buildVersion": "28"
+        }
+      ]
+    },
     {
       "version": "1.0.0-build.25",
       "status": "published",

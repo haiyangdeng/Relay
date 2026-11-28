@@ -12,11 +12,13 @@ import type { DedicatedListenerPlan } from '../../../shared/relay/dedicated-list
 import type { OwnedTrafficSample } from './owned-traffic'
 import { createLocalProxyService } from './local-proxy-service'
 import { localProxyConfiguration } from './local-proxy-runtime'
-import type {
-  RelayOwnedCore,
-  OwnedCoreProfileOwner,
-  OwnedCoreTrafficGuards,
-  OwnedCoreCleanupRegistration
+import {
+  OWNED_CORE_CONFIGURATION_TIMEOUT_WARNING,
+  OwnedCoreConfigurationTimeoutError,
+  type RelayOwnedCore,
+  type OwnedCoreProfileOwner,
+  type OwnedCoreTrafficGuards,
+  type OwnedCoreCleanupRegistration
 } from './owned-runtime'
 import type { CoreStoreLease, CoreStoreSnapshot } from './store'
 import type { SmartLearningStopResult } from './smart-state-runtime'
@@ -44,6 +46,65 @@ describe('Local proxy preparation diagnostics', () => {
     expect(failure.message).not.toContain('private')
     expect(f.adapters.acquire).not.toHaveBeenCalled()
     expect(f.adapters.start).not.toHaveBeenCalled()
+  })
+})
+
+describe('Local proxy parser timeout diagnostics', () => {
+  it('shows only the fixed timeout warning even if the controlled error message was changed', async () => {
+    const f = fixture(),
+      failure = new OwnedCoreConfigurationTimeoutError()
+    Object.assign(failure, {
+      message: 'PRIVATE token and subscription configuration',
+      stdout: 'PRIVATE parser output',
+      cause: new Error('PRIVATE cause')
+    })
+    f.adapters.start.mockImplementationOnce(async (_source, _port, register) => {
+      register(f.stop)
+      throw failure
+    })
+    f.adapters.confirmStart.mockResolvedValue(true)
+    const plan = await f.service.prepare({ profile: f.selection, httpPort: 18191 }),
+      failed = await f.service.action({ action: 'start', evidenceId: plan.evidenceId })
+    expect(failed.status).toBe('failed')
+    expect(failed.state.warnings).toContain(OWNED_CORE_CONFIGURATION_TIMEOUT_WARNING)
+    expect(failed.state.warnings[0]).toContain('校验配置并启动普通代理核心')
+    expect(JSON.stringify(failed)).not.toContain('PRIVATE')
+    expect(failed.state.owned).toBe(false)
+    expect(f.stop).toHaveBeenCalledOnce()
+    expect(f.release).toHaveBeenCalledOnce()
+  })
+
+  it('does not classify an ordinary error by a copied timeout name or message', async () => {
+    const f = fixture()
+    f.adapters.start.mockRejectedValueOnce(
+      Object.assign(new Error(OWNED_CORE_CONFIGURATION_TIMEOUT_WARNING + ' PRIVATE'), {
+        name: 'OwnedCoreConfigurationTimeoutError'
+      })
+    )
+    f.adapters.confirmStart.mockResolvedValue(true)
+    const plan = await f.service.prepare({ profile: f.selection, httpPort: 18191 }),
+      failed = await f.service.action({ action: 'start', evidenceId: plan.evidenceId })
+    expect(failed.status).toBe('failed')
+    expect(failed.state.warnings).not.toContain(OWNED_CORE_CONFIGURATION_TIMEOUT_WARNING)
+    expect(JSON.stringify(failed)).not.toContain('PRIVATE')
+  })
+
+  it('keeps cleanup uncertainty ahead of a timeout warning and retains the lease', async () => {
+    const f = fixture()
+    f.stop.mockRejectedValueOnce(new Error('PRIVATE cleanup failure'))
+    f.adapters.start.mockImplementationOnce(async (_source, _port, register) => {
+      register(f.stop)
+      throw new OwnedCoreConfigurationTimeoutError()
+    })
+    f.adapters.confirmStart.mockResolvedValue(true)
+    const plan = await f.service.prepare({ profile: f.selection, httpPort: 18191 }),
+      failed = await f.service.action({ action: 'start', evidenceId: plan.evidenceId })
+    expect(failed.status).toBe('uncertain')
+    expect(failed.state.uncertain).toBe(true)
+    expect(failed.state.owned).toBe(true)
+    expect(failed.state.warnings).not.toContain(OWNED_CORE_CONFIGURATION_TIMEOUT_WARNING)
+    expect(JSON.stringify(failed)).not.toContain('PRIVATE')
+    expect(f.release).not.toHaveBeenCalled()
   })
 })
 
