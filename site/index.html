@@ -6,7 +6,7 @@
     <meta name="theme-color" content="#0b1221" />
     <meta
       name="description"
-      content="Relay 是面向 macOS 的网络工作台。管理 Mihomo 代理、订阅与分流，为 Claude 和 Codex 配置专用连接。Apple Silicon 和 Intel 构建 25 修正了系统代理端口显示。安装后导入自己的配置即可使用。"
+      content="Relay 是面向 macOS 的网络工作台。管理 Mihomo 代理、订阅与分流，为 Claude 和 Codex 配置专用连接。Intel 构建 28 改善启动，Apple Silicon 沿用原正式构建 25。Intel TUN 开启慢仍待定位。安装后导入自己的配置即可使用。"
     />
     <title>Relay V1.0.0 — macOS 代理与 AI 客户端工作区</title>
     <link rel="canonical" href="https://haiyangdeng.github.io/Relay/" />
@@ -117,7 +117,9 @@
         <div>
           <span class="release-pill">V1.0.0</span>
           <p>
-            准备好下一段连接。<span id="release-strip-note">Apple Silicon 与 Intel · 构建 25</span>
+            准备好下一段连接。<span id="release-strip-note"
+              >Intel 构建 28 · Apple Silicon 构建 25</span
+            >
           </p>
         </div>
         <a href="#downloads">查看下载 <span>↗</span></a>
@@ -321,7 +323,7 @@
           <div class="version-picker">
             <label for="release-version">版本</label
             ><select id="release-version">
-              <option value="1.0.0-build.25">V1.0.0 · 构建 25 · 2026-11-24</option>
+              <option value="1.0.0-build.28">V1.0.0 · Intel 28 / Silicon 25 · 2026-11-28</option>
             </select>
           </div>
         </div>
@@ -370,12 +372,12 @@
             初始配置为空，请在「订阅管理」导入自己的 YAML 或订阅。
           </p>
           <p>
-            构建 25 修正了系统代理端口显示。Apple Silicon 版已验证原位升级和两个 HTTP 入口。Intel
-            版已核对归档、架构与应用签名，原生运行待验证。
+            Intel 构建 28 已通过包内核心冷、热两轮共 248 项检查，并获得实机试用反馈。TUN
+            开启慢仍待定位，本次未修复。Apple Silicon 保留原正式构建 25 的安装包和对应源码。
           </p>
           <a
             id="release-notes-link"
-            href="https://github.com/haiyangdeng/Relay/releases/tag/v1.0.0-build.25"
+            href="https://github.com/haiyangdeng/Relay/releases/tag/v1.0.0-build.28"
             >阅读完整版本说明与已知边界 ↗</a
           >
         </div>
@@ -383,24 +385,25 @@
           <summary><span>V1.0.0 版本内容</span><span aria-hidden="true">＋</span></summary>
           <ul id="release-notes-list">
             <li>
-              系统代理使用混合端口时，设置页与配置检测页现在都显示这一端口，独立 HTTP 入口仍可使用。
+              Intel 构建 28 修复启动时重复保存设置、首次核心配置检查超时及安装锁身份检查。TUN
+              开启慢仍待定位。
             </li>
           </ul>
         </details>
         <noscript
           ><p class="scope-note">
             <a
-              href="https://github.com/haiyangdeng/Relay/releases/download/v1.0.0-build.25/Relay-1.0.0-macOS-arm64.pkg"
+              href="https://github.com/haiyangdeng/Relay/releases/download/v1.0.0-build.28/Relay-1.0.0-macOS-arm64.pkg"
               >下载 Apple Silicon 构建 25</a
             >
             ·
             <a
-              href="https://github.com/haiyangdeng/Relay/releases/download/v1.0.0-build.25/Relay-1.0.0-macOS-x64.pkg"
-              >下载 Intel 构建 25</a
+              href="https://github.com/haiyangdeng/Relay/releases/download/v1.0.0-build.28/Relay-1.0.0-macOS-x64.pkg"
+              >下载 Intel 构建 28</a
             >
             ·
             <a
-              href="https://github.com/haiyangdeng/Relay/releases/download/v1.0.0-build.25/SHA256SUMS"
+              href="https://github.com/haiyangdeng/Relay/releases/download/v1.0.0-build.28/SHA256SUMS"
               >SHA256SUMS</a
             >
           </p></noscript

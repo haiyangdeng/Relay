@@ -5,27 +5,33 @@
   "releases": [
     {
       "version": "1.0.0-build.28",
-      "status": "pending",
+      "status": "published",
       "minimumOS": "macOS 13 或更高版本",
       "notes": [
-        "Intel 构建 28 修复启动设置未改变时的重复写入，并保留首次核心配置检查的有限超时修复。",
-        "Apple Silicon 继续使用正式构建 25 的原始安装包和对应源码。",
-        "发布下载将在新 Intel 包完成验收、资源上传并核对摘要后开放。"
+        "Intel 构建 28 修复未改变启动设置时的重复写入、首次核心配置检查超时和安装锁身份检查。",
+        "Intel 包内核心冷、热两轮共 248 项检查通过；用户已在 Intel Mac 试用。本包的自动化本机升级、已安装界面全流程及真实 TUN 专项验收尚未完成。",
+        "已知问题：Intel TUN 开启较慢，原因仍待定位，本次发布未修复。",
+        "Apple Silicon 继续提供正式构建 25 的原始安装包及对应源码，文件摘要与原发行版一致。"
       ],
       "assets": [
         {
           "arch": "arm64",
           "label": "Apple Silicon",
           "filename": "Relay-1.0.0-macOS-arm64.pkg",
-          "buildVersion": "25"
+          "buildVersion": "25",
+          "url": "https://github.com/haiyangdeng/Relay/releases/download/v1.0.0-build.28/Relay-1.0.0-macOS-arm64.pkg",
+          "sha256": "efb5e46ccca86db791ca317bfa2faa835a5b891eef3ecd373ac8c774dc07e9f5"
         },
         {
           "arch": "x64",
           "label": "Intel",
           "filename": "Relay-1.0.0-macOS-x64.pkg",
-          "buildVersion": "28"
+          "buildVersion": "28",
+          "url": "https://github.com/haiyangdeng/Relay/releases/download/v1.0.0-build.28/Relay-1.0.0-macOS-x64.pkg",
+          "sha256": "1f03754b3a579a4b7438c4a75a88ea63c145295cdf454c7c94076275bab8321f"
         }
-      ]
+      ],
+      "publishedAt": "2026-11-28"
     },
     {
       "version": "1.0.0-build.25",
